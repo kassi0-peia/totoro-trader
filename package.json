@@ -10,7 +10,7 @@
     "server": "node server/ibkr-server.js",
     "start": "concurrently -k -n SERVER,WEB -c cyan,magenta \"npm:server\" \"npm:dev\"",
     "serve": "vite build && node server/ibkr-server.js",
-    "serve:https": "vite build && TLS=1 node server/ibkr-server.js"
+    "serve:https": "vite build && TLS=1 IBKR_MD_TYPE=1 node server/ibkr-server.js"
   },
   "dependencies": {
     "@stoqey/ib": "^1.3.22",

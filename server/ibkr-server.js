@@ -41,6 +41,14 @@ const WS_PORT = parseInt(process.env.WS_PORT || '8787', 10);
 // 1=live, 2=frozen, 3=delayed, 4=delayed-frozen.
 const MARKET_DATA_TYPE = parseInt(process.env.IBKR_MD_TYPE || '3', 10);
 
+// Cold-start basis fallback: used ONLY overnight when no live-RTH basis has been
+// computed and none is persisted. ES-SPX front-quarter basis is a positive
+// premium (~+20). Deriving it from a single possibly-stale/delayed ES tick was
+// unreliable, so we use a fixed value (override with COLD_START_BASIS) until the
+// next RTH session computes it live. The SPX close is a reference anchor.
+const COLD_START_BASIS = process.env.COLD_START_BASIS != null ? parseFloat(process.env.COLD_START_BASIS) : 20;
+const COLD_START_SPX_CLOSE = process.env.COLD_START_SPX_CLOSE != null ? parseFloat(process.env.COLD_START_SPX_CLOSE) : 7519.12;
+
 const STRIKE_STEP = 5;
 const CHAIN_HALF_WIDTH = 10;
 const RECENTRE_THRESHOLD = 2;
@@ -458,24 +466,21 @@ function updateLiveBasis() {
   }
 }
 
-// Cold-start fallback: overnight with no frozen basis ever recorded. Anchor the
-// SPX-equivalent to the last SPX close and let ES movement ride on top.
+// Cold-start fallback: overnight with no live-RTH or persisted basis. Derive the
+// basis by anchoring the SPX-equivalent to the known SPX close (COLD_START_SPX_CLOSE)
+// at the first ES tick, then let ES movement ride on top. This self-adjusts to the
+// real ES level (correct on live data). Set COLD_START_BASIS to force a fixed value.
 function ensureOvernightBasis() {
   if (!session.rth && basis == null && esPrice != null) {
-    const ref = spxLastClose();
-    if (ref != null) {
-      basis = esPrice - ref;
-      basisEstimated = true;
-      basisFrozen = true;
-      saveBasis();
-      console.log(`[ibkr] no frozen basis; estimated ${basis.toFixed(2)} (ES ${esPrice} − SPX close ${ref})`);
-    }
+    basis = process.env.COLD_START_BASIS != null ? COLD_START_BASIS : esPrice - COLD_START_SPX_CLOSE;
+    basisEstimated = true;
+    basisFrozen = true;
+    if (spxPrice == null) spxPrice = COLD_START_SPX_CLOSE; // reference close
+    saveBasis();
+    console.log(
+      `[ibkr] cold-start basis = ${basis.toFixed(2)} (ES ${esPrice.toFixed(2)} − SPX close ${COLD_START_SPX_CLOSE}) -> SPX-equiv ${(esPrice - basis).toFixed(2)}. Live RTH calc will replace it.`
+    );
   }
-}
-
-function spxLastClose() {
-  if (spx.candles.length) return spx.candles[spx.candles.length - 1].close;
-  return spxPrice;
 }
 
 function shiftCandle(c, b) {
@@ -650,11 +655,13 @@ function scheduleBasisSave() {
 function loadBasis() {
   try {
     const d = JSON.parse(fs.readFileSync(BASIS_FILE, 'utf8'));
-    if (typeof d.basis === 'number') {
+    // Only trust a real RTH-derived basis. A persisted *estimate* must not pin
+    // the value — let the cold-start fallback re-fire until RTH computes it live.
+    if (typeof d.basis === 'number' && !d.basisEstimated) {
       basis = d.basis;
-      basisEstimated = !!d.basisEstimated;
+      basisEstimated = false;
       basisFrozen = true;
-      console.log(`[ibkr] loaded persisted basis ${basis.toFixed(2)}${basisEstimated ? ' (estimated)' : ''}`);
+      console.log(`[ibkr] loaded persisted RTH basis ${basis.toFixed(2)}`);
     }
   } catch {}
 }
