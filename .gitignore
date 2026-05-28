@@ -1,0 +1,12 @@
+node_modules/
+dist/
+
+# mkcert TLS material — never commit private keys
+server/certs/
+*.pem
+
+# runtime state
+server/.basis-cache.json
+
+# machine-local Claude Code settings
+.claude/settings.local.json

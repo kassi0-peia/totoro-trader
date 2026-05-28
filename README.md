@@ -1,0 +1,183 @@
+# TotoroTrader
+
+SPX 0DTE execution practice UI. Connects to Interactive Brokers TWS / IB Gateway
+for real SPX index prices and SPXW option-chain greeks. Falls back to a built-in
+simulator whenever TWS is not reachable, so the UI is always usable.
+
+## One-time TWS setup
+
+1. Install **TWS** or **IB Gateway** and log in to a paper account.
+2. `File → Global Configuration → API → Settings`:
+   - Enable **ActiveX and Socket Clients**
+   - **Socket port:** `7497` (paper) or `7496` (live)
+   - Untick **Read-Only API** if you plan to send orders later
+   - Add `127.0.0.1` to **Trusted IPs**
+3. Market data: SPX index requires a CBOE index subscription; SPXW options
+   require an OPRA subscription. Without entitlements the server falls back to
+   delayed data (`IBKR_MD_TYPE=3`, already the default).
+
+## Run
+
+```bash
+npm install
+npm start          # runs IBKR bridge + vite dev server together
+```
+
+Or in two terminals:
+
+```bash
+npm run server     # node server/ibkr-server.js  (TWS bridge + websocket)
+npm run dev        # vite, http://localhost:5173
+```
+
+The header subtitle shows **LIVE** when the bridge is connected to TWS, and
+**SIM** when it is not — the simulator silently takes over. The footer
+mirrors the same state.
+
+By default the bridge **auto-detects** the connection by probing
+`7497 → 4002 → 7496 → 4001` (TWS paper, Gateway paper, TWS live, Gateway live)
+and uses whichever is listening. Set `IBKR_PORT` to pin one explicitly.
+
+## Environment overrides
+
+| Var               | Default                | Notes                                            |
+| ----------------- | ---------------------- | ------------------------------------------------ |
+| `IBKR_HOST`       | `127.0.0.1`            | TWS / Gateway host                               |
+| `IBKR_PORT`       | auto-detect            | Pin to skip probing (e.g. `4002` for Gateway)    |
+| `IBKR_CLIENT_ID`  | `17`                   | Must be unique per TWS connection                |
+| `IBKR_MD_TYPE`    | `3`                    | 1=live, 2=frozen, 3=delayed, 4=delayed-frozen    |
+| `WS_PORT`         | `8787`                 | Browser websocket port                           |
+
+## Architecture
+
+```
+TWS/IB Gateway (:7497, TCP)
+     │   @stoqey/ib
+     ▼
+server/ibkr-server.js  ── 1-min candles from SPX + ES ticks,
+     │                     ES-SPX basis (live RTH / frozen overnight),
+     │                     session-driven source + SPXW expiry (server/session.js),
+     │                     ±10 SPXW strikes (calls + puts) → IBKR model greeks,
+     │                     serves built dist/ + WebSocket on one port (:8787)
+     │   WebSocket /ws   (dev: Vite proxies /ws → bridge)
+     ▼
+src/feed.js (useIbkrFeed hook)  ── connects to same-origin /ws
+     │   live={true}  → IBKR price + candles + greeks + source/expiry/basis
+     │   live={false} → simulator.js + options.js (Black–Scholes)
+     ▼
+src/App.jsx / Header.jsx (SPX vs ES/SPX label + target expiry date)
+```
+
+The simulator (`src/simulator.js`) and Black–Scholes greeks (`src/options.js`)
+are unchanged and serve as the offline fallback path.
+
+## Market sessions: SPX cash vs ES futures
+
+The bridge tracks the trading session in **US/Eastern** (`server/session.js`,
+unit-testable with an injected clock) and switches data source + option expiry:
+
+| ET window                     | Chart source | Header price        | Header label | Option expiry        |
+| ----------------------------- | ------------ | ------------------- | ------------ | -------------------- |
+| 09:30–16:15 (weekday, RTH)    | SPX cash     | SPX                 | `SPX`        | today                |
+| 16:15 → next 09:30 (overnight)| ES futures   | ES − basis (≈SPX)   | `ES/SPX`     | next trading day     |
+
+- **Expiry roll:** at 16:15 ET the SPXW chain subscription rolls from today's
+  expiry to the next trading day's (weekends skip to Monday; holidays are not
+  modelled). The target expiry date shows in the header next to the countdown.
+- **ES source overnight:** SPX cash stops printing after the close, so overnight
+  the chart shows the front-month **ES** future (resolved via `reqContractDetails`
+  on a CONTFUT — currently ESM6). ES candles are shifted to an SPX-equivalent
+  scale by subtracting the basis, so the y-axis and strikes still read in SPX
+  points. The header shows `ES/SPX` to indicate ES data on an SPX scale.
+- **Basis:** during RTH, `basis = ES − SPX` is recomputed on every tick. At 16:15
+  it freezes at the last RTH value and is applied to overnight ES ticks
+  (`SPX-equiv = ES − frozen basis`). The frozen basis is persisted to
+  `server/.basis-cache.json` so it survives an overnight restart; it drifts
+  slightly overnight, which is acceptable for strike selection. On a true cold
+  start with no persisted basis, it's estimated from the last SPX close.
+
+> Both feeds need market data from TWS/Gateway. If another IBKR session is logged
+> in from a different IP, the data farm returns `10197` / `162` and blocks live +
+> historical data for this session — close the other session (mobile/web/live TWS)
+> for data to flow. The app falls back to the simulator while data is unavailable.
+
+## Progressive Web App (install to home screen)
+
+The app ships a web manifest (`public/manifest.json`), a service worker
+(`public/sw.js`, registered in production builds only), and a Totoro app icon
+set. Icons are generated from `scripts/make-icons.py` — re-run it if you change
+the mascot:
+
+```bash
+python3 scripts/make-icons.py   # writes public/icon-*.png, apple-touch-icon, favicon
+```
+
+To install on a phone, serve the production build from the bridge. The bridge
+serves the built `dist/` **and** hosts the data WebSocket at `/ws` on the same
+port, so the app is a single origin — one port to open, one origin to whitelist,
+and the socket is same-origin (no insecure-WebSocket mixed-content block):
+
+```bash
+npm run serve          # = vite build && node server/ibkr-server.js
+# app + live feed at http://<host-ip>:8787/
+```
+
+Open port `8787` on the host firewall so the phone can reach it
+(`sudo ufw allow 8787/tcp`).
+
+- **iPhone (Safari):** browse to `http://<host-ip>:8787/`, then Share →
+  *Add to Home Screen*. Launches fullscreen standalone (driven by the
+  `apple-mobile-web-app-*` meta tags). Works over plain HTTP on the LAN;
+  safe-area insets keep the header/footer clear of the notch and home indicator.
+- **Android (Chrome):** the *Install app* prompt and the service worker require
+  a **secure context**. The recommended path is local HTTPS via mkcert (below).
+  A no-cert alternative is to whitelist the HTTP origin in
+  `chrome://flags/#unsafely-treat-insecure-origin-as-secure` (add
+  `http://<host-ip>:8787`, Enabled, relaunch) — but that's a per-device dev
+  workaround, whereas the cert gives a real install on any device that trusts it.
+
+### Local HTTPS with mkcert (recommended for Android)
+
+The bridge serves HTTPS + `wss` on the same port when TLS is enabled. A cert for
+`10.0.0.136` (+ `localhost`) is already generated at `server/certs/`; regenerate
+for a different LAN IP with:
+
+```bash
+mkcert -cert-file server/certs/totoro-cert.pem -key-file server/certs/totoro-key.pem <host-ip> localhost 127.0.0.1
+```
+
+Run the HTTPS server:
+
+```bash
+npm run serve:https     # = vite build && TLS=1 node server/ibkr-server.js
+# app + live feed at https://<host-ip>:8787/
+```
+
+(`TLS_CERT` / `TLS_KEY` env vars override the cert paths.)
+
+**Install the mkcert root CA on the phone** so it trusts the cert:
+
+1. Download the CA — browse to `https://<host-ip>:8787/rootCA.pem` (tap through
+   the one-time "not private" warning to download), or transfer the file at
+   `~/.local/share/mkcert/rootCA.pem` by USB/email. The root CA *private key*
+   (`rootCA-key.pem`) stays on the host and is never served.
+2. Android: **Settings → Security → Encryption & credentials → Install a
+   certificate → CA certificate** → pick the downloaded file. (Exact path varies
+   by Android version; search settings for "CA certificate".)
+3. Reopen `https://<host-ip>:8787/` — no warning. Then menu → **Install app**.
+
+To also trust the cert on this Linux host's own browsers, run `mkcert -install`
+(needs sudo + `libnss3-tools`). Not required for the phone.
+
+> Note: HTTPS mode and the dev `/ws` proxy don't mix — use `npm start` /
+> `npm run dev` (plain HTTP bridge) for desktop development, and
+> `npm run serve:https` for the installable HTTPS build.
+
+For desktop development, `npm run dev` (or `npm start` for bridge + dev
+together) serves on `:5173` and proxies `/ws` to the bridge, so the same
+same-origin frontend code works without a build.
+
+The service worker uses network-first for navigations (so a fresh deploy is
+picked up online) with the cached shell as the offline fallback, and
+cache-first for hashed static assets. Bump `VERSION` in `public/sw.js` to
+invalidate old caches.
