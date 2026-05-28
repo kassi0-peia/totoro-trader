@@ -1,6 +1,7 @@
 import React, { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { greeks, snapStrike } from './options.js';
 import { aggregateCandles } from './simulator.js';
+import { liveQuote } from './feed.js';
 
 const RIGHT_AXIS = 64;
 const BOTTOM_AXIS = 22;
@@ -55,7 +56,8 @@ export default function Chart({
   ivol,
   timeToExpiryYears,
   timeframe,
-  onRequestTrade
+  onRequestTrade,
+  greeksMap
 }) {
   const wrapRef = useRef(null);
   const canvasRef = useRef(null);
@@ -579,9 +581,10 @@ export default function Chart({
       const type = rawPrice > price ? 'call' : 'put';
       const strike = snapStrike(rawPrice, 5);
       const g = greeks({ S: price, K: strike, T: timeToExpiryYears, sigma: ivol, type });
-      setHover({ x, y, strike, type, greeks: g });
+      const q = liveQuote(greeksMap, strike, type);
+      setHover({ x, y, strike, type, greeks: g, ask: q?.ask, bid: q?.bid });
     },
-    [layout, view, tfCandles, yToPrice, price, ivol, timeToExpiryYears]
+    [layout, view, tfCandles, yToPrice, price, ivol, timeToExpiryYears, greeksMap]
   );
 
   // shared drag-move logic, used by mouse + single-finger touch
@@ -797,7 +800,11 @@ export default function Chart({
             </span>
             <span className="tt-strike">{hover.strike}</span>
           </div>
-          <div className="tt-row"><span>Premium</span><b>${hover.greeks.premium.toFixed(2)}</b></div>
+          {hover.ask != null ? (
+            <div className="tt-row tt-ask"><span>Ask</span><b>${hover.ask.toFixed(2)}</b></div>
+          ) : (
+            <div className="tt-row"><span>Premium</span><b>${hover.greeks.premium.toFixed(2)}</b></div>
+          )}
           <div className="tt-row"><span>Δ</span><b>{hover.greeks.delta.toFixed(3)}</b></div>
           <div className="tt-row"><span>Γ</span><b>{hover.greeks.gamma.toFixed(4)}</b></div>
           <div className="tt-row"><span>Θ</span><b>{hover.greeks.theta.toFixed(2)}</b></div>

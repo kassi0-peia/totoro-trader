@@ -35,6 +35,7 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent } = {}) {
       basis: null,
       basisFrozen: false,
       basisEstimated: false,
+      vix: { last: null, close: null },
       // account safety gate
       account: null,
       accountType: null,     // 'paper' | 'live' | null
@@ -145,6 +146,7 @@ function applyMessage(s, msg) {
       basis: msg.basis ?? null,
       basisFrozen: !!msg.basisFrozen,
       basisEstimated: !!msg.basisEstimated,
+      vix: msg.vix || s.vix,
       account: msg.account ?? null,
       accountType: msg.accountType ?? null,
       allowLive: !!msg.allowLive,
@@ -156,6 +158,10 @@ function applyMessage(s, msg) {
   if (msg.type === 'trade') {
     if (s.trades.some((t) => t.id === msg.trade.id)) return s;
     return { ...s, trades: [...s.trades, msg.trade] };
+  }
+
+  if (msg.type === 'vix') {
+    return { ...s, vix: { last: msg.last ?? null, close: msg.close ?? null } };
   }
 
   if (msg.type === 'status') {
@@ -188,7 +194,8 @@ function applyMessage(s, msg) {
     const next = new Map(s.greeksMap);
     next.set(key(msg.strike, msg.optionType), {
       strike: msg.strike, type: msg.optionType, premium: msg.premium,
-      delta: msg.delta, gamma: msg.gamma, theta: msg.theta, vega: msg.vega, iv: msg.iv
+      delta: msg.delta, gamma: msg.gamma, theta: msg.theta, vega: msg.vega, iv: msg.iv,
+      bid: msg.bid, ask: msg.ask
     });
     return { ...s, greeksMap: next };
   }
@@ -203,4 +210,11 @@ export function liveGreeks(greeksMap, strike, type) {
   const g = greeksMap.get(key(strike, type));
   if (!g || g.premium == null) return null;
   return g;
+}
+
+// Raw chain entry (bid/ask + greeks) regardless of whether the model premium has
+// arrived yet. Used for the live bid/ask display.
+export function liveQuote(greeksMap, strike, type) {
+  if (!greeksMap) return null;
+  return greeksMap.get(key(strike, type)) || null;
 }

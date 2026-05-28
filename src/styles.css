@@ -387,6 +387,32 @@ button {
 .ohlc-pair i + i,
 .ohlc-pair { margin-right: 0; }
 .ohlc-chg { font-weight: 600; }
+
+.tt-ask b { font-size: 13px; }
+
+.quote-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.quote-cell {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  background: var(--c-surfaceAlt);
+}
+.quote-cell span {
+  font-size: 9px;
+  letter-spacing: 0.16em;
+  color: var(--c-muted);
+}
+.quote-cell b {
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+}
 .ohlc-vol { color: var(--c-text); }
 .ohlc-vol i {
   font-style: normal;
@@ -865,6 +891,30 @@ button {
 }
 
 .chart-area { position: relative; }
+
+.quote-strip {
+  display: flex;
+  align-items: baseline;
+  gap: 18px;
+  padding: 8px 14px;
+  margin-bottom: 6px;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  flex-wrap: wrap;
+}
+.quote-strip .qs-atm { color: var(--c-muted); font-size: 12px; letter-spacing: 0.14em; }
+.qs-leg, .qs-vix { display: inline-flex; align-items: baseline; gap: 6px; }
+.qs-tag { font-size: 12px; }
+.qs-iv { font-size: 11px; font-weight: 500; color: var(--c-muted); }
+@media (max-width: 720px) {
+  .quote-strip { font-size: 12px; gap: 10px; padding: 7px 10px; }
+  .qs-iv { display: none; }
+}
 
 .fill-toast {
   position: absolute;
