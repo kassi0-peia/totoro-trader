@@ -89,12 +89,15 @@ unit-testable with an injected clock) and switches data source + option expiry:
   on a CONTFUT — currently ESM6). ES candles are shifted to an SPX-equivalent
   scale by subtracting the basis, so the y-axis and strikes still read in SPX
   points. The header shows `ES/SPX` to indicate ES data on an SPX scale.
-- **Basis:** during RTH, `basis = ES − SPX` is recomputed on every tick. At 16:15
-  it freezes at the last RTH value and is applied to overnight ES ticks
-  (`SPX-equiv = ES − frozen basis`). The frozen basis is persisted to
-  `server/.basis-cache.json` so it survives an overnight restart; it drifts
-  slightly overnight, which is acceptable for strike selection. On a true cold
-  start with no persisted basis, it's estimated from the last SPX close.
+- **Basis:** captured at **4:00 PM ET** as a *simultaneous* snapshot of live ES
+  minus live SPX (`basis = ES@16:00 − SPX@16:00`) — both feeds are live at the
+  cash close, so it's a true reading (not ES settlement at 4:15, and never a
+  current ES against a stale SPX close). That value is frozen and applied to every
+  overnight ES tick (`SPX-equiv = ES − frozen basis`), so overnight ES movement is
+  reflected on the SPX scale. The capture is persisted to `server/.basis-cache.json`
+  and survives restarts; it drifts slightly overnight, which is acceptable for
+  strike selection. On a cold start with no capture/persisted value, it falls back
+  to a fixed `COLD_START_BASIS` (default **+20**) until the next 4:00 capture.
 
 > Both feeds need market data from TWS/Gateway. If another IBKR session is logged
 > in from a different IP, the data farm returns `10197` / `162` and blocks live +
