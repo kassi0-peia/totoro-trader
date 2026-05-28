@@ -10,3 +10,6 @@ server/.basis-cache.json
 
 # machine-local Claude Code settings
 .claude/settings.local.json
+
+# generated basis-check reports
+basis-check-*.txt
