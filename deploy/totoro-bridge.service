@@ -1,0 +1,21 @@
+# Reference copy of the systemd USER service that runs the bridge persistently.
+# Deployed at ~/.config/systemd/user/totoro-bridge.service (see README "Run as a
+# service"). Absolute paths assume user `youruser` and repo at /home/youruser/totoro-trader;
+# adjust for other machines/users.
+[Unit]
+Description=TotoroTrader IBKR bridge (HTTPS + live data; serves app + /ws on :8787)
+
+[Service]
+Type=simple
+WorkingDirectory=/home/youruser/totoro-trader
+Environment=TLS=1
+Environment=IBKR_MD_TYPE=1
+ExecStart=/usr/bin/node /home/youruser/totoro-trader/server/ibkr-server.js
+Restart=always
+RestartSec=5
+# Append to the same log the check script greps; the bridge has its own reconnect loop.
+StandardOutput=append:/tmp/totoro-bridge.log
+StandardError=append:/tmp/totoro-bridge.log
+
+[Install]
+WantedBy=default.target

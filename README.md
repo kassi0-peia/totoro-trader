@@ -184,3 +184,36 @@ The service worker uses network-first for navigations (so a fresh deploy is
 picked up online) with the cached shell as the offline fallback, and
 cache-first for hashed static assets. Bump `VERSION` in `public/sw.js` to
 invalidate old caches.
+
+## Run as a service (systemd)
+
+To keep the bridge running across logouts/reboots (and auto-restart on crash),
+install it as a **systemd user service**. A reference unit is in
+`deploy/totoro-bridge.service` (absolute paths assume user `youruser` and repo at
+`/home/youruser/totoro-trader` — edit for your machine):
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp deploy/totoro-bridge.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now totoro-bridge   # start now + on login
+loginctl enable-linger "$USER"                # also start on boot, before login
+```
+
+The unit runs `TLS=1 IBKR_MD_TYPE=1 node server/ibkr-server.js` with
+`Restart=always`, so it supervises the bridge itself — no cron keepalive needed
+(and don't run one alongside it; they'll fight over port 8787). It logs to
+`/tmp/totoro-bridge.log`.
+
+Manage it:
+
+```bash
+systemctl --user status totoro-bridge
+systemctl --user restart totoro-bridge
+systemctl --user disable --now totoro-bridge   # stop + remove auto-start
+journalctl --user -u totoro-bridge -f          # live logs
+```
+
+> Requires a build first (`npm run build`) since the bridge serves `dist/`.
+> `Environment=IBKR_MD_TYPE=1` uses live data; change to `3` (delayed) in the
+> unit if your account isn't entitled to live CME data.
