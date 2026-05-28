@@ -6,7 +6,8 @@ import TradeHistory from './TradeHistory.jsx';
 import TradeModal from './TradeModal.jsx';
 import ThemePanel from './ThemePanel.jsx';
 import TimeframeBar from './TimeframeBar.jsx';
-import { useIbkrFeed, liveGreeks } from './feed.js';
+import QuoteStrip from './QuoteStrip.jsx';
+import { useIbkrFeed, liveGreeks, liveQuote } from './feed.js';
 import { greeks as bsGreeks, nearestOtmStrike } from './options.js';
 import { THEMES } from './themes.js';
 
@@ -150,7 +151,8 @@ export default function App() {
 
   const handleRequestTrade = ({ strike, type }) => {
     const g = resolveGreeks(strike, type);
-    setPending({ id: Date.now(), strike, type, greeks: g });
+    const q = liveQuote(feed.greeksMap, strike, type);
+    setPending({ id: Date.now(), strike, type, greeks: g, bid: q?.bid, ask: q?.ask });
   };
 
   const handleExecute = (qty) => {
@@ -250,6 +252,7 @@ export default function App() {
       <main className="main">
         <div className="main-inner">
           <TimeframeBar value={timeframe} onChange={setTimeframe} theme={theme} />
+          <QuoteStrip price={feed.price} greeksMap={feed.greeksMap} vix={feed.vix} theme={theme} />
           <div className="chart-area">
             <Chart
               candles={feed.candles}
@@ -260,6 +263,7 @@ export default function App() {
               timeToExpiryYears={T}
               timeframe={timeframe}
               onRequestTrade={handleRequestTrade}
+              greeksMap={feed.greeksMap}
             />
             {toast && (
               <div className={`fill-toast fill-${toast.kind}`} role="status">{toast.text}</div>

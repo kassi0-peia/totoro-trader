@@ -17,9 +17,12 @@ export default function TradeModal({ pending, theme, onCancel, onExecute, execut
   }, [onCancel, onExecute, qty, executionEnabled]);
 
   if (!pending) return null;
-  const { strike, type, greeks } = pending;
+  const { strike, type, greeks, bid, ask } = pending;
   const color = type === 'call' ? theme.callLine : theme.putLine;
-  const maxRisk = greeks.premium * 100 * qty;
+  const hasQuote = bid != null && ask != null;
+  const spread = hasQuote ? ask - bid : null;
+  // Market BUY pays the ask; estimate max risk off it when we have a live quote.
+  const maxRisk = (hasQuote ? ask : greeks.premium) * 100 * qty;
 
   return (
     <div className="modal-backdrop" onClick={onCancel}>
@@ -36,8 +39,16 @@ export default function TradeModal({ pending, theme, onCancel, onExecute, execut
           <span className="modal-exp">0DTE</span>
         </div>
 
+        {hasQuote && (
+          <div className="quote-row">
+            <div className="quote-cell"><span>Bid</span><b style={{ color: theme.loss }}>${bid.toFixed(2)}</b></div>
+            <div className="quote-cell"><span>Ask</span><b style={{ color: theme.profit }}>${ask.toFixed(2)}</b></div>
+            <div className="quote-cell"><span>Spread</span><b>${spread.toFixed(2)}</b></div>
+          </div>
+        )}
+
         <div className="greek-grid">
-          <div><span>Premium</span><b>${greeks.premium.toFixed(2)}</b></div>
+          <div><span>{hasQuote ? 'Model' : 'Premium'}</span><b>${greeks.premium.toFixed(2)}</b></div>
           <div><span>Δ Delta</span><b>{greeks.delta.toFixed(3)}</b></div>
           <div><span>Γ Gamma</span><b>{greeks.gamma.toFixed(4)}</b></div>
           <div><span>Θ Theta</span><b>{greeks.theta.toFixed(2)}</b></div>

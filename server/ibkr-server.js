@@ -67,6 +67,8 @@ const spx = { candles: [], edge: nextCandleEdge(Date.now()) };
 const es = { candles: [], edge: nextCandleEdge(Date.now()) };
 let spxPrice = null;
 let esPrice = null;
+let vixLast = null;   // VIX index level
+let vixClose = null;  // prior close (for the day change + color)
 
 // ES-SPX basis. Live during RTH, frozen otherwise.
 let basis = null;
@@ -366,20 +368,32 @@ function wireHandlers(api) {
     try { api.reqAllOpenOrders(); } catch {} // re-learn any pre-existing orders
     subscribeSpx();
     requestSpxHistory();
+    subscribeVix();
     resolveEs();          // contractDetails -> subscribe ES + history
     evaluateSession();    // establish currentExpiry (chain subscribes once a price arrives)
   });
 
   api.on(EventName.tickPrice, (tickerId, field, value) => {
     const s = subs.get(tickerId);
-    if (!s || !(value > 0)) return;
-    // 4=LAST, 9=CLOSE, 68=DELAYED_LAST, 75=DELAYED_CLOSE.
+    if (!s) return;
+    // 4=LAST, 9=CLOSE, 68=DELAYED_LAST, 75=DELAYED_CLOSE; 1/2=BID/ASK, 66/67=DELAYED_BID/ASK.
     if (s.kind === 'spx') {
+      if (!(value > 0)) return;
       if (field === 4 || field === 68) feedSpxTick(value);
       else if ((field === 9 || field === 75) && spxPrice == null) feedSpxTick(value);
     } else if (s.kind === 'es') {
+      if (!(value > 0)) return;
       if (field === 4 || field === 68) feedEsTick(value);
       else if ((field === 9 || field === 75) && esPrice == null) feedEsTick(value);
+    } else if (s.kind === 'option') {
+      const entry = chain.get(s.key);
+      if (!entry || entry.expiry !== currentExpiry || value < 0) return; // -1 = no quote
+      if (field === 1 || field === 66) { entry.bid = value; broadcast(chainPayload(entry)); }
+      else if (field === 2 || field === 67) { entry.ask = value; broadcast(chainPayload(entry)); }
+    } else if (s.kind === 'vix') {
+      if (!(value > 0)) return;
+      if (field === 4 || field === 68) { vixLast = value; broadcastVix(); }
+      else if (field === 9 || field === 75) { vixClose = value; broadcastVix(); }
     }
   });
 
@@ -399,13 +413,7 @@ function wireHandlers(api) {
       entry.theta = theta;
       entry.vega = vega;
       entry.iv = iv;
-      broadcast({
-        type: 'greeks',
-        strike: s.strike,
-        optionType: s.right === 'C' ? 'call' : 'put',
-        premium: optPrice,
-        delta, gamma, theta, vega, iv, undPrice
-      });
+      broadcast(chainPayload(entry));
     }
   );
 
@@ -459,6 +467,21 @@ function subscribeSpx() {
   } catch (e) {
     console.log('[ibkr] SPX reqMktData failed:', e.message);
   }
+}
+
+function subscribeVix() {
+  if (!ib) return;
+  const reqId = reqSeq++;
+  subs.set(reqId, { kind: 'vix' });
+  try {
+    ib.reqMktData(reqId, { symbol: 'VIX', secType: 'IND', exchange: 'CBOE', currency: 'USD' }, '', false, false, []);
+  } catch (e) {
+    console.log('[ibkr] VIX reqMktData failed:', e.message);
+  }
+}
+
+function broadcastVix() {
+  broadcast({ type: 'vix', last: vixLast, close: vixClose });
 }
 
 function requestSpxHistory() {
@@ -812,14 +835,28 @@ function broadcast(msg) {
   }
 }
 
+// Full current state of a chain entry (greeks + bid/ask). Sent on any update;
+// the frontend keeps the latest per strike.
+function chainPayload(e) {
+  return {
+    type: 'greeks',
+    strike: e.strike,
+    optionType: e.right === 'C' ? 'call' : 'put',
+    premium: e.premium, delta: e.delta, gamma: e.gamma, theta: e.theta, vega: e.vega, iv: e.iv,
+    bid: e.bid, ask: e.ask
+  };
+}
+
 function snapshotMsg() {
   const greeks = [];
   for (const e of chain.values()) {
-    if (e.premium == null || e.expiry !== currentExpiry) continue;
+    if (e.expiry !== currentExpiry) continue;
+    if (e.premium == null && e.bid == null && e.ask == null) continue;
     greeks.push({
       strike: e.strike,
       type: e.right === 'C' ? 'call' : 'put',
-      premium: e.premium, delta: e.delta, gamma: e.gamma, theta: e.theta, vega: e.vega, iv: e.iv
+      premium: e.premium, delta: e.delta, gamma: e.gamma, theta: e.theta, vega: e.vega, iv: e.iv,
+      bid: e.bid, ask: e.ask
     });
   }
   return {
@@ -835,6 +872,7 @@ function snapshotMsg() {
     basisFrozen,
     basisEstimated,
     rth: session.rth,
+    vix: { last: vixLast, close: vixClose },
     account,
     accountType,
     allowLive: ALLOW_LIVE,
