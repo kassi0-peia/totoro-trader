@@ -26,7 +26,7 @@ function formatExpiry(expiry, now) {
   return `${MONTHS[d.getMonth()]} ${d.getDate()}`;
 }
 
-export default function Header({ price, lastPrice, theme, mood, earsUp, pulse, onToggleSettings, now, live, source = 'SPX', expiry = null }) {
+export default function Header({ price, lastPrice, theme, mood, earsUp, pulse, onToggleSettings, now, live, source = 'SPX', expiry = null, account = null, accountType = null, allowLive = false }) {
   const change = price - lastPrice;
   const changeColor = change >= 0 ? theme.profit : theme.loss;
   const { h, m } = expiryCountdown(now);
@@ -34,6 +34,12 @@ export default function Header({ price, lastPrice, theme, mood, earsUp, pulse, o
   const feedLabel = live ? 'LIVE' : 'SIM';
   const sourceLabel = source === 'ES' ? 'ES/SPX' : 'SPX';
   const expiryDate = formatExpiry(expiry, now);
+
+  // Account badge: green PAPER, yellow LIVE (enabled), red LIVE (detected/disabled).
+  const acctLabel = accountType === 'paper' ? 'PAPER' : accountType === 'live' ? 'LIVE' : '—';
+  const acctColor = accountType === 'paper' ? theme.profit
+    : accountType === 'live' ? (allowLive ? '#e0c34a' : theme.loss)
+    : theme.muted;
 
   return (
     <header className="header">
@@ -55,6 +61,10 @@ export default function Header({ price, lastPrice, theme, mood, earsUp, pulse, o
       </div>
 
       <div className="header-right">
+        <div className="acct-block" title={account ? `IBKR account ${account}` : 'no account connected'}>
+          <span className="acct-badge" style={{ color: '#0a0c12', background: acctColor }}>{acctLabel}</span>
+          <span className="acct-id" style={{ color: theme.muted }}>{account || (live ? '…' : 'no acct')}</span>
+        </div>
         <div className="expiry-block">
           <div className="expiry-label">EXPIRY<span className="expiry-date"> · {expiryDate}</span></div>
           <div className="expiry-time">
