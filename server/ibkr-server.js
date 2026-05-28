@@ -18,7 +18,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { IBApi, EventName } from '@stoqey/ib';
 import { WebSocketServer } from 'ws';
-import { computeSession } from './session.js';
+import { computeSession, etParts, ymd } from './session.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_DIR = path.resolve(__dirname, '..', 'dist');
@@ -41,13 +41,12 @@ const WS_PORT = parseInt(process.env.WS_PORT || '8787', 10);
 // 1=live, 2=frozen, 3=delayed, 4=delayed-frozen.
 const MARKET_DATA_TYPE = parseInt(process.env.IBKR_MD_TYPE || '3', 10);
 
-// Cold-start basis fallback: used ONLY overnight when no live-RTH basis has been
-// computed and none is persisted. ES-SPX front-quarter basis is a positive
-// premium (~+20). Deriving it from a single possibly-stale/delayed ES tick was
-// unreliable, so we use a fixed value (override with COLD_START_BASIS) until the
-// next RTH session computes it live. The SPX close is a reference anchor.
+// The authoritative basis is captured at 4:00 PM ET (BASIS_CAPTURE_MIN) as a
+// SIMULTANEOUS snapshot of live ES minus live SPX, then frozen and applied to all
+// overnight ES ticks. COLD_START_BASIS is only the fallback when the server starts
+// overnight without a captured/persisted basis (tonight: +20, ES≈7540 − SPX≈7520).
 const COLD_START_BASIS = process.env.COLD_START_BASIS != null ? parseFloat(process.env.COLD_START_BASIS) : 20;
-const COLD_START_SPX_CLOSE = process.env.COLD_START_SPX_CLOSE != null ? parseFloat(process.env.COLD_START_SPX_CLOSE) : 7519.12;
+const BASIS_CAPTURE_MIN = 16 * 60; // 4:00 PM ET — when SPX cash settles and both feeds are live
 
 const STRIKE_STEP = 5;
 const CHAIN_HALF_WIDTH = 10;
@@ -66,8 +65,8 @@ let esPrice = null;
 // ES-SPX basis. Live during RTH, frozen otherwise.
 let basis = null;
 let basisFrozen = true;
-let basisEstimated = false; // true when derived from a cold-start fallback, not a real RTH session
-let basisSaveTimer = null;
+let basisEstimated = false; // true when from the cold-start fallback, not a real 4:00 capture
+let basisCaptureDate = null; // YYYYMMDD of the day we captured the 4:00 basis
 
 let session = computeSession();
 let currentExpiry = null; // SPXW expiry the chain is currently subscribed to
@@ -436,7 +435,6 @@ function feedSeries(series, price) {
 function feedSpxTick(price) {
   spxPrice = price;
   const candle = feedSeries(spx, price);
-  updateLiveBasis();
   if (session.source === 'SPX') {
     broadcast({ type: 'tick', source: 'SPX', price: spxPrice, candle });
   }
@@ -446,7 +444,6 @@ function feedSpxTick(price) {
 function feedEsTick(price) {
   esPrice = price;
   const candle = feedSeries(es, price);
-  updateLiveBasis();
   ensureOvernightBasis();
   if (session.source === 'ES') {
     const b = basis ?? 0;
@@ -455,31 +452,37 @@ function feedEsTick(price) {
   maybeRecenterChain(displayPrice());
 }
 
-// Live basis: only while both legs update during RTH. This naturally "freezes"
-// at the last RTH value once 16:15 passes (we simply stop updating it).
-function updateLiveBasis() {
-  if (session.rth && spxPrice != null && esPrice != null) {
+// Authoritative basis: a SIMULTANEOUS snapshot of live ES and live SPX taken at
+// 4:00 PM ET. Both feeds are live at the cash close, so this is a true ES−SPX
+// reading (not ES settlement at 4:15, and not ES-vs-stale-SPX-close). Captured
+// once per day; frozen and applied to every overnight ES tick. Evaluated on the
+// 5s session timer, so it fires within a few seconds of 4:00.
+function captureCloseBasis() {
+  const e = etParts();
+  const mins = e.hh * 60 + e.mm;
+  const today = ymd(e.y, e.mo, e.d);
+  // session.rth is true only on weekdays in [09:30, 16:15); gate to the close window.
+  if (session.rth && mins >= BASIS_CAPTURE_MIN && basisCaptureDate !== today &&
+      esPrice != null && spxPrice != null) {
     basis = esPrice - spxPrice;
-    basisFrozen = false;
+    basisFrozen = true;
     basisEstimated = false;
-    scheduleBasisSave();
+    basisCaptureDate = today;
+    saveBasis();
+    console.log(`[ibkr] 4:00 PM basis captured = ${basis.toFixed(2)} (ES ${esPrice.toFixed(2)} − SPX ${spxPrice.toFixed(2)}, simultaneous)`);
   }
 }
 
-// Cold-start fallback: overnight with no live-RTH or persisted basis. Derive the
-// basis by anchoring the SPX-equivalent to the known SPX close (COLD_START_SPX_CLOSE)
-// at the first ES tick, then let ES movement ride on top. This self-adjusts to the
-// real ES level (correct on live data). Set COLD_START_BASIS to force a fixed value.
+// Cold-start fallback: server started overnight with no 4:00 capture and no
+// persisted basis. Use the fixed COLD_START_BASIS (the ES−SPX premium at the
+// last close) and apply it to live ES. Replaced by tomorrow's 4:00 capture.
 function ensureOvernightBasis() {
   if (!session.rth && basis == null && esPrice != null) {
-    basis = process.env.COLD_START_BASIS != null ? COLD_START_BASIS : esPrice - COLD_START_SPX_CLOSE;
+    basis = COLD_START_BASIS;
     basisEstimated = true;
     basisFrozen = true;
-    if (spxPrice == null) spxPrice = COLD_START_SPX_CLOSE; // reference close
     saveBasis();
-    console.log(
-      `[ibkr] cold-start basis = ${basis.toFixed(2)} (ES ${esPrice.toFixed(2)} − SPX close ${COLD_START_SPX_CLOSE}) -> SPX-equiv ${(esPrice - basis).toFixed(2)}. Live RTH calc will replace it.`
-    );
+    console.log(`[ibkr] cold-start basis = +${basis} (no 4:00 capture / persisted basis yet). SPX-equiv = ES − ${basis}. Tomorrow's 4:00 capture replaces it.`);
   }
 }
 
@@ -566,14 +569,10 @@ function evaluateSession() {
   const next = computeSession();
   const prevSource = session.source;
   const prevExpiry = session.expiry;
-  const wasRth = session.rth;
   session = next;
 
-  if (wasRth && !next.rth) {
-    basisFrozen = true;
-    saveBasis();
-    console.log(`[ibkr] RTH closed — froze basis at ${basis != null ? basis.toFixed(2) : 'n/a'}`);
-  }
+  // Capture the authoritative basis at 4:00 PM (before the 4:15 source flip).
+  captureCloseBasis();
 
   if (next.expiry !== currentExpiry) {
     console.log(`[ibkr] expiry roll -> ${next.expiry}`);
@@ -647,21 +646,16 @@ function saveBasis() {
   } catch {}
 }
 
-function scheduleBasisSave() {
-  if (basisSaveTimer) return;
-  basisSaveTimer = setTimeout(() => { basisSaveTimer = null; saveBasis(); }, 60_000);
-}
-
 function loadBasis() {
   try {
     const d = JSON.parse(fs.readFileSync(BASIS_FILE, 'utf8'));
-    // Only trust a real RTH-derived basis. A persisted *estimate* must not pin
-    // the value — let the cold-start fallback re-fire until RTH computes it live.
+    // Only trust a real 4:00 capture. A persisted *estimate* (cold-start) must not
+    // pin the value — let the fallback re-fire until the next 4:00 capture.
     if (typeof d.basis === 'number' && !d.basisEstimated) {
       basis = d.basis;
       basisEstimated = false;
       basisFrozen = true;
-      console.log(`[ibkr] loaded persisted RTH basis ${basis.toFixed(2)}`);
+      console.log(`[ibkr] loaded persisted 4:00 basis ${basis.toFixed(2)}`);
     }
   } catch {}
 }
