@@ -23,6 +23,7 @@ import { computeSession, etParts, ymd } from './session.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_DIR = path.resolve(__dirname, '..', 'dist');
 const BASIS_FILE = path.join(__dirname, '.basis-cache.json');
+const TRADES_FILE = path.join(__dirname, '.trades.json');
 
 // HTTPS is opt-in (TLS=1 or explicit TLS_CERT/TLS_KEY) so the default HTTP mode
 // keeps the dev /ws proxy and the Chrome-flag install path working unchanged.
@@ -40,6 +41,11 @@ const WS_PORT = parseInt(process.env.WS_PORT || '8787', 10);
 
 // 1=live, 2=frozen, 3=delayed, 4=delayed-frozen.
 const MARKET_DATA_TYPE = parseInt(process.env.IBKR_MD_TYPE || '3', 10);
+
+// SAFETY: execution is paper-only unless ALLOW_LIVE=true is explicitly set.
+// Paper accounts (id starts with 'DU') can always execute; a live account
+// requires ALLOW_LIVE=true or all order placement is refused.
+const ALLOW_LIVE = process.env.ALLOW_LIVE === 'true';
 
 // The authoritative basis is captured at 4:00 PM ET (BASIS_CAPTURE_MIN) as a
 // SIMULTANEOUS snapshot of live ES minus live SPX, then frozen and applied to all
@@ -79,6 +85,15 @@ const chain = new Map();
 let chainCenter = null;
 let reqSeq = 100;
 
+// Account safety + order execution state.
+let account = null;             // e.g. "DU1234567"
+let accountType = null;         // 'paper' | 'live' | null (unknown)
+let executionEnabled = false;   // gated by account type + ALLOW_LIVE
+const orders = new Map();        // orderId -> { clientRef, action, strike, right, qty, expiry, status, filled, avgFillPrice }
+
+let trades = [];                 // today's fills (blotter): { id, ts, action, strike, right, expiry, qty, price }
+let tradesDate = null;           // ET YYYYMMDD the trades array belongs to
+
 let ib = null;
 let connectedPort = null;
 let connecting = false;
@@ -86,6 +101,7 @@ let mktDataTypeSent = false;
 let warnedCompeting = false;
 
 loadBasis();
+loadTrades();
 
 // ── HTTP(S) + WebSocket server ────────────────────────────────────────────────
 
@@ -118,6 +134,16 @@ function createServer() {
 
 wss.on('connection', (ws) => {
   ws.send(JSON.stringify(snapshotMsg()));
+  ws.on('message', (data) => {
+    let msg;
+    try { msg = JSON.parse(data); } catch { return; }
+    if (!msg) return;
+    if (msg.type === 'order') handleOrderRequest(ws, msg);
+    else if (msg.type === 'cancel') handleCancel(ws, msg);
+    else if (msg.type === 'cancelAll') {
+      if (ib && connected) { try { ib.reqGlobalCancel(); console.log('[ibkr] global cancel requested'); } catch (e) { console.log('cancelAll failed', e.message); } }
+    }
+  });
 });
 
 const MIME = {
@@ -216,6 +242,9 @@ async function pickPort() {
   return null;
 }
 
+// Hard order rejections (everything else on the order error channel is a warning).
+const ORDER_REJECT_CODES = new Set([201, 202, 203, 321, 110, 161, 463]);
+
 function wireHandlers(api) {
   const QUIET_CODES = new Set([10090, 10167]);
   api.on(EventName.error, (err, code, reqId) => {
@@ -225,6 +254,24 @@ function wireHandlers(api) {
       if (!warnedCompeting) {
         warnedCompeting = true;
         console.log('[ibkr] 10197: another live session holds the market-data line; using delayed data. Close the other IBKR session (mobile/web/live TWS) for live ticks.');
+      }
+      return;
+    }
+    // Order-related messages arrive with reqId = the orderId. IBKR sends both hard
+    // rejections AND non-fatal warnings (e.g. 399 "held until the open") on this
+    // channel — only the former should fail the order; orderStatus is the source
+    // of truth for live state.
+    if (orders.has(reqId)) {
+      const o = orders.get(reqId);
+      const reason = String(err?.message ?? err);
+      const rejected = ORDER_REJECT_CODES.has(code) || code >= 10000;
+      if (rejected) {
+        o.status = 'error';
+        console.log(`[ibkr] order ${reqId} (${o.action} ${o.strike}${o.right}) REJECTED ${code}: ${reason}`);
+        broadcast({ type: 'orderError', clientRef: o.clientRef, orderId: reqId, code, reason });
+      } else {
+        console.log(`[ibkr] order ${reqId} (${o.action} ${o.strike}${o.right}) warning ${code}: ${reason}`);
+        broadcast({ type: 'orderWarning', clientRef: o.clientRef, orderId: reqId, code, reason });
       }
       return;
     }
@@ -238,6 +285,56 @@ function wireHandlers(api) {
     console.log('[ibkr] socket connected, waiting for handshake');
   });
 
+  // Account list arrives on connect; the first account drives the safety gate.
+  api.on(EventName.managedAccounts, (accountsList) => {
+    const first = String(accountsList || '').split(',')[0].trim();
+    if (first) setAccount(first);
+  });
+
+  // Re-learn orders that already exist on IBKR (e.g. after a bridge restart) so
+  // they can still be tracked/cancelled. Our own orders are already in the map.
+  api.on(EventName.openOrder, (orderId, contract, order, orderState) => {
+    if (!orders.has(orderId)) {
+      orders.set(orderId, {
+        clientRef: `recovered-${orderId}`,
+        action: order?.action,
+        strike: contract?.strike,
+        right: contract?.right,
+        expiry: String(contract?.lastTradeDateOrContractMonth || '').slice(0, 8),
+        qty: order?.totalQuantity,
+        status: orderState?.status || 'open',
+        filled: 0,
+        avgFillPrice: 0
+      });
+      console.log(`[ibkr] recovered open order ${orderId}: ${order?.action} ${contract?.strike}${contract?.right} (${orderState?.status})`);
+    }
+  });
+
+  api.on(EventName.orderStatus, (orderId, status, filled, remaining, avgFillPrice) => {
+    const o = orders.get(orderId);
+    if (!o) return;
+    o.status = status;
+    o.filled = filled;
+    o.avgFillPrice = avgFillPrice;
+    broadcast({
+      type: 'fill',
+      clientRef: o.clientRef,
+      orderId,
+      action: o.action,
+      strike: o.strike,
+      right: o.right,
+      expiry: o.expiry,
+      status,
+      filled,
+      remaining,
+      avgFillPrice
+    });
+    if (status === 'Filled' && remaining === 0) {
+      recordTrade(orderId, o, filled, avgFillPrice);
+      console.log(`[ibkr] FILLED order ${orderId}: ${o.action} ${filled} ${o.strike}${o.right} @ ${avgFillPrice}`);
+    }
+  });
+
   api.on(EventName.disconnected, () => {
     console.log('[ibkr] socket disconnected');
     setStatus(false);
@@ -245,6 +342,12 @@ function wireHandlers(api) {
     ib = null;
     connectedPort = null;
     mktDataTypeSent = false;
+    // Drop the safety gate until a fresh account is confirmed.
+    account = null;
+    accountType = null;
+    executionEnabled = false;
+    orders.clear();
+    broadcastAccount();
   });
 
   api.on(EventName.nextValidId, (id) => {
@@ -259,6 +362,8 @@ function wireHandlers(api) {
         console.log('[ibkr] reqMarketDataType failed:', e.message);
       }
     }
+    try { api.reqManagedAccts(); } catch {}
+    try { api.reqAllOpenOrders(); } catch {} // re-learn any pre-existing orders
     subscribeSpx();
     requestSpxHistory();
     resolveEs();          // contractDetails -> subscribe ES + history
@@ -605,6 +710,101 @@ function setStatus(s) {
   broadcast({ type: 'status', connected });
 }
 
+// ── Account safety ──────────────────────────────────────────────────────────
+
+function setAccount(id) {
+  if (account === id) return;
+  account = id;
+  accountType = id.startsWith('DU') ? 'paper' : 'live';
+  // Paper can always execute; live requires the explicit ALLOW_LIVE=true opt-in.
+  executionEnabled = accountType === 'paper' || ALLOW_LIVE;
+  const banner =
+    accountType === 'live' && !ALLOW_LIVE ? 'LIVE ACCOUNT DETECTED — EXECUTION DISABLED'
+    : accountType === 'live' && ALLOW_LIVE ? 'LIVE TRADING — REAL MONEY'
+    : null;
+  console.log(`[ibkr] account ${id} (${accountType}); ALLOW_LIVE=${ALLOW_LIVE}; execution ${executionEnabled ? 'ENABLED' : 'DISABLED'}${banner ? ' — ' + banner : ''}`);
+  broadcastAccount();
+}
+
+function accountMsg(type) {
+  return {
+    type,
+    account,
+    accountType,
+    allowLive: ALLOW_LIVE,
+    executionEnabled
+  };
+}
+
+function broadcastAccount() {
+  broadcast(accountMsg('account'));
+}
+
+// ── Order execution ───────────────────────────────────────────────────────
+
+function spxwContract(strike, right, expiry) {
+  return {
+    symbol: 'SPX', secType: 'OPT', exchange: 'SMART', currency: 'USD',
+    lastTradeDateOrContractMonth: expiry, strike, right,
+    multiplier: '100', tradingClass: 'SPXW'
+  };
+}
+
+function handleOrderRequest(ws, msg) {
+  const send = (m) => { if (ws.readyState === 1) ws.send(JSON.stringify(m)); };
+  const clientRef = msg.clientRef;
+  const reject = (reason) => send({ type: 'orderAck', clientRef, accepted: false, reason });
+
+  if (!executionEnabled) {
+    const why = accountType === 'live' ? 'live account and ALLOW_LIVE is not set' : 'no executable account connected';
+    return reject(`execution disabled (${why})`);
+  }
+  if (!ib || !connected) return reject('IBKR not connected');
+
+  const action = msg.action === 'SELL' ? 'SELL' : 'BUY';
+  const right = msg.right === 'P' ? 'P' : 'C';
+  const strike = Number(msg.strike);
+  const qty = Math.max(1, Math.min(99, parseInt(msg.qty, 10) || 0));
+  const expiry = /^\d{8}$/.test(String(msg.expiry || '')) ? String(msg.expiry) : currentExpiry;
+  if (!(strike > 0) || !qty || !expiry) return reject('invalid order (strike/qty/expiry)');
+
+  const orderId = reqSeq++;
+  const order = {
+    action,
+    orderType: 'MKT',
+    totalQuantity: qty,
+    tif: 'DAY',
+    transmit: true,
+    account,
+    // SPXW trades the CBOE overnight session (~8:15pm–9:15am ET); without this an
+    // order placed outside RTH would be held until the regular open.
+    outsideRth: true
+  };
+  orders.set(orderId, { clientRef, action, strike, right, expiry, qty, status: 'submitted', filled: 0, avgFillPrice: 0 });
+  try {
+    ib.placeOrder(orderId, spxwContract(strike, right, expiry), order);
+    console.log(`[ibkr] placed ${action} MKT ${qty} SPXW ${strike}${right} ${expiry} (order ${orderId})`);
+    send({ type: 'orderAck', clientRef, orderId, accepted: true });
+  } catch (e) {
+    orders.delete(orderId);
+    reject(`placeOrder failed: ${e.message}`);
+  }
+}
+
+function handleCancel(ws, msg) {
+  const send = (m) => { if (ws.readyState === 1) ws.send(JSON.stringify(m)); };
+  const orderId = parseInt(msg.orderId, 10);
+  if (!ib || !connected) return send({ type: 'cancelAck', orderId, ok: false, reason: 'not connected' });
+  if (!orderId) return send({ type: 'cancelAck', ok: false, reason: 'no orderId' });
+  try {
+    ib.cancelOrder(orderId, '');
+    console.log(`[ibkr] cancel requested for order ${orderId}`);
+    send({ type: 'cancelAck', orderId, ok: true });
+  } catch (e) {
+    send({ type: 'cancelAck', orderId, ok: false, reason: e.message });
+  }
+}
+
 function broadcast(msg) {
   const data = JSON.stringify(msg);
   for (const ws of wss.clients) {
@@ -634,7 +834,12 @@ function snapshotMsg() {
     basis,
     basisFrozen,
     basisEstimated,
-    rth: session.rth
+    rth: session.rth,
+    account,
+    accountType,
+    allowLive: ALLOW_LIVE,
+    executionEnabled,
+    trades
   };
 }
 
@@ -645,6 +850,44 @@ function saveBasis() {
     fs.writeFileSync(BASIS_FILE, JSON.stringify({ basis, basisEstimated, ts: Date.now() }));
   } catch {}
 }
+
+// ── Trade blotter (today's fills) ───────────────────────────────────────────
+
+function todayET() {
+  const e = etParts();
+  return ymd(e.y, e.mo, e.d);
+}
+
+function recordTrade(orderId, o, filled, avgFillPrice) {
+  const today = todayET();
+  if (today !== tradesDate) { tradesDate = today; trades = []; } // daily roll
+  if (trades.some((t) => t.id === orderId)) return; // dedupe (orderStatus can repeat)
+  const trade = {
+    id: orderId, ts: Date.now(), action: o.action, strike: o.strike,
+    right: o.right, expiry: o.expiry, qty: filled, price: avgFillPrice
+  };
+  trades.push(trade);
+  if (trades.length > 1000) trades = trades.slice(-1000);
+  saveTrades();
+  broadcast({ type: 'trade', trade });
+}
+
+function saveTrades() {
+  try { fs.writeFileSync(TRADES_FILE, JSON.stringify({ date: tradesDate, trades })); } catch {}
+}
+
+function loadTrades() {
+  tradesDate = todayET();
+  try {
+    const d = JSON.parse(fs.readFileSync(TRADES_FILE, 'utf8'));
+    if (d.date === tradesDate && Array.isArray(d.trades)) {
+      trades = d.trades;
+      console.log(`[ibkr] loaded ${trades.length} trade(s) for ${tradesDate}`);
+    }
+  } catch {}
+}
+
+// ── Basis persistence ──────────────────────────────────────────────────────
 
 function loadBasis() {
   try {

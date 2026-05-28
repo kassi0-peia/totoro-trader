@@ -17,6 +17,23 @@ function fmtTime(t) {
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
 }
 
+// "Nice" axis steps (1-2.5-5 sequence) so gridlines land on round prices
+// (… 2.5, 5, 10, 25, 50, 100 …) instead of arbitrary values like 7511.5.
+const TICK_STEPS = [0.25, 0.5, 1, 2.5, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000];
+function niceStep(raw) {
+  for (const s of TICK_STEPS) if (s >= raw) return s;
+  return TICK_STEPS[TICK_STEPS.length - 1];
+}
+function priceDecimals(step) {
+  if (Number.isInteger(step)) return 0;
+  return step >= 1 ? 1 : 2;
+}
+function fmtVol(v) {
+  if (v >= 1e6) return (v / 1e6).toFixed(2) + 'M';
+  if (v >= 1e3) return (v / 1e3).toFixed(1) + 'k';
+  return Math.round(v).toString();
+}
+
 const MIN_VISIBLE = 14;
 const MAX_VISIBLE = 240;
 const DEFAULT_VISIBLE = 60;
@@ -46,6 +63,7 @@ export default function Chart({
   const [size, setSize] = useState({ w: 800, h: 480 });
   const [hover, setHover] = useState(null); // { x, y, strike, type, greeks }
   const [markerHover, setMarkerHover] = useState(null); // { x, y, position, kind }
+  const [hoverIdx, setHoverIdx] = useState(null); // tfCandles index under cursor (for OHLC legend)
   const [visibleCount, setVisibleCount] = useState(DEFAULT_VISIBLE);
   const [viewOffset, setViewOffset] = useState(0); // candles back from the live edge
   const pinchRef = useRef(null); // { startDist, startVisible }
@@ -248,19 +266,23 @@ export default function Chart({
     ctx.lineWidth = 1;
     ctx.font = '11px "JetBrains Mono", monospace';
 
-    // horizontal grid + axis labels
-    const gridSteps = 6;
+    // horizontal grid + axis labels on "nice" price increments
+    const pStep = niceStep((view.hi - view.lo) / 6);
+    const pDec = priceDecimals(pStep);
     ctx.textBaseline = 'middle';
     ctx.textAlign = 'left';
-    for (let i = 0; i <= gridSteps; i++) {
-      const p = view.lo + ((view.hi - view.lo) * i) / gridSteps;
+    const firstK = Math.ceil(view.lo / pStep);
+    const lastK = Math.floor(view.hi / pStep);
+    for (let k = firstK; k <= lastK; k++) {
+      const p = k * pStep;
       const y = priceToY(p);
+      ctx.strokeStyle = theme.grid;
       ctx.beginPath();
       ctx.moveTo(0, y + 0.5);
       ctx.lineTo(layout.chartW, y + 0.5);
       ctx.stroke();
       ctx.fillStyle = theme.muted;
-      ctx.fillText(fmtPrice(p), layout.chartW + 6, y);
+      ctx.fillText(p.toFixed(pDec), layout.chartW + 6, y);
     }
 
     // vertical grid every ~8 slots; only label slots with real candles
@@ -525,15 +547,19 @@ export default function Chart({
   const updateHover = useCallback(
     (clientX, clientY) => {
       const canvas = canvasRef.current;
-      if (!canvas || !layout) return;
+      if (!canvas || !layout || !view) return;
       const rect = canvas.getBoundingClientRect();
       const x = clientX - rect.left;
       const y = clientY - rect.top;
       if (x < 0 || x > layout.chartW || y < layout.priceTop || y > layout.volBot) {
         setHover(null);
         setMarkerHover(null);
+        setHoverIdx(null);
         return;
       }
+      // OHLC legend: candle (tfCandles index) under the cursor
+      const di = view.baseIdx + Math.floor(x / layout.candleW);
+      setHoverIdx(di >= 0 && di < tfCandles.length ? di : null);
       // marker hit-test first
       const hits = markerHitsRef.current;
       for (let i = hits.length - 1; i >= 0; i--) {
@@ -555,7 +581,7 @@ export default function Chart({
       const g = greeks({ S: price, K: strike, T: timeToExpiryYears, sigma: ivol, type });
       setHover({ x, y, strike, type, greeks: g });
     },
-    [layout, yToPrice, price, ivol, timeToExpiryYears]
+    [layout, view, tfCandles, yToPrice, price, ivol, timeToExpiryYears]
   );
 
   // shared drag-move logic, used by mouse + single-finger touch
@@ -632,6 +658,7 @@ export default function Chart({
   const handlePointerLeave = () => {
     setHover(null);
     setMarkerHover(null);
+    setHoverIdx(null);
   };
 
   const handleClick = (clientX, clientY) => {
@@ -672,8 +699,32 @@ export default function Chart({
     }
   };
 
+  // OHLCV legend data: hovered candle, else the latest one (TradingView-style).
+  const ohlc = (() => {
+    if (!tfCandles.length) return null;
+    const di = hoverIdx != null ? hoverIdx : tfCandles.length - 1;
+    const c = tfCandles[di];
+    if (!c) return null;
+    const prev = tfCandles[di - 1];
+    const base = prev ? prev.close : c.open;
+    const chg = c.close - base;
+    const chgPct = base ? (chg / base) * 100 : 0;
+    return { c, chg, chgPct, up: c.close >= c.open };
+  })();
+
   return (
     <div className="chart-wrap" ref={wrapRef}>
+      {ohlc && (
+        <div className="ohlc-legend">
+          <span className="ohlc-pair" style={{ color: ohlc.up ? theme.up : theme.down }}>
+            <i>O</i>{ohlc.c.open.toFixed(2)} <i>H</i>{ohlc.c.high.toFixed(2)} <i>L</i>{ohlc.c.low.toFixed(2)} <i>C</i>{ohlc.c.close.toFixed(2)}
+          </span>
+          <span className="ohlc-chg" style={{ color: ohlc.chg >= 0 ? theme.profit : theme.loss }}>
+            {ohlc.chg >= 0 ? '+' : '−'}{Math.abs(ohlc.chg).toFixed(2)} ({ohlc.chgPct >= 0 ? '+' : ''}{ohlc.chgPct.toFixed(2)}%)
+          </span>
+          <span className="ohlc-vol"><i>Vol</i>{fmtVol(ohlc.c.volume)}</span>
+        </div>
+      )}
       <canvas
         ref={canvasRef}
         className="chart-canvas"
@@ -691,11 +742,13 @@ export default function Chart({
       {markerHover && (() => {
         const p = markerHover.position;
         const isClosed = p.status === 'closed';
-        const live = p.greeksLive?.premium ?? p.entryPremium;
+        const filled = p.entryPremium != null; // false while the open order is still working
+        const live = p.greeksLive?.premium ?? p.entryPremium ?? 0;
         const exitPrem = p.exitPremium ?? live;
         const sign = p.side === 'long' ? 1 : -1;
-        const pl = (exitPrem - p.entryPremium) * 100 * p.qty * sign;
-        const pct = ((exitPrem - p.entryPremium) / p.entryPremium) * 100 * sign;
+        const pl = filled ? (exitPrem - p.entryPremium) * 100 * p.qty * sign : 0;
+        const pct = filled && p.entryPremium ? ((exitPrem - p.entryPremium) / p.entryPremium) * 100 * sign : 0;
+        const kind = isClosed ? 'CLOSED' : p.status === 'open' ? 'OPEN' : (p.status || '').toUpperCase();
         const c = markerColor(p.type);
         return (
           <div
@@ -710,19 +763,21 @@ export default function Chart({
               <span className="tt-type" style={{ color: c }}>
                 {p.type === 'call' ? 'CALL' : 'PUT'} {p.strike}
               </span>
-              <span className="tt-kind">{isClosed ? 'CLOSED' : 'OPEN'}</span>
+              <span className="tt-kind">{kind}</span>
             </div>
             <div className="tt-row"><span>Entry @</span><b>{(p.entryPrice ?? 0).toFixed(2)}</b></div>
             <div className="tt-row"><span>{isClosed ? 'Exit @' : 'Mark @'}</span><b>{(p.exitPrice ?? price).toFixed(2)}</b></div>
-            <div className="tt-row"><span>Entry Prem</span><b>${p.entryPremium.toFixed(2)}</b></div>
+            <div className="tt-row"><span>Entry Prem</span><b>{filled ? `$${p.entryPremium.toFixed(2)}` : 'filling…'}</b></div>
             <div className="tt-row"><span>{isClosed ? 'Exit Prem' : 'Mark Prem'}</span><b>${exitPrem.toFixed(2)}</b></div>
             <div className="tt-row"><span>Qty</span><b>×{p.qty}</b></div>
-            <div className="tt-row">
-              <span>P/L</span>
-              <b style={{ color: pl >= 0 ? theme.profit : theme.loss }}>
-                {pl >= 0 ? '+' : '−'}${Math.abs(pl).toFixed(2)} ({pct >= 0 ? '+' : ''}{pct.toFixed(1)}%)
-              </b>
-            </div>
+            {filled && (
+              <div className="tt-row">
+                <span>P/L</span>
+                <b style={{ color: pl >= 0 ? theme.profit : theme.loss }}>
+                  {pl >= 0 ? '+' : '−'}${Math.abs(pl).toFixed(2)} ({pct >= 0 ? '+' : ''}{pct.toFixed(1)}%)
+                </b>
+              </div>
+            )}
           </div>
         );
       })()}

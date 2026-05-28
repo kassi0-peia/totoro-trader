@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 
-export default function TradeModal({ pending, theme, onCancel, onExecute }) {
+export default function TradeModal({ pending, theme, onCancel, onExecute, executionEnabled = false, accountType = null }) {
   const [qty, setQty] = useState(1);
 
   useEffect(() => {
@@ -10,11 +10,11 @@ export default function TradeModal({ pending, theme, onCancel, onExecute }) {
   useEffect(() => {
     const onKey = (e) => {
       if (e.key === 'Escape') onCancel();
-      if (e.key === 'Enter') onExecute(qty);
+      if (e.key === 'Enter' && executionEnabled) onExecute(qty);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onCancel, onExecute, qty]);
+  }, [onCancel, onExecute, qty, executionEnabled]);
 
   if (!pending) return null;
   const { strike, type, greeks } = pending;
@@ -58,14 +58,23 @@ export default function TradeModal({ pending, theme, onCancel, onExecute }) {
           <b style={{ color: theme.loss }}>${maxRisk.toFixed(0)}</b>
         </div>
 
+        {!executionEnabled && (
+          <div className="modal-note" style={{ color: theme.loss }}>
+            {accountType === 'live'
+              ? 'Execution disabled — live account (set ALLOW_LIVE=true to enable)'
+              : 'Execution disabled — no executable IBKR account connected'}
+          </div>
+        )}
+
         <div className="modal-actions">
           <button className="btn-ghost" onClick={onCancel}>Cancel</button>
           <button
             className="btn-execute"
-            style={{ background: color, color: '#0a0c12' }}
-            onClick={() => onExecute(qty)}
+            style={{ background: executionEnabled ? color : theme.surfaceAlt, color: executionEnabled ? '#0a0c12' : theme.muted, cursor: executionEnabled ? 'pointer' : 'not-allowed' }}
+            onClick={() => executionEnabled && onExecute(qty)}
+            disabled={!executionEnabled}
           >
-            EXECUTE
+            {executionEnabled ? 'EXECUTE' : 'DISABLED'}
           </button>
         </div>
       </div>

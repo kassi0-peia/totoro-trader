@@ -1,18 +1,13 @@
-// Live IBKR feed with a built-in simulator fallback. The hook always exposes a
-// stable shape — { live, price, candles, getGreeks } — so the rest of the UI
-// does not need to branch on connection state. When the WebSocket is down or
-// the backend reports it has lost TWS, the simulator drives price + candles
-// and Black–Scholes (in options.js) drives greeks.
+// Live IBKR feed with a built-in simulator fallback. Exposes a stable shape so
+// the UI does not branch on connection state. The hook also carries the account
+// safety gate (account id / type / executionEnabled) and a sendOrder() to place
+// real orders through the bridge; fills come back via the onOrderEvent callback.
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { createSimulator, tick, SIM_CONFIG } from './simulator.js';
 
 function defaultWsUrl() {
   if (typeof window === 'undefined') return 'ws://localhost:8787/ws';
-  // Same-origin /ws: the Node bridge hosts the socket on its own port, and the
-  // Vite dev/preview servers proxy /ws to it. Matching the page origin keeps the
-  // socket same-origin (no insecure-WebSocket mixed-content block) and means a
-  // single port/origin works everywhere. Protocol tracks the page (ws ↔ wss).
   const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
   return `${proto}://${window.location.host}/ws`;
 }
@@ -21,7 +16,12 @@ function key(strike, type) {
   return `${strike}${type[0].toUpperCase()}`;
 }
 
-export function useIbkrFeed(url = defaultWsUrl()) {
+let refSeq = 1;
+function nextClientRef() {
+  return `c${Date.now().toString(36)}${(refSeq++).toString(36)}`;
+}
+
+export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent } = {}) {
   const [snapshot, setSnapshot] = useState(() => {
     const sim = createSimulator();
     return {
@@ -30,21 +30,28 @@ export function useIbkrFeed(url = defaultWsUrl()) {
       price: sim.price,
       candles: sim.candles,
       greeksMap: new Map(),
-      source: 'SPX',     // 'SPX' (RTH) or 'ES' (overnight, shown as SPX-equivalent)
-      expiry: null,      // target SPXW expiry, YYYYMMDD
+      source: 'SPX',
+      expiry: null,
       basis: null,
       basisFrozen: false,
-      basisEstimated: false
+      basisEstimated: false,
+      // account safety gate
+      account: null,
+      accountType: null,     // 'paper' | 'live' | null
+      allowLive: false,
+      executionEnabled: false,
+      trades: []             // today's fills (blotter)
     };
   });
 
   const simRef = useRef(null);
-  if (simRef.current == null) {
-    simRef.current = createSimulator();
-  }
+  if (simRef.current == null) simRef.current = createSimulator();
 
-  // Simulator tick loop — runs only while not live. We mutate the ref so the
-  // simulator state survives the live <-> sim flips without resetting history.
+  const socketRef = useRef(null);
+  const onOrderEventRef = useRef(onOrderEvent);
+  onOrderEventRef.current = onOrderEvent;
+
+  // Simulator tick loop — runs only while not live.
   useEffect(() => {
     const id = setInterval(() => {
       setSnapshot((s) => {
@@ -71,25 +78,29 @@ export function useIbkrFeed(url = defaultWsUrl()) {
         scheduleRetry();
         return;
       }
+      socketRef.current = ws;
 
-      ws.onopen = () => {
-        setSnapshot((s) => ({ ...s, socketOpen: true }));
-      };
+      ws.onopen = () => setSnapshot((s) => ({ ...s, socketOpen: true }));
 
       ws.onmessage = (ev) => {
         let msg;
         try { msg = JSON.parse(ev.data); } catch { return; }
+        // Order lifecycle events are transient — hand them to the callback.
+        if (msg.type === 'orderAck' || msg.type === 'fill' || msg.type === 'orderError' || msg.type === 'orderWarning') {
+          onOrderEventRef.current?.(msg);
+          return;
+        }
         setSnapshot((s) => applyMessage(s, msg));
       };
 
       ws.onclose = () => {
-        setSnapshot((s) => ({ ...s, socketOpen: false, live: false }));
+        socketRef.current = null;
+        // Connection lost → drop live + the execution gate (fail safe).
+        setSnapshot((s) => ({ ...s, socketOpen: false, live: false, executionEnabled: false }));
         if (!cancelled) scheduleRetry();
       };
 
-      ws.onerror = () => {
-        try { ws.close(); } catch {}
-      };
+      ws.onerror = () => { try { ws.close(); } catch {} };
     };
 
     const scheduleRetry = () => {
@@ -98,25 +109,30 @@ export function useIbkrFeed(url = defaultWsUrl()) {
     };
 
     open();
-
     return () => {
       cancelled = true;
       clearTimeout(retry);
-      if (ws) {
-        try { ws.close(); } catch {}
-      }
+      if (ws) { try { ws.close(); } catch {} }
     };
   }, [url]);
 
-  return snapshot;
+  // Place an order through the bridge. Returns the clientRef for correlation,
+  // or null if the socket isn't open. The bridge enforces the safety gate too.
+  const sendOrder = useCallback((payload) => {
+    const ws = socketRef.current;
+    if (!ws || ws.readyState !== 1) return null;
+    const clientRef = payload.clientRef || nextClientRef();
+    ws.send(JSON.stringify({ type: 'order', clientRef, ...payload }));
+    return clientRef;
+  }, []);
+
+  return { ...snapshot, sendOrder };
 }
 
 function applyMessage(s, msg) {
   if (msg.type === 'snapshot') {
     const greeksMap = new Map();
-    for (const g of msg.greeks || []) {
-      greeksMap.set(key(g.strike, g.type), g);
-    }
+    for (const g of msg.greeks || []) greeksMap.set(key(g.strike, g.type), g);
     const goLive = !!msg.connected;
     return {
       ...s,
@@ -128,27 +144,42 @@ function applyMessage(s, msg) {
       expiry: msg.expiry ?? s.expiry,
       basis: msg.basis ?? null,
       basisFrozen: !!msg.basisFrozen,
-      basisEstimated: !!msg.basisEstimated
+      basisEstimated: !!msg.basisEstimated,
+      account: msg.account ?? null,
+      accountType: msg.accountType ?? null,
+      allowLive: !!msg.allowLive,
+      executionEnabled: !!msg.executionEnabled,
+      trades: Array.isArray(msg.trades) ? msg.trades : s.trades
     };
+  }
+
+  if (msg.type === 'trade') {
+    if (s.trades.some((t) => t.id === msg.trade.id)) return s;
+    return { ...s, trades: [...s.trades, msg.trade] };
   }
 
   if (msg.type === 'status') {
     return { ...s, live: !!msg.connected };
   }
 
+  if (msg.type === 'account') {
+    return {
+      ...s,
+      account: msg.account ?? null,
+      accountType: msg.accountType ?? null,
+      allowLive: !!msg.allowLive,
+      executionEnabled: !!msg.executionEnabled
+    };
+  }
+
   if (msg.type === 'tick') {
     if (!s.live) return s;
-    // A source flip is accompanied by a fresh snapshot (new candle array); ignore
-    // ticks for the other source so we don't splice ES candles into an SPX series.
     if (msg.source && msg.source !== s.source) return s;
     let candles = s.candles;
     if (msg.candle) {
       const last = candles[candles.length - 1];
-      if (last && last.t === msg.candle.t) {
-        candles = [...candles.slice(0, -1), msg.candle];
-      } else {
-        candles = [...candles, msg.candle];
-      }
+      if (last && last.t === msg.candle.t) candles = [...candles.slice(0, -1), msg.candle];
+      else candles = [...candles, msg.candle];
     }
     return { ...s, price: msg.price, candles };
   }
@@ -156,14 +187,8 @@ function applyMessage(s, msg) {
   if (msg.type === 'greeks') {
     const next = new Map(s.greeksMap);
     next.set(key(msg.strike, msg.optionType), {
-      strike: msg.strike,
-      type: msg.optionType,
-      premium: msg.premium,
-      delta: msg.delta,
-      gamma: msg.gamma,
-      theta: msg.theta,
-      vega: msg.vega,
-      iv: msg.iv
+      strike: msg.strike, type: msg.optionType, premium: msg.premium,
+      delta: msg.delta, gamma: msg.gamma, theta: msg.theta, vega: msg.vega, iv: msg.iv
     });
     return { ...s, greeksMap: next };
   }
@@ -171,8 +196,8 @@ function applyMessage(s, msg) {
   return s;
 }
 
-// Look up live greeks for a given strike/type. Returns null if the backend
-// has not delivered model values yet — callers fall back to options.greeks().
+// Look up live greeks for a strike/type. Returns null until the backend delivers
+// model values — callers fall back to options.greeks().
 export function liveGreeks(greeksMap, strike, type) {
   if (!greeksMap) return null;
   const g = greeksMap.get(key(strike, type));

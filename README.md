@@ -104,6 +104,46 @@ unit-testable with an injected clock) and switches data source + option expiry:
 > historical data for this session — close the other session (mobile/web/live TWS)
 > for data to flow. The app falls back to the simulator while data is unavailable.
 
+## Order execution & account safety
+
+EXECUTE / CLOSE / REVERSE place **real market orders** through IBKR for the SPXW
+contract (same expiry/strike/right as the chain subscription). Positions are
+tracked from IBKR's reported fills — the entry/exit prices shown are the actual
+`avgFillPrice`, not the model estimate. A fill confirmation toast appears over
+the chart.
+
+**Safety is paper-only by default.** On connect the bridge reads the account id:
+
+| Account | `ALLOW_LIVE` | Result |
+| ------- | ------------ | ------ |
+| `DU…` (paper) | (any) | green **PAPER** badge, execution **enabled** |
+| live (non-`DU`) | unset / not `true` | red banner **"LIVE ACCOUNT DETECTED — EXECUTION DISABLED"**, all EXECUTE disabled |
+| live (non-`DU`) | `true` | yellow banner **"LIVE TRADING — REAL MONEY"**, yellow **LIVE** badge, execution enabled |
+
+The account id (e.g. `DU1234567`) is always shown next to the badge. The gate is
+enforced **both** server-side (orders are refused) and in the UI (buttons
+disabled), and fails safe — execution is disabled until an executable account is
+confirmed, and drops if the connection is lost.
+
+**Prerequisites / behavior:**
+- IB Gateway must have **Read-Only API disabled** (Configure → Settings → API →
+  Settings) or orders are rejected with code 321.
+- Orders use `outsideRth: true`, so they fill in the SPXW **overnight (GTH)
+  session** too. IBKR may attach an informational warning (code 399, "will not be
+  placed until the open") — it's non-fatal and the order still fills in GTH; the
+  UI surfaces it as a note, not a rejection.
+- A verified paper round-trip: BUY 1 SPXW 7515C filled @ 18.40, SELL @ 17.70.
+
+Default (no env var) is safe paper mode. To enable live trading you must
+explicitly opt in:
+
+```bash
+ALLOW_LIVE=true npm start            # or: ALLOW_LIVE=true npm run serve:https
+```
+
+The systemd unit runs without `ALLOW_LIVE`, so the service is paper-safe; add
+`Environment=ALLOW_LIVE=true` to the unit only if you intend live trading.
+
 ## Progressive Web App (install to home screen)
 
 The app ships a web manifest (`public/manifest.json`), a service worker
