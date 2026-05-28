@@ -251,7 +251,6 @@ export default function App() {
 
       <main className="main">
         <div className="main-inner">
-          <TimeframeBar value={timeframe} onChange={setTimeframe} theme={theme} />
           <QuoteStrip price={feed.price} greeksMap={feed.greeksMap} vix={feed.vix} theme={theme} />
           <div className="chart-area">
             <Chart
@@ -269,6 +268,7 @@ export default function App() {
               <div className={`fill-toast fill-${toast.kind}`} role="status">{toast.text}</div>
             )}
           </div>
+          <TimeframeBar value={timeframe} onChange={setTimeframe} theme={theme} />
 
           <Positions
             positions={positionsLive}
