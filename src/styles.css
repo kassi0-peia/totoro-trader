@@ -895,6 +895,7 @@ button {
 .quote-strip {
   display: flex;
   align-items: baseline;
+  justify-content: flex-end;
   gap: 18px;
   padding: 8px 14px;
   margin-bottom: 6px;

@@ -4,7 +4,7 @@
 // network-first for navigations so a fresh build is picked up when online,
 // with the cached shell as the offline fallback.
 
-const VERSION = 'v1';
+const VERSION = 'v2';
 const SHELL_CACHE = `totoro-shell-${VERSION}`;
 const ASSET_CACHE = `totoro-assets-${VERSION}`;
 

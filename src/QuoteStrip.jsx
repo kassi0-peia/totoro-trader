@@ -29,7 +29,7 @@ export default function QuoteStrip({ price, greeksMap, vix, theme }) {
       <span className="qs-atm">ATM {atm ?? '—'}</span>
       {leg('C', call, theme.callLine)}
       {leg('P', put, theme.putLine)}
-      <span className="qs-vix" style={{ marginLeft: 'auto' }}>
+      <span className="qs-vix">
         <span className="qs-tag" style={{ color: theme.muted }}>VIX</span>
         <b style={{ color: vixColor }}>{fmt(vixLast)}</b>
         {vixChg != null && (
