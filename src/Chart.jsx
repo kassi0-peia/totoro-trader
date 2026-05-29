@@ -48,7 +48,7 @@ const DEFAULT_VISIBLE = 60;
 // Fixed marker semantic colors — green calls / red puts, regardless of theme.
 const CALL_MARKER = '#3fc77a';
 const PUT_MARKER = '#ef5350';
-const MARKER_HALF = 7;
+const MARKER_HALF = 5;
 
 function markerColor(type) {
   return type === 'call' ? CALL_MARKER : PUT_MARKER;
@@ -469,9 +469,8 @@ export default function Chart({
 
     const drawArrow = (cx, cy, half, dir, color) => {
       ctx.save();
+      ctx.globalAlpha = 0.6; // subtle — let the candles dominate
       ctx.fillStyle = color;
-      ctx.strokeStyle = 'rgba(10, 12, 18, 0.85)';
-      ctx.lineWidth = 1;
       ctx.beginPath();
       if (dir === 'up') {
         ctx.moveTo(cx, cy - half);
@@ -484,7 +483,6 @@ export default function Chart({
       }
       ctx.closePath();
       ctx.fill();
-      ctx.stroke();
       ctx.restore();
     };
 

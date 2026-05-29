@@ -93,8 +93,9 @@ let accountType = null;         // 'paper' | 'live' | null (unknown)
 let executionEnabled = false;   // gated by account type + ALLOW_LIVE
 const orders = new Map();        // orderId -> { clientRef, action, strike, right, qty, expiry, status, filled, avgFillPrice }
 
-let trades = [];                 // today's fills (blotter): { id, ts, action, strike, right, expiry, qty, price }
+let trades = [];                 // today's fills (blotter): { id, orderId, ts, action, strike, right, expiry, qty, price }
 let tradesDate = null;           // ET YYYYMMDD the trades array belongs to
+let tradeSeq = 0;                // monotonic blotter id, seeded above persisted ids so reused IBKR order ids never collide
 
 // IBKR-authoritative open option positions (shared across all connected clients).
 const ibPositions = new Map();   // conId -> { conId, symbol, strike, right, expiry, qty, avgCost, avgPremium }
@@ -981,9 +982,12 @@ function todayET() {
 function recordTrade(orderId, o, filled, avgFillPrice) {
   const today = todayET();
   if (today !== tradesDate) { tradesDate = today; trades = []; } // daily roll
-  if (trades.some((t) => t.id === orderId)) return; // dedupe (orderStatus can repeat)
+  // Dedupe per order via a session flag (orderStatus can repeat). We can't key on
+  // orderId because IBKR reuses ids across reconnects — that would drop real fills.
+  if (o.recorded) return;
+  o.recorded = true;
   const trade = {
-    id: orderId, ts: Date.now(), action: o.action, strike: o.strike,
+    id: ++tradeSeq, orderId, ts: Date.now(), action: o.action, strike: o.strike,
     right: o.right, expiry: o.expiry, qty: filled, price: avgFillPrice
   };
   trades.push(trade);
@@ -1002,6 +1006,7 @@ function loadTrades() {
     const d = JSON.parse(fs.readFileSync(TRADES_FILE, 'utf8'));
     if (d.date === tradesDate && Array.isArray(d.trades)) {
       trades = d.trades;
+      tradeSeq = trades.reduce((m, t) => Math.max(m, t.id || 0), 0);
       console.log(`[ibkr] loaded ${trades.length} trade(s) for ${tradesDate}`);
     }
   } catch {}
