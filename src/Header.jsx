@@ -55,7 +55,7 @@ export default function Header({ price, lastPrice, theme, mood, earsUp, pulse, o
             />
             <span style={{ color: feedColor }}>{feedLabel}</span>
             <span className="subtitle-sep">·</span>
-            0DTE EXECUTION
+            <span className="subtitle-text">0DTE EXECUTION</span>
           </div>
         </div>
       </div>
@@ -63,10 +63,18 @@ export default function Header({ price, lastPrice, theme, mood, earsUp, pulse, o
       <div className="header-right">
         <div className="acct-block" title={account ? `IBKR account ${account}` : 'no account connected'}>
           <span className="acct-badge" style={{ color: '#0a0c12', background: acctColor }}>{acctLabel}</span>
+          <span className="acct-feed">
+            <span
+              className="feed-dot"
+              style={{ background: feedColor, boxShadow: live ? `0 0 6px ${feedColor}` : 'none' }}
+              aria-hidden="true"
+            />
+            <span style={{ color: feedColor }}>{feedLabel}</span>
+          </span>
           <span className="acct-id" style={{ color: theme.muted }}>{account || (live ? '…' : 'no acct')}</span>
         </div>
         <div className="expiry-block">
-          <div className="expiry-label">EXPIRY<span className="expiry-date"> · {expiryDate}</span></div>
+          <div className="expiry-label"><span className="expiry-word">EXPIRY · </span><span className="expiry-date">{expiryDate}</span></div>
           <div className="expiry-time">
             {String(h).padStart(2, '0')}<span className="ec-sep">h</span>{String(m).padStart(2, '0')}<span className="ec-sep">m</span>
           </div>

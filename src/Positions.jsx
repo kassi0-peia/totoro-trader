@@ -9,7 +9,12 @@ function plOf(pos) {
   return { live, dollars, pct };
 }
 
-export default function Positions({ positions, theme, onClose, onReverse, executionEnabled = false }) {
+function fmtMoney(v) {
+  if (v == null || !Number.isFinite(v)) return '—';
+  return v.toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
+}
+
+export default function Positions({ positions, theme, onClose, onReverse, executionEnabled = false, funds = null }) {
   // "Working" = open, or any in-flight order (pending fill / closing).
   const working = positions.filter((p) => p.status === 'open' || p.status === 'pending' || p.status === 'closing');
   const done = positions.filter((p) => p.status === 'closed' || p.status === 'rejected');
@@ -40,6 +45,17 @@ export default function Positions({ positions, theme, onClose, onReverse, execut
           <b style={{ color: totalPL >= 0 ? theme.profit : theme.loss }}>
             {totalPL >= 0 ? '+' : '−'}${Math.abs(totalPL).toFixed(2)}
           </b>
+        </div>
+      </div>
+
+      <div className="funds-summary">
+        <div className="pl-block">
+          <span>Avail. Funds</span>
+          <b>{fmtMoney(funds?.availableFunds)}</b>
+        </div>
+        <div className="pl-block">
+          <span>Buying Power</span>
+          <b>{fmtMoney(funds?.buyingPower)}</b>
         </div>
       </div>
 
@@ -80,8 +96,8 @@ export default function Positions({ positions, theme, onClose, onReverse, execut
               <div className="pos-actions">
                 {p.status === 'open' ? (
                   <>
-                    <button className="btn-rev" onClick={() => onReverse(p.id)} disabled={!executionEnabled} title="Reverse">↻</button>
-                    <button className="btn-close" onClick={() => onClose(p.id)} disabled={!executionEnabled}>CLOSE</button>
+                    <button className="btn-rev" onClick={() => onReverse(p)} disabled={!executionEnabled} title="Reverse">↻</button>
+                    <button className="btn-close" onClick={() => onClose(p)} disabled={!executionEnabled}>CLOSE</button>
                   </>
                 ) : (
                   <span className="closed-tag" style={{ color: theme.muted }}>{tag}</span>

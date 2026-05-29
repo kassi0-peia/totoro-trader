@@ -96,6 +96,11 @@ const orders = new Map();        // orderId -> { clientRef, action, strike, righ
 let trades = [];                 // today's fills (blotter): { id, ts, action, strike, right, expiry, qty, price }
 let tradesDate = null;           // ET YYYYMMDD the trades array belongs to
 
+// IBKR-authoritative open option positions (shared across all connected clients).
+const ibPositions = new Map();   // conId -> { conId, symbol, strike, right, expiry, qty, avgCost, avgPremium }
+let funds = null;                // { availableFunds, buyingPower, netLiquidation }
+let acctSummaryReqId = null;
+
 let ib = null;
 let connectedPort = null;
 let connecting = false;
@@ -337,6 +342,26 @@ function wireHandlers(api) {
     }
   });
 
+  // IBKR-authoritative positions: initial snapshot then live updates on every change.
+  // We track only option positions (the app trades SPXW); a net qty of 0 means flat.
+  api.on(EventName.position, (_acct, contract, pos, avgCost) => {
+    if (!contract || contract.secType !== 'OPT') return;
+    upsertPosition(contract, pos, avgCost);
+  });
+  api.on(EventName.positionEnd, () => broadcastPositions());
+
+  // Account summary drives the funds display (available funds / buying power).
+  api.on(EventName.accountSummary, (_reqId, _acct, tag, value) => {
+    const v = parseFloat(value);
+    if (!Number.isFinite(v)) return;
+    if (!funds) funds = { availableFunds: null, buyingPower: null, netLiquidation: null };
+    if (tag === 'AvailableFunds') funds.availableFunds = v;
+    else if (tag === 'BuyingPower') funds.buyingPower = v;
+    else if (tag === 'NetLiquidation') funds.netLiquidation = v;
+    else return;
+    broadcastFunds();
+  });
+
   api.on(EventName.disconnected, () => {
     console.log('[ibkr] socket disconnected');
     setStatus(false);
@@ -349,7 +374,12 @@ function wireHandlers(api) {
     accountType = null;
     executionEnabled = false;
     orders.clear();
+    ibPositions.clear();
+    funds = null;
+    acctSummaryReqId = null;
     broadcastAccount();
+    broadcastPositions();
+    broadcastFunds();
   });
 
   api.on(EventName.nextValidId, (id) => {
@@ -366,6 +396,8 @@ function wireHandlers(api) {
     }
     try { api.reqManagedAccts(); } catch {}
     try { api.reqAllOpenOrders(); } catch {} // re-learn any pre-existing orders
+    try { api.reqPositions(); } catch {}     // authoritative positions for all clients
+    requestAccountSummary();                 // funds / buying power
     subscribeSpx();
     requestSpxHistory();
     subscribeVix();
@@ -763,6 +795,52 @@ function broadcastAccount() {
   broadcast(accountMsg('account'));
 }
 
+// ── Positions + funds ───────────────────────────────────────────────────────
+
+function upsertPosition(contract, pos, avgCost) {
+  const conId = contract.conId;
+  if (conId == null) return;
+  if (!pos) {
+    ibPositions.delete(conId);
+  } else {
+    const mult = Number(contract.multiplier) || 100;
+    ibPositions.set(conId, {
+      conId,
+      symbol: contract.symbol,
+      strike: contract.strike,
+      right: contract.right, // 'C' | 'P'
+      expiry: String(contract.lastTradeDateOrContractMonth || '').slice(0, 8),
+      qty: pos,
+      avgCost: avgCost ?? null,
+      avgPremium: avgCost != null ? avgCost / mult : null
+    });
+  }
+  broadcastPositions();
+}
+
+function positionsList() {
+  return [...ibPositions.values()].filter((p) => p.qty);
+}
+
+function broadcastPositions() {
+  broadcast({ type: 'positions', positions: positionsList() });
+}
+
+function broadcastFunds() {
+  broadcast({ type: 'funds', funds });
+}
+
+function requestAccountSummary() {
+  if (!ib) return;
+  try {
+    if (acctSummaryReqId != null) { try { ib.cancelAccountSummary(acctSummaryReqId); } catch {} }
+    acctSummaryReqId = reqSeq++;
+    ib.reqAccountSummary(acctSummaryReqId, 'All', 'AvailableFunds,BuyingPower,NetLiquidation');
+  } catch (e) {
+    console.log('[ibkr] reqAccountSummary failed:', e.message);
+  }
+}
+
 // ── Order execution ───────────────────────────────────────────────────────
 
 function spxwContract(strike, right, expiry) {
@@ -877,7 +955,9 @@ function snapshotMsg() {
     accountType,
     allowLive: ALLOW_LIVE,
     executionEnabled,
-    trades
+    trades,
+    positions: positionsList(),
+    funds
   };
 }
 

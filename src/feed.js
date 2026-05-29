@@ -41,7 +41,9 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent } = {}) {
       accountType: null,     // 'paper' | 'live' | null
       allowLive: false,
       executionEnabled: false,
-      trades: []             // today's fills (blotter)
+      trades: [],            // today's fills (blotter)
+      positions: [],         // IBKR-authoritative open option positions
+      funds: null            // { availableFunds, buyingPower, netLiquidation }
     };
   });
 
@@ -151,13 +153,23 @@ function applyMessage(s, msg) {
       accountType: msg.accountType ?? null,
       allowLive: !!msg.allowLive,
       executionEnabled: !!msg.executionEnabled,
-      trades: Array.isArray(msg.trades) ? msg.trades : s.trades
+      trades: Array.isArray(msg.trades) ? msg.trades : s.trades,
+      positions: Array.isArray(msg.positions) ? msg.positions : s.positions,
+      funds: msg.funds ?? s.funds
     };
   }
 
   if (msg.type === 'trade') {
     if (s.trades.some((t) => t.id === msg.trade.id)) return s;
     return { ...s, trades: [...s.trades, msg.trade] };
+  }
+
+  if (msg.type === 'positions') {
+    return { ...s, positions: Array.isArray(msg.positions) ? msg.positions : [] };
+  }
+
+  if (msg.type === 'funds') {
+    return { ...s, funds: msg.funds ?? null };
   }
 
   if (msg.type === 'vix') {
