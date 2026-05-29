@@ -70,6 +70,7 @@ export default function Chart({
   const [priceOffset, setPriceOffset] = useState(0); // vertical pan, in price units (drag up/down)
   const [priceScale, setPriceScale] = useState(1); // vertical zoom (drag the price axis)
   const [fullscreen, setFullscreen] = useState(false);
+  const [showMarkers, setShowMarkers] = useState(true); // entry/exit trade arrows
   const pinchRef = useRef(null); // { startDist, startVisible }
   const dragRef = useRef(null); // { startX, lastX, lastT, startOffset, moved, vel }
   const momentumRef = useRef(null); // { vel, lastT, raf }
@@ -479,7 +480,7 @@ export default function Chart({
       ctx.restore();
     };
 
-    for (const pos of positions) {
+    for (const pos of (showMarkers ? positions : [])) {
       const color = pos.type === 'call' ? theme.up : theme.down;
       const entryIdx = tToIdx(pos.openedAt);
       const exitIdx = pos.status === 'closed' ? tToIdx(pos.closedAt) : -1;
@@ -511,7 +512,7 @@ export default function Chart({
         markerHitsRef.current.push({ x: exitXY.x, y: ay, half: MARKER_HALF + 3, position: pos, kind: 'exit' });
       }
     }
-  }, [candles, price, positions, theme, size, view, layout, priceToY, indexToX, timeframe]);
+  }, [candles, price, positions, theme, size, view, layout, priceToY, indexToX, timeframe, showMarkers]);
 
   // wheel zoom — attach non-passive so we can preventDefault page scroll
   useEffect(() => {
@@ -884,6 +885,17 @@ export default function Chart({
             <path d="M8 3H4v4M16 3h4v4M8 21H4v-4M16 21h4v-4" />
           </svg>
         )}
+      </button>
+      <button
+        className={`markers-btn${showMarkers ? ' active' : ''}`}
+        onClick={() => setShowMarkers((v) => !v)}
+        aria-label="Toggle trade markers"
+        title={showMarkers ? 'Hide trade markers' : 'Show trade markers'}
+      >
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor">
+          <path d="M12 3 L16 9 L8 9 Z" />
+          <path d="M12 21 L16 15 L8 15 Z" />
+        </svg>
       </button>
       {(Math.abs(viewOffset) > 0.5 || Math.abs(priceOffset) > 0.01 || Math.abs(priceScale - 1) > 0.01) && (
         <button

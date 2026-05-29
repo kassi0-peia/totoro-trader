@@ -447,7 +447,8 @@ button {
 }
 
 .snap-now-btn,
-.fs-btn {
+.fs-btn,
+.markers-btn {
   position: absolute;
   bottom: 30px;
   width: 34px;
@@ -465,9 +466,12 @@ button {
   transition: color 160ms, border-color 160ms;
 }
 .fs-btn { right: 12px; }          /* far bottom-right corner */
-.snap-now-btn { right: 54px; }    /* sits left of the fullscreen button */
+.markers-btn { right: 54px; }     /* left of fullscreen */
+.snap-now-btn { right: 96px; }    /* left of the markers toggle (only when off-centre) */
 .snap-now-btn:hover,
-.fs-btn:hover {
+.fs-btn:hover,
+.markers-btn:hover,
+.markers-btn.active {
   color: var(--c-accent);
   border-color: var(--c-accent);
 }
