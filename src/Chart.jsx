@@ -45,14 +45,7 @@ const MIN_VISIBLE = 14;
 const MAX_VISIBLE = 240;
 const DEFAULT_VISIBLE = 60;
 
-// Fixed marker semantic colors — green calls / red puts, regardless of theme.
-const CALL_MARKER = '#3fc77a';
-const PUT_MARKER = '#ef5350';
 const MARKER_HALF = 5;
-
-function markerColor(type) {
-  return type === 'call' ? CALL_MARKER : PUT_MARKER;
-}
 
 export default function Chart({
   candles,
@@ -487,7 +480,7 @@ export default function Chart({
     };
 
     for (const pos of positions) {
-      const color = markerColor(pos.type);
+      const color = pos.type === 'call' ? theme.up : theme.down;
       const entryIdx = tToIdx(pos.openedAt);
       const exitIdx = pos.status === 'closed' ? tToIdx(pos.closedAt) : -1;
       const entryXY = entryIdx >= 0 ? { x: indexToX(entryIdx), y: priceToY(pos.entryPrice ?? pos.strike) } : null;
@@ -816,7 +809,7 @@ export default function Chart({
         const pl = filled ? (exitPrem - p.entryPremium) * 100 * p.qty * sign : 0;
         const pct = filled && p.entryPremium ? ((exitPrem - p.entryPremium) / p.entryPremium) * 100 * sign : 0;
         const kind = isClosed ? 'CLOSED' : p.status === 'open' ? 'OPEN' : (p.status || '').toUpperCase();
-        const c = markerColor(p.type);
+        const c = p.type === 'call' ? theme.up : theme.down;
         return (
           <div
             className="chart-tooltip marker-tooltip"
