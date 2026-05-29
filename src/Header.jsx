@@ -46,17 +46,16 @@ export default function Header({ price, lastPrice, theme, mood, earsUp, pulse, o
       <div className="header-left">
         <Totoro mood={mood} earsUp={earsUp} pulse={pulse} theme={theme} />
         <div className="title-block">
-          <div className="title">TotoroTrader</div>
-          <div className="subtitle">
+          <div className="feed-status">
             <span
               className="feed-dot"
               style={{ background: feedColor, boxShadow: live ? `0 0 6px ${feedColor}` : 'none' }}
               aria-hidden="true"
             />
             <span style={{ color: feedColor }}>{feedLabel}</span>
-            <span className="subtitle-sep">·</span>
-            <span className="subtitle-text">0DTE EXECUTION</span>
           </div>
+          <div className="title">TotoroTrader</div>
+          <div className="subtitle-text">0DTE EXECUTION</div>
         </div>
       </div>
 
