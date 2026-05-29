@@ -518,6 +518,7 @@ function broadcastVix() {
 
 function requestSpxHistory() {
   if (!ib) return;
+  spx.candles = []; // fresh seed — avoid stacking duplicates on reconnect/re-seed
   const reqId = reqSeq++;
   subs.set(reqId, { kind: 'spx-hist' });
   try {
@@ -556,6 +557,7 @@ function subscribeEs() {
 
 function requestEsHistory() {
   if (!ib || !esContract) return;
+  es.candles = []; // fresh seed — avoid stacking duplicates on reconnect/re-seed
   const reqId = reqSeq++;
   subs.set(reqId, { kind: 'es-hist' });
   try {

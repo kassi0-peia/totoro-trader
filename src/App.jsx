@@ -112,10 +112,10 @@ export default function App() {
     // Neutral chrome: off-chart UI uses soft dark grey instead of the theme's
     // tinted surfaces. The chart keeps full theme colors (painted on canvas).
     if (neutralChrome) {
-      root.style.setProperty('--c-bg', '#0f0f11');
-      root.style.setProperty('--c-surface', '#17171a');
-      root.style.setProperty('--c-surfaceAlt', '#1d1d21');
-      root.style.setProperty('--c-border', '#2b2b31');
+      root.style.setProperty('--c-bg', '#0a0a0b');
+      root.style.setProperty('--c-surface', '#101012');
+      root.style.setProperty('--c-surfaceAlt', '#161618');
+      root.style.setProperty('--c-border', '#242427');
     }
   }, [theme, neutralChrome]);
 
@@ -298,6 +298,12 @@ export default function App() {
         ? { text: 'LIVE TRADING — REAL MONEY', kind: 'warn' }
         : null;
 
+  // Account badge (green PAPER / yellow LIVE-enabled / red LIVE-detected), shown on the chart.
+  const acctLabel = feed.accountType === 'paper' ? 'PAPER' : feed.accountType === 'live' ? 'LIVE' : '—';
+  const acctColor = feed.accountType === 'paper' ? theme.profit
+    : feed.accountType === 'live' ? (feed.allowLive ? '#e0c34a' : theme.loss)
+    : theme.muted;
+
   return (
     <div className="app" style={{ background: theme.bg, color: theme.text }}>
       {banner && (
@@ -338,6 +344,10 @@ export default function App() {
         <div className="main-inner">
           <QuoteStrip price={feed.price} greeksMap={feed.greeksMap} vix={feed.vix} theme={theme} />
           <div className="chart-area">
+            <div className="chart-acct" title={feed.account ? `IBKR account ${feed.account}` : 'no account connected'}>
+              <span className="acct-badge" style={{ color: '#0a0c12', background: acctColor }}>{acctLabel}</span>
+              <span className="chart-acct-id">{feed.account || (feed.live ? '…' : 'no acct')}</span>
+            </div>
             <Chart
               candles={feed.candles}
               price={feed.price}
