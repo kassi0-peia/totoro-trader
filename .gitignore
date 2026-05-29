@@ -14,3 +14,6 @@ server/.trades.json
 
 # generated basis-check reports
 basis-check-*.txt
+
+# original mascot source (the transparent cut-out lives at src/totoro.png)
+totoro-original.png
