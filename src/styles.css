@@ -1198,6 +1198,11 @@ button {
   }
 
   .chart-acct { top: 36px; }   /* drop below the OHLC legend so they don't overlap */
+
+  /* Move Close-all / IBKR to a full-width row under the timeframe buttons. */
+  .tf-bar { flex-wrap: wrap; }
+  .tf-actions { margin-left: 0; flex-basis: 100%; gap: 10px; }
+  .tf-panic, .tf-closeall { flex: 1; }
   .pl-summary { gap: 10px; padding: 8px 12px 4px; }
   .pl-summary .pl-block b { font-size: 12px; }
 
