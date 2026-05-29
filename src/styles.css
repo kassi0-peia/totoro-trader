@@ -68,26 +68,47 @@ button {
 }
 
 .totoro-wrap {
+  position: relative;
+  isolation: isolate;            /* contain the tint blend to the mascot */
   width: 44px;
   height: 44px;
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+  animation: breathe 3s ease-in-out infinite;
+  transform-origin: center 88%;
+  will-change: transform;
 }
 
 .totoro-img {
   width: 100%;
   height: 100%;
   object-fit: contain;
-  animation: breathe 3s ease-in-out infinite;
-  transform-origin: center 88%;
-  will-change: transform;
   -webkit-user-drag: none;
   user-select: none;
 }
 
-.totoro-wrap.pulse .totoro-img {
+/* Tint the mascot with the theme accent: a colour layer in 'color' blend mode,
+   masked to the totoro silhouette so it keeps the original light/dark detail. */
+.totoro-wrap::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: var(--c-accent);
+  mix-blend-mode: color;
+  -webkit-mask-image: var(--totoro-src);
+  mask-image: var(--totoro-src);
+  -webkit-mask-size: contain;
+  mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  pointer-events: none;
+}
+
+.totoro-wrap.pulse {
   animation: breathe 3s ease-in-out infinite, fillPulse 420ms ease-out;
 }
 
@@ -414,14 +435,14 @@ button {
 .chart-wrap {
   position: relative;
   width: 100%;
-  height: 56vh;
-  min-height: 360px;
+  height: 79vh;
+  min-height: 484px;
   background: var(--c-bg);
 }
 
-.snap-now-btn {
+.snap-now-btn,
+.fs-btn {
   position: absolute;
-  right: 12px;
   bottom: 30px;
   width: 34px;
   height: 34px;
@@ -433,13 +454,27 @@ button {
   color: var(--c-muted);
   border-radius: 50%;
   cursor: pointer;
-  z-index: 6;
+  z-index: 8;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28);
   transition: color 160ms, border-color 160ms;
 }
-.snap-now-btn:hover {
+.fs-btn { right: 12px; }          /* far bottom-right corner */
+.snap-now-btn { right: 54px; }    /* sits left of the fullscreen button */
+.snap-now-btn:hover,
+.fs-btn:hover {
   color: var(--c-accent);
   border-color: var(--c-accent);
+}
+
+/* Fullscreen chart: cover the viewport (works on mobile + desktop without the
+   Fullscreen API, which iOS blocks for non-video elements). */
+.chart-wrap.fullscreen {
+  position: fixed;
+  inset: 0;
+  width: auto;
+  height: auto;
+  min-height: 0;
+  z-index: 60;
 }
 
 .chart-canvas {
@@ -775,10 +810,19 @@ button {
 
 .pl-summary {
   display: flex;
+  align-items: baseline;
   gap: 24px;
   padding: 10px 18px;
   border-bottom: 1px solid var(--c-border);
   background: var(--c-surfaceAlt);
+}
+
+/* P/L pushed to the right of the funds on the summary line */
+.pl-push { margin-left: auto; }
+
+.funds-block b {
+  font-size: 14px;
+  color: var(--c-muted);
 }
 
 .pl-block {
@@ -800,26 +844,7 @@ button {
   font-variant-numeric: tabular-nums;
 }
 
-.pl-total {
-  margin-left: auto;
-}
 
-.pl-total b {
-  font-size: 20px;
-}
-
-.funds-summary {
-  display: flex;
-  gap: 24px;
-  padding: 8px 18px;
-  border-bottom: 1px solid var(--c-border);
-  background: var(--c-surfaceAlt);
-}
-
-.funds-summary .pl-block b {
-  font-size: 14px;
-  color: var(--c-muted);
-}
 
 .positions-list {
   overflow-y: auto;
@@ -970,7 +995,7 @@ button {
 .safety-warn { background: #e0c34a; color: #1a1a22; }
 
 .acct-block {
-  display: flex;
+  display: none;            /* desktop: feed status lives in the title block */
   flex-direction: column;
   align-items: flex-end;
   gap: 2px;
@@ -998,6 +1023,23 @@ button {
 }
 
 .chart-area { position: relative; }
+
+/* Account badge + id overlaid on the chart's top-right corner */
+.chart-acct {
+  position: absolute;
+  top: 8px;
+  right: 72px;            /* clear the price-axis label gutter (~64px) */
+  z-index: 7;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
+.chart-acct-id {
+  color: var(--c-muted);
+  font-variant-numeric: tabular-nums;
+}
 
 .quote-strip {
   display: flex;
@@ -1130,18 +1172,24 @@ button {
      breathing space in the centre. */
   .header { justify-content: flex-start; gap: 10px; }
   .header-left, .header-right { display: contents; }
-  .acct-block { align-items: flex-start; }
+  .acct-block { display: flex; align-items: flex-start; }   /* mobile: ● LIVE/SIM next to the mascot */
   .expiry-block { margin-left: auto; }     /* push the right cluster to the edge */
   .price { font-size: 22px; }
   .expiry-time { font-size: 13px; }
   .expiry-label { font-size: 8px; }
   .symbol { font-size: 9px; }
 
-  .chart-wrap { height: 50vh; min-height: 300px; }
+  /* Near-fullscreen chart: fill the viewport below the header + quote strip,
+     leaving the timeframe bar just in view; positions/history scroll below. */
+  .chart-wrap {
+    height: calc((100vh - 150px) * 0.9);
+    height: calc((100dvh - 150px) * 0.9);
+    min-height: 300px;
+  }
 
-  .pl-summary { gap: 14px; padding: 8px 12px; }
-  .pl-block b { font-size: 14px; }
-  .pl-total b { font-size: 17px; }
+  .chart-acct { top: 36px; }   /* drop below the OHLC legend so they don't overlap */
+  .pl-summary { gap: 10px; padding: 8px 12px 4px; }
+  .pl-summary .pl-block b { font-size: 12px; }
 
   .pos-row {
     grid-template-columns: 28px 56px 1fr 1fr auto;

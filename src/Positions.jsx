@@ -23,12 +23,19 @@ export default function Positions({ positions, theme, onClose, onReverse, execut
     .filter((p) => p.status === 'open' && p.entryPremium != null)
     .reduce((s, p) => s + plOf(p).dollars, 0);
   const closedPL = done.reduce((s, p) => s + (p.closedPL || 0), 0);
-  const totalPL = openPL + closedPL;
 
   return (
     <div className="positions">
       <div className="pl-summary">
-        <div className="pl-block">
+        <div className="pl-block funds-block">
+          <span>Avail. Funds</span>
+          <b>{fmtMoney(funds?.availableFunds)}</b>
+        </div>
+        <div className="pl-block funds-block">
+          <span>Buying Power</span>
+          <b>{fmtMoney(funds?.buyingPower)}</b>
+        </div>
+        <div className="pl-block pl-push">
           <span>Open P/L</span>
           <b style={{ color: openPL >= 0 ? theme.profit : theme.loss }}>
             {openPL >= 0 ? '+' : '−'}${Math.abs(openPL).toFixed(2)}
@@ -40,28 +47,11 @@ export default function Positions({ positions, theme, onClose, onReverse, execut
             {closedPL >= 0 ? '+' : '−'}${Math.abs(closedPL).toFixed(2)}
           </b>
         </div>
-        <div className="pl-block pl-total">
-          <span>Total P/L</span>
-          <b style={{ color: totalPL >= 0 ? theme.profit : theme.loss }}>
-            {totalPL >= 0 ? '+' : '−'}${Math.abs(totalPL).toFixed(2)}
-          </b>
-        </div>
-      </div>
-
-      <div className="funds-summary">
-        <div className="pl-block">
-          <span>Avail. Funds</span>
-          <b>{fmtMoney(funds?.availableFunds)}</b>
-        </div>
-        <div className="pl-block">
-          <span>Buying Power</span>
-          <b>{fmtMoney(funds?.buyingPower)}</b>
-        </div>
       </div>
 
       <div className="positions-list">
         {working.length === 0 && done.length === 0 && (
-          <div className="empty">Click the chart above current price for a CALL, below for a PUT.</div>
+          <div className="empty">No open positions.</div>
         )}
 
         {working.map((p) => {

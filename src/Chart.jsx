@@ -75,6 +75,8 @@ export default function Chart({
   const [visibleCount, setVisibleCount] = useState(DEFAULT_VISIBLE);
   const [viewOffset, setViewOffset] = useState(0); // candles back from the live edge
   const [priceOffset, setPriceOffset] = useState(0); // vertical pan, in price units (drag up/down)
+  const [priceScale, setPriceScale] = useState(1); // vertical zoom (drag the price axis)
+  const [fullscreen, setFullscreen] = useState(false);
   const pinchRef = useRef(null); // { startDist, startVisible }
   const dragRef = useRef(null); // { startX, lastX, lastT, startOffset, moved, vel }
   const momentumRef = useRef(null); // { vel, lastT, raf }
@@ -82,8 +84,15 @@ export default function Chart({
   const markerHitsRef = useRef([]); // [{ x, y, half, position, kind }]
   const dprRef = useRef(window.devicePixelRatio || 1);
 
-  // aggregate 1-minute candles into the selected timeframe
-  const tfCandles = useMemo(() => aggregateCandles(candles, timeframe), [candles, timeframe]);
+  // aggregate 1-minute candles into the selected timeframe. De-duplicate by
+  // timestamp first (the bridge can emit overlapping history on reconnect) and
+  // keep ascending order so candles + time labels never render doubled.
+  const tfCandles = useMemo(() => {
+    const byT = new Map();
+    for (const c of candles) byT.set(c.t, c);
+    const unique = [...byT.values()].sort((a, b) => a.t - b.t);
+    return aggregateCandles(unique, timeframe);
+  }, [candles, timeframe]);
 
   // refs that need fresh values inside RAF closures
   const tfLenRef = useRef(tfCandles.length);
@@ -199,8 +208,12 @@ export default function Chart({
       if (p.strike < lo) lo = p.strike;
     }
     const pad = (hi - lo) * 0.12 + 1;
-    // priceOffset is the manual vertical pan (drag) shifting the whole window up/down.
-    return { hi: hi + pad + priceOffset, lo: lo - pad + priceOffset, vmax, slots, slotCount, baseIdx, want, rightPad };
+    // priceScale zooms the price axis around its centre; priceOffset pans it up/down.
+    const top = hi + pad;
+    const bot = lo - pad;
+    const center = (top + bot) / 2;
+    const half = ((top - bot) / 2) * priceScale;
+    return { hi: center + half + priceOffset, lo: center - half + priceOffset, vmax, slots, slotCount, baseIdx, want, rightPad };
   })();
 
   // coord helpers
@@ -564,6 +577,7 @@ export default function Chart({
     setVisibleCount(DEFAULT_VISIBLE);
     setViewOffset(0);
     setPriceOffset(0);
+    setPriceScale(1);
     cancelMomentum();
   }, [timeframe, cancelMomentum]);
 
@@ -626,6 +640,13 @@ export default function Chart({
       drag.lastX = clientX;
       drag.lastT = now;
       if (!drag.moved) return;
+      // Drag started on the right price-axis gutter → zoom the price scale
+      // (drag up = zoom in / bigger candles, drag down = zoom out).
+      if (drag.axis) {
+        const nextScale = drag.startScale * Math.exp(totalDy / 220);
+        setPriceScale(Math.max(0.05, Math.min(20, nextScale)));
+        return;
+      }
       // horizontal pan (candles)
       const candleDelta = totalDx / layout.candleW;
       setViewOffset(clampOffset(drag.startOffset - candleDelta));
@@ -633,8 +654,8 @@ export default function Chart({
       const range = view.hi - view.lo;
       const pricePerPx = range / (layout.priceBot - layout.priceTop);
       const clamp = range * 4; // keep the candles within reach
-      const next = drag.startPriceOffset + totalDy * pricePerPx;
-      setPriceOffset(Math.max(-clamp, Math.min(clamp, next)));
+      const nextOffset = drag.startPriceOffset + totalDy * pricePerPx;
+      setPriceOffset(Math.max(-clamp, Math.min(clamp, nextOffset)));
     },
     [layout, view, clampOffset]
   );
@@ -642,18 +663,23 @@ export default function Chart({
   const startDrag = useCallback(
     (clientX, clientY) => {
       cancelMomentum();
+      const rect = canvasRef.current?.getBoundingClientRect();
+      const x = rect ? clientX - rect.left : 0;
+      const onAxis = !!layout && x >= layout.chartW; // right gutter → price-scale zoom
       dragRef.current = {
         startX: clientX,
         lastX: clientX,
         startY: clientY,
         startOffset: viewOffset,
         startPriceOffset: priceOffset,
+        startScale: priceScale,
+        axis: onAxis,
         lastT: performance.now(),
         moved: false,
         vel: 0
       };
     },
-    [viewOffset, priceOffset, cancelMomentum]
+    [viewOffset, priceOffset, priceScale, layout, cancelMomentum]
   );
 
   const endDrag = useCallback(() => {
@@ -674,6 +700,7 @@ export default function Chart({
     cancelMomentum();
     setViewOffset(0);
     setPriceOffset(0);
+    setPriceScale(1);
   }, [cancelMomentum]);
 
   const handlePointerDown = (e) => {
@@ -755,7 +782,7 @@ export default function Chart({
   })();
 
   return (
-    <div className="chart-wrap" ref={wrapRef}>
+    <div className={`chart-wrap${fullscreen ? ' fullscreen' : ''}`} ref={wrapRef}>
       {ohlc && (
         <div className="ohlc-legend">
           <span className="ohlc-pair" style={{ color: ohlc.up ? theme.up : theme.down }}>
@@ -850,7 +877,23 @@ export default function Chart({
           <div className="tt-row"><span>V</span><b>{hover.greeks.vega.toFixed(2)}</b></div>
         </div>
       )}
-      {(Math.abs(viewOffset) > 0.5 || Math.abs(priceOffset) > 0.01) && (
+      <button
+        className="fs-btn"
+        onClick={() => setFullscreen((f) => !f)}
+        aria-label="Toggle fullscreen chart"
+        title={fullscreen ? 'Exit fullscreen' : 'Fullscreen chart'}
+      >
+        {fullscreen ? (
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5" />
+          </svg>
+        ) : (
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M8 3H4v4M16 3h4v4M8 21H4v-4M16 21h4v-4" />
+          </svg>
+        )}
+      </button>
+      {(Math.abs(viewOffset) > 0.5 || Math.abs(priceOffset) > 0.01 || Math.abs(priceScale - 1) > 0.01) && (
         <button
           className="snap-now-btn"
           onClick={snapToNow}
