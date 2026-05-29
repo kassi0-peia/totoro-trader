@@ -269,6 +269,15 @@ export default function App() {
     triggerPulse();
   };
 
+  const closeAllPositions = () => {
+    if (!feed.executionEnabled) { showToast('Execution disabled', 'err'); return; }
+    const open = positionsLive.filter((p) => p.status === 'open');
+    if (!open.length) { showToast('No open positions', 'err'); return; }
+    if (!window.confirm(`Close all ${open.length} open position${open.length > 1 ? 's' : ''} at market?`)) return;
+    open.forEach((p) => closePosition(p));
+    showToast(`Closing ${open.length} position${open.length > 1 ? 's' : ''}`, 'ok');
+  };
+
   const reversePosition = (pos) => {
     if (!feed.executionEnabled) { showToast('Execution disabled', 'err'); return; }
     if (!pos || pos.status !== 'open') return;
@@ -363,7 +372,13 @@ export default function App() {
               <div className={`fill-toast fill-${toast.kind}`} role="status">{toast.text}</div>
             )}
           </div>
-          <TimeframeBar value={timeframe} onChange={setTimeframe} theme={theme} />
+          <TimeframeBar
+            value={timeframe}
+            onChange={setTimeframe}
+            theme={theme}
+            onCloseAll={closeAllPositions}
+            canCloseAll={feed.executionEnabled && positionsLive.some((p) => p.status === 'open')}
+          />
 
           <Positions
             positions={positionsLive}

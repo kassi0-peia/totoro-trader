@@ -500,12 +500,13 @@ export default function Chart({
       }
 
       if (entryXY) {
-        const ay = entryXY.y + MARKER_HALF + 4;
-        drawArrow(entryXY.x, ay, MARKER_HALF, 'up', color);
+        const ay = entryXY.y + MARKER_HALF + 16;
+        drawArrow(entryXY.x, ay, MARKER_HALF, 'up', '#fff'); // entry symbols: white
+
         markerHitsRef.current.push({ x: entryXY.x, y: ay, half: MARKER_HALF + 3, position: pos, kind: 'entry' });
       }
       if (exitXY) {
-        const ay = exitXY.y - MARKER_HALF - 4;
+        const ay = exitXY.y - MARKER_HALF - 16;
         drawArrow(exitXY.x, ay, MARKER_HALF, 'down', color);
         markerHitsRef.current.push({ x: exitXY.x, y: ay, half: MARKER_HALF + 3, position: pos, kind: 'exit' });
       }
