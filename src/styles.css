@@ -68,8 +68,6 @@ button {
 }
 
 .totoro-wrap {
-  position: relative;
-  isolation: isolate;            /* contain the tint blend to the mascot */
   width: 44px;
   height: 44px;
   display: flex;
@@ -89,24 +87,6 @@ button {
   user-select: none;
 }
 
-/* Tint the mascot with the theme accent: a colour layer in 'color' blend mode,
-   masked to the totoro silhouette so it keeps the original light/dark detail. */
-.totoro-wrap::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background: var(--c-accent);
-  mix-blend-mode: color;
-  -webkit-mask-image: var(--totoro-src);
-  mask-image: var(--totoro-src);
-  -webkit-mask-size: contain;
-  mask-size: contain;
-  -webkit-mask-repeat: no-repeat;
-  mask-repeat: no-repeat;
-  -webkit-mask-position: center;
-  mask-position: center;
-  pointer-events: none;
-}
 
 .totoro-wrap.pulse {
   animation: breathe 3s ease-in-out infinite, fillPulse 420ms ease-out;
@@ -431,6 +411,32 @@ button {
   color: var(--c-text);
   border-color: var(--c-text);
 }
+
+.tf-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 22px; /* keep panic + close-all apart so they're not misclick-adjacent */
+}
+
+.tf-panic,
+.tf-closeall {
+  background: transparent;
+  border: 1px solid var(--c-border);
+  height: 28px;
+  padding: 0 14px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  font-family: inherit;
+  cursor: pointer;
+  transition: filter 140ms, opacity 140ms;
+}
+
+.tf-panic:hover,
+.tf-closeall:hover:not(:disabled) { filter: brightness(1.25); }
+.tf-closeall:disabled { opacity: 0.4; cursor: default; }
 
 .chart-wrap {
   position: relative;

@@ -96,6 +96,7 @@ const orders = new Map();        // orderId -> { clientRef, action, strike, righ
 let trades = [];                 // today's fills (blotter): { id, orderId, ts, action, strike, right, expiry, qty, price }
 let tradesDate = null;           // ET YYYYMMDD the trades array belongs to
 let tradeSeq = 0;                // monotonic blotter id, seeded above persisted ids so reused IBKR order ids never collide
+const seenExecIds = new Set();   // IBKR execId dedupe for the reqExecutions backfill
 
 // IBKR-authoritative open option positions (shared across all connected clients).
 const ibPositions = new Map();   // conId -> { conId, symbol, strike, right, expiry, qty, avgCost, avgPremium }
@@ -343,6 +344,14 @@ function wireHandlers(api) {
     }
   });
 
+  // Executions are the authoritative fill ledger: they arrive live AND can be
+  // replayed via reqExecutions on (re)connect, so fills that happen while the
+  // bridge is disconnected (e.g. the mobile app stole the Gateway login) are
+  // still captured. Deduped by execId so the live orderStatus path never doubles.
+  api.on(EventName.execDetails, (_reqId, contract, execution) => {
+    recordExecution(contract, execution);
+  });
+
   // IBKR-authoritative positions: initial snapshot then live updates on every change.
   // We track only option positions (the app trades SPXW); a net qty of 0 means flat.
   api.on(EventName.position, (_acct, contract, pos, avgCost) => {
@@ -398,6 +407,7 @@ function wireHandlers(api) {
     try { api.reqManagedAccts(); } catch {}
     try { api.reqAllOpenOrders(); } catch {} // re-learn any pre-existing orders
     try { api.reqPositions(); } catch {}     // authoritative positions for all clients
+    try { api.reqExecutions(reqSeq++, {}); } catch {} // backfill fills missed while disconnected
     requestAccountSummary();                 // funds / buying power
     subscribeSpx();
     requestSpxHistory();
@@ -985,10 +995,56 @@ function recordTrade(orderId, o, filled, avgFillPrice) {
   // Dedupe per order via a session flag (orderStatus can repeat). We can't key on
   // orderId because IBKR reuses ids across reconnects — that would drop real fills.
   if (o.recorded) return;
+  // execDetails (which carries an execId) may have logged this exact fill first —
+  // don't double-count if the two channels race.
+  if (trades.some((t) => t.execId && t.orderId === orderId && t.action === o.action && t.strike === o.strike && t.right === o.right)) { o.recorded = true; return; }
   o.recorded = true;
   const trade = {
     id: ++tradeSeq, orderId, ts: Date.now(), action: o.action, strike: o.strike,
     right: o.right, expiry: o.expiry, qty: filled, price: avgFillPrice
+  };
+  trades.push(trade);
+  if (trades.length > 1000) trades = trades.slice(-1000);
+  saveTrades();
+  broadcast({ type: 'trade', trade });
+}
+
+// reqExecutions backfill times arrive in the account's US/Central tz (the tz in
+// the 399 messages); May = CDT (UTC-5). Live execDetails times can instead come
+// in UTC, which parses into the future — recordExecution clamps with
+// Math.min(parse, Date.now()) so a live fill falls back to "now" (accurate).
+function parseExecTime(s) {
+  const m = String(s || '').match(/(\d{4})(\d{2})(\d{2})\D+(\d{2}):(\d{2}):(\d{2})/);
+  if (!m) return Date.now();
+  return Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) + 5 * 3600 * 1000;
+}
+
+// Record a fill from an execDetails event. Idempotent via execId, and skips a
+// fill the live orderStatus path already captured (those carry no execId).
+function recordExecution(contract, execution) {
+  if (!contract || contract.secType !== 'OPT') return;
+  const execId = execution?.execId;
+  if (!execId || seenExecIds.has(execId)) return;
+  const action = String(execution.side || '').toUpperCase().startsWith('S') ? 'SELL' : 'BUY';
+  const strike = Number(contract.strike);
+  const right = contract.right === 'P' ? 'P' : 'C';
+  const expiry = String(contract.lastTradeDateOrContractMonth || '').slice(0, 8);
+  const qty = execution.shares ?? 0;
+  const price = execution.avgPrice ?? execution.price ?? 0;
+  seenExecIds.add(execId);
+  if (!(strike > 0) || !qty) return;
+  // Don't double-count a fill the live orderStatus path already recorded.
+  const dup = trades.some((t) => !t.execId && t.orderId === execution.orderId &&
+    t.strike === strike && t.right === right && t.action === action && t.qty === qty);
+  if (dup) return;
+  const ord = orders.get(execution.orderId);
+  if (ord) ord.recorded = true; // stop the orderStatus path from re-recording this fill
+  const today = todayET();
+  if (today !== tradesDate) { tradesDate = today; trades = []; }
+  const trade = {
+    id: ++tradeSeq, orderId: execution.orderId, execId,
+    ts: Math.min(parseExecTime(execution.time), Date.now()),
+    action, strike, right, expiry, qty, price
   };
   trades.push(trade);
   if (trades.length > 1000) trades = trades.slice(-1000);
@@ -1007,6 +1063,7 @@ function loadTrades() {
     if (d.date === tradesDate && Array.isArray(d.trades)) {
       trades = d.trades;
       tradeSeq = trades.reduce((m, t) => Math.max(m, t.id || 0), 0);
+      for (const t of trades) if (t.execId) seenExecIds.add(t.execId);
       console.log(`[ibkr] loaded ${trades.length} trade(s) for ${tradesDate}`);
     }
   } catch {}

@@ -9,7 +9,7 @@ const OPTIONS = [
   { label: '1D', value: 1440 }
 ];
 
-export default function TimeframeBar({ value, onChange, theme }) {
+export default function TimeframeBar({ value, onChange, theme, onCloseAll, canCloseAll }) {
   return (
     <div className="tf-bar">
       <span className="tf-label">TIMEFRAME</span>
@@ -27,6 +27,27 @@ export default function TimeframeBar({ value, onChange, theme }) {
             </button>
           );
         })}
+      </div>
+      <div className="tf-actions">
+        <button
+          className="tf-panic"
+          onClick={() => window.open('https://www.interactivebrokers.com/sso/Login', '_blank', 'noopener')}
+          title="Open IBKR Client Portal — manual control / escape hatch"
+          style={{ borderColor: theme.accent, color: theme.accent }}
+        >
+          ↗ IBKR
+        </button>
+        {onCloseAll && (
+          <button
+            className="tf-closeall"
+            onClick={onCloseAll}
+            disabled={!canCloseAll}
+            title="Close all open positions at market"
+            style={{ borderColor: theme.loss, color: theme.loss }}
+          >
+            ✕ CLOSE ALL
+          </button>
+        )}
       </div>
     </div>
   );
