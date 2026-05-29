@@ -110,8 +110,11 @@ export default function Chart({
   }, []);
 
   const clampOffset = useCallback((o) => {
+    const want = Math.max(MIN_VISIBLE, Math.min(MAX_VISIBLE, visibleCountRef.current));
     const max = Math.max(0, tfLenRef.current - visibleCountRef.current);
-    if (o < 0) return 0;
+    // allow scrolling past the live edge into empty future space (offset < 0)
+    const min = -Math.floor(want * 0.66);
+    if (o < min) return min;
     if (o > max) return max;
     return o;
   }, []);
@@ -129,7 +132,10 @@ export default function Chart({
       const delta = m.vel * dt;
       setViewOffset((o) => {
         const next = clampOffset(o + delta);
-        if (next === 0 || next >= tfLenRef.current - visibleCountRef.current) {
+        const want = Math.max(MIN_VISIBLE, Math.min(MAX_VISIBLE, visibleCountRef.current));
+        const min = -Math.floor(want * 0.66);
+        const max = Math.max(0, tfLenRef.current - visibleCountRef.current);
+        if (next <= min || next >= max) {
           momentumRef.current = null;
         }
         return next;
@@ -663,6 +669,13 @@ export default function Chart({
     return { moved };
   }, [startMomentum]);
 
+  // recenter the live candle + price line at the default (centered) home view
+  const snapToNow = useCallback(() => {
+    cancelMomentum();
+    setViewOffset(0);
+    setPriceOffset(0);
+  }, [cancelMomentum]);
+
   const handlePointerDown = (e) => {
     if (e.pointerType !== 'mouse') return;
     canvasRef.current?.setPointerCapture?.(e.pointerId);
@@ -836,6 +849,23 @@ export default function Chart({
           <div className="tt-row"><span>Θ</span><b>{hover.greeks.theta.toFixed(2)}</b></div>
           <div className="tt-row"><span>V</span><b>{hover.greeks.vega.toFixed(2)}</b></div>
         </div>
+      )}
+      {(Math.abs(viewOffset) > 0.5 || Math.abs(priceOffset) > 0.01) && (
+        <button
+          className="snap-now-btn"
+          onClick={snapToNow}
+          aria-label="Recenter on current price and candle"
+          title="Snap to now"
+        >
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+            <circle cx="12" cy="12" r="6" />
+            <circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none" />
+            <line x1="12" y1="2" x2="12" y2="5" />
+            <line x1="12" y1="19" x2="12" y2="22" />
+            <line x1="2" y1="12" x2="5" y2="12" />
+            <line x1="19" y1="12" x2="22" y2="12" />
+          </svg>
+        </button>
       )}
     </div>
   );

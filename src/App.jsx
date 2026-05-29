@@ -28,8 +28,20 @@ const posKey = (strike, right, expiry) => `${strike}${right}:${expiry}`;
 let posSeq = 1;
 
 export default function App() {
-  const [themeKey, setThemeKey] = useState('forest');
+  const [themeKey, setThemeKey] = useState(() => {
+    try { const k = localStorage.getItem('tt.theme'); if (k && THEMES[k]) return k; } catch {}
+    return 'forest';
+  });
+  const [neutralChrome, setNeutralChrome] = useState(() => {
+    try { return localStorage.getItem('tt.neutralChrome') === '1'; } catch {}
+    return false;
+  });
   const theme = THEMES[themeKey];
+  // Under neutral chrome the chart paints a black background (grid stays neutral too).
+  const chartTheme = useMemo(
+    () => (neutralChrome ? { ...theme, bg: '#0a0a0c', grid: '#17171a' } : theme),
+    [theme, neutralChrome]
+  );
   const [timeframe, setTimeframe] = useState(1);
   const [positions, setPositions] = useState([]);
   const [pending, setPending] = useState(null);
@@ -97,7 +109,18 @@ export default function App() {
     Object.entries(theme).forEach(([k, v]) => {
       if (typeof v === 'string') root.style.setProperty(`--c-${k}`, v);
     });
-  }, [theme]);
+    // Neutral chrome: off-chart UI uses soft dark grey instead of the theme's
+    // tinted surfaces. The chart keeps full theme colors (painted on canvas).
+    if (neutralChrome) {
+      root.style.setProperty('--c-bg', '#0f0f11');
+      root.style.setProperty('--c-surface', '#17171a');
+      root.style.setProperty('--c-surfaceAlt', '#1d1d21');
+      root.style.setProperty('--c-border', '#2b2b31');
+    }
+  }, [theme, neutralChrome]);
+
+  useEffect(() => { try { localStorage.setItem('tt.theme', themeKey); } catch {} }, [themeKey]);
+  useEffect(() => { try { localStorage.setItem('tt.neutralChrome', neutralChrome ? '1' : '0'); } catch {} }, [neutralChrome]);
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 800);
@@ -305,6 +328,8 @@ export default function App() {
             current={themeKey}
             onPick={(k) => { setThemeKey(k); setSettingsOpen(false); }}
             onClose={() => setSettingsOpen(false)}
+            neutralChrome={neutralChrome}
+            onToggleNeutral={() => setNeutralChrome((v) => !v)}
           />
         </div>
       )}
@@ -317,7 +342,7 @@ export default function App() {
               candles={feed.candles}
               price={feed.price}
               positions={positionsLive}
-              theme={theme}
+              theme={chartTheme}
               ivol={IVOL}
               timeToExpiryYears={T}
               timeframe={timeframe}

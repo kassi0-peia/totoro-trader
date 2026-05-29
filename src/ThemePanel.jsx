@@ -1,7 +1,7 @@
 import React from 'react';
 import { THEMES, THEME_KEYS } from './themes.js';
 
-export default function ThemePanel({ open, current, onPick, onClose }) {
+export default function ThemePanel({ open, current, onPick, onClose, neutralChrome = false, onToggleNeutral }) {
   if (!open) return null;
   return (
     <div className="theme-panel" onClick={(e) => e.stopPropagation()}>
@@ -29,6 +29,18 @@ export default function ThemePanel({ open, current, onPick, onClose }) {
             </button>
           );
         })}
+      </div>
+      <div className="theme-toggle-row">
+        <span>Neutral chrome</span>
+        <button
+          className={`toggle-switch${neutralChrome ? ' on' : ''}`}
+          role="switch"
+          aria-checked={neutralChrome}
+          onClick={onToggleNeutral}
+          aria-label="Toggle neutral grey chrome"
+        >
+          <span className="toggle-knob" />
+        </button>
       </div>
     </div>
   );

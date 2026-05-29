@@ -117,14 +117,22 @@ button {
   text-overflow: ellipsis;
 }
 
-.subtitle {
+.feed-status {
+  font-size: 10px;
+  color: var(--c-muted);
+  letter-spacing: 0.18em;
+  margin-bottom: 2px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.subtitle-text {
+  display: block;
   font-size: 10px;
   color: var(--c-muted);
   letter-spacing: 0.18em;
   margin-top: 2px;
-  display: flex;
-  align-items: center;
-  gap: 6px;
 }
 
 .feed-dot {
@@ -264,6 +272,49 @@ button {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 10px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.theme-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--c-border);
+  font-size: 12px;
+  color: var(--c-muted);
+  letter-spacing: 0.04em;
+}
+.toggle-switch {
+  width: 38px;
+  height: 20px;
+  border-radius: 10px;
+  background: var(--c-surfaceAlt);
+  border: 1px solid var(--c-border);
+  position: relative;
+  cursor: pointer;
+  padding: 0;
+  transition: background 160ms, border-color 160ms;
+}
+.toggle-switch.on {
+  background: var(--c-accent);
+  border-color: var(--c-accent);
+}
+.toggle-knob {
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--c-text);
+  transition: transform 160ms, background 160ms;
+}
+.toggle-switch.on .toggle-knob {
+  transform: translateX(18px);
+  background: #0a0c12;
 }
 
 .theme-card {
@@ -366,6 +417,29 @@ button {
   height: 56vh;
   min-height: 360px;
   background: var(--c-bg);
+}
+
+.snap-now-btn {
+  position: absolute;
+  right: 12px;
+  bottom: 30px;
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  color: var(--c-muted);
+  border-radius: 50%;
+  cursor: pointer;
+  z-index: 6;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28);
+  transition: color 160ms, border-color 160ms;
+}
+.snap-now-btn:hover {
+  color: var(--c-accent);
+  border-color: var(--c-accent);
 }
 
 .chart-canvas {
