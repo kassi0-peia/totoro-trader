@@ -29,6 +29,12 @@ function priceDecimals(step) {
   if (Number.isInteger(step)) return 0;
   return step >= 1 ? 1 : 2;
 }
+// Nice time-axis increments in minutes, so labels land on round clock times.
+const TIME_STEPS = [1, 2, 5, 10, 15, 20, 30, 60, 120, 240, 360, 720, 1440];
+function niceTimeStep(rawMin, tfMin) {
+  for (const s of TIME_STEPS) if (s >= rawMin && s >= tfMin) return s;
+  return TIME_STEPS[TIME_STEPS.length - 1];
+}
 function fmtVol(v) {
   if (v >= 1e6) return (v / 1e6).toFixed(2) + 'M';
   if (v >= 1e3) return (v / 1e3).toFixed(1) + 'k';
@@ -68,6 +74,7 @@ export default function Chart({
   const [hoverIdx, setHoverIdx] = useState(null); // tfCandles index under cursor (for OHLC legend)
   const [visibleCount, setVisibleCount] = useState(DEFAULT_VISIBLE);
   const [viewOffset, setViewOffset] = useState(0); // candles back from the live edge
+  const [priceOffset, setPriceOffset] = useState(0); // vertical pan, in price units (drag up/down)
   const pinchRef = useRef(null); // { startDist, startVisible }
   const dragRef = useRef(null); // { startX, lastX, lastT, startOffset, moved, vel }
   const momentumRef = useRef(null); // { vel, lastT, raf }
@@ -186,7 +193,8 @@ export default function Chart({
       if (p.strike < lo) lo = p.strike;
     }
     const pad = (hi - lo) * 0.12 + 1;
-    return { hi: hi + pad, lo: lo - pad, vmax, slots, slotCount, baseIdx, want, rightPad };
+    // priceOffset is the manual vertical pan (drag) shifting the whole window up/down.
+    return { hi: hi + pad + priceOffset, lo: lo - pad + priceOffset, vmax, slots, slotCount, baseIdx, want, rightPad };
   })();
 
   // coord helpers
@@ -287,21 +295,28 @@ export default function Chart({
       ctx.fillText(p.toFixed(pDec), layout.chartW + 6, y);
     }
 
-    // vertical grid every ~8 slots; only label slots with real candles
-    const tickEvery = Math.max(4, Math.floor(view.slotCount / 10));
+    // vertical grid on "nice" time increments (… 5, 10, 15, 30, 60 min …),
+    // labelling only candles whose timestamp lands on a round clock boundary.
+    // Size the step to the pixels available (labels live in the real-candle
+    // region, ~left half), keeping them >= ~1.6 label-widths apart so the axis
+    // stays readable when zoomed in on a narrow mobile screen.
+    const labelW = ctx.measureText('00:00').width;
+    const realPx = view.want * layout.candleW;
+    const maxLabels = Math.max(1, Math.floor(realPx / (labelW * 1.6)));
+    const spanMin = view.want * timeframe;
+    const stepMs = niceTimeStep(spanMin / maxLabels, timeframe) * 60000;
     ctx.textAlign = 'center';
-    for (let i = 0; i < view.slotCount; i += tickEvery) {
+    for (let i = 0; i < view.slotCount; i++) {
       const c = view.slots[i];
+      if (!c || c.t % stepMs !== 0) continue;
       const x = indexToX(i);
       ctx.beginPath();
       ctx.moveTo(x + 0.5, layout.priceTop);
       ctx.lineTo(x + 0.5, layout.volBot);
       ctx.strokeStyle = theme.grid;
       ctx.stroke();
-      if (c) {
-        ctx.fillStyle = theme.muted;
-        ctx.fillText(fmtTime(c.t), x, layout.h - 8);
-      }
+      ctx.fillStyle = theme.muted;
+      ctx.fillText(fmtTime(c.t), x, layout.h - 8);
     }
 
     // separator between price + volume
@@ -507,7 +522,7 @@ export default function Chart({
   // touch: single-finger drag, two-finger pinch
   const handleTouchStart = (e) => {
     if (e.touches.length === 1) {
-      startDrag(e.touches[0].clientX);
+      startDrag(e.touches[0].clientX, e.touches[0].clientY);
       pinchRef.current = null;
     } else if (e.touches.length === 2) {
       // upgrade to pinch; abandon any in-flight drag
@@ -534,7 +549,7 @@ export default function Chart({
     }
     if (e.touches.length === 1 && dragRef.current) {
       e.preventDefault();
-      handleDragMove(e.touches[0].clientX);
+      handleDragMove(e.touches[0].clientX, e.touches[0].clientY);
     }
   };
 
@@ -542,6 +557,7 @@ export default function Chart({
   useEffect(() => {
     setVisibleCount(DEFAULT_VISIBLE);
     setViewOffset(0);
+    setPriceOffset(0);
     cancelMomentum();
   }, [timeframe, cancelMomentum]);
 
@@ -589,12 +605,13 @@ export default function Chart({
 
   // shared drag-move logic, used by mouse + single-finger touch
   const handleDragMove = useCallback(
-    (clientX) => {
+    (clientX, clientY) => {
       const drag = dragRef.current;
-      if (!drag || !layout) return;
+      if (!drag || !layout || !view) return;
       const stepDx = clientX - drag.lastX;
       const totalDx = clientX - drag.startX;
-      if (!drag.moved && Math.abs(totalDx) > 4) drag.moved = true;
+      const totalDy = clientY - drag.startY;
+      if (!drag.moved && (Math.abs(totalDx) > 4 || Math.abs(totalDy) > 4)) drag.moved = true;
       const now = performance.now();
       const dt = Math.max(1, now - drag.lastT);
       const dOffset = -stepDx / layout.candleW; // drag right → offset decreases
@@ -603,25 +620,34 @@ export default function Chart({
       drag.lastX = clientX;
       drag.lastT = now;
       if (!drag.moved) return;
+      // horizontal pan (candles)
       const candleDelta = totalDx / layout.candleW;
       setViewOffset(clampOffset(drag.startOffset - candleDelta));
+      // vertical pan (price window): drag down → reveal higher prices above.
+      const range = view.hi - view.lo;
+      const pricePerPx = range / (layout.priceBot - layout.priceTop);
+      const clamp = range * 4; // keep the candles within reach
+      const next = drag.startPriceOffset + totalDy * pricePerPx;
+      setPriceOffset(Math.max(-clamp, Math.min(clamp, next)));
     },
-    [layout, clampOffset]
+    [layout, view, clampOffset]
   );
 
   const startDrag = useCallback(
-    (clientX) => {
+    (clientX, clientY) => {
       cancelMomentum();
       dragRef.current = {
         startX: clientX,
         lastX: clientX,
+        startY: clientY,
         startOffset: viewOffset,
+        startPriceOffset: priceOffset,
         lastT: performance.now(),
         moved: false,
         vel: 0
       };
     },
-    [viewOffset, cancelMomentum]
+    [viewOffset, priceOffset, cancelMomentum]
   );
 
   const endDrag = useCallback(() => {
@@ -640,13 +666,13 @@ export default function Chart({
   const handlePointerDown = (e) => {
     if (e.pointerType !== 'mouse') return;
     canvasRef.current?.setPointerCapture?.(e.pointerId);
-    startDrag(e.clientX);
+    startDrag(e.clientX, e.clientY);
   };
 
   const handlePointerMove = (e) => {
     if (e.pointerType !== 'mouse') return;
     if (dragRef.current) {
-      handleDragMove(e.clientX);
+      handleDragMove(e.clientX, e.clientY);
       if (dragRef.current.moved) setHover(null);
       return;
     }

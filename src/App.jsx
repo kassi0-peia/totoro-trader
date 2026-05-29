@@ -23,6 +23,7 @@ function timeToExpiryYearsAt(now) {
 }
 
 const rightOf = (type) => (type === 'call' ? 'C' : 'P');
+const posKey = (strike, right, expiry) => `${strike}${right}:${expiry}`;
 
 let posSeq = 1;
 
@@ -120,12 +121,59 @@ export default function App() {
     return { ...g, source: 'bs' };
   };
 
+  // Reconcile local optimistic lifecycle with IBKR-authoritative positions so a
+  // position opened on any device shows everywhere. Server truth drives which
+  // positions are open; local records add entry price / greeks / lifecycle tags.
+  const mergedPositions = useMemo(() => {
+    const server = feed.positions || [];
+    const localWorkingByKey = new Map();
+    for (const p of positions) {
+      if (p.status === 'open' || p.status === 'closing' || p.status === 'pending') {
+        localWorkingByKey.set(posKey(p.strike, rightOf(p.type), p.expiry), p);
+      }
+    }
+    const out = [];
+    const usedKeys = new Set();
+    // 1. server-truth open positions, enriched with local lifecycle where present
+    for (const sp of server) {
+      const k = posKey(sp.strike, sp.right, sp.expiry);
+      usedKeys.add(k);
+      const loc = localWorkingByKey.get(k);
+      out.push({
+        id: loc?.id ?? `srv:${sp.conId}`,
+        source: 'ibkr',
+        type: sp.right === 'C' ? 'call' : 'put',
+        side: sp.qty > 0 ? 'long' : 'short',
+        strike: sp.strike,
+        qty: Math.abs(sp.qty),
+        expiry: sp.expiry,
+        status: loc?.status === 'closing' ? 'closing' : 'open',
+        entryPremium: loc?.entryPremium ?? sp.avgPremium ?? null,
+        entryPrice: loc?.entryPrice ?? null,
+        openedAt: loc?.openedAt ?? null,
+        closeRef: loc?.closeRef ?? null,
+        note: loc?.note ?? null
+      });
+    }
+    // 2. local pending orders not yet on the server (optimistic, this device only)
+    for (const p of positions) {
+      if (p.status !== 'pending') continue;
+      if (usedKeys.has(posKey(p.strike, rightOf(p.type), p.expiry))) continue;
+      out.push(p);
+    }
+    // 3. local closed/rejected history (this device)
+    for (const p of positions) {
+      if (p.status === 'closed' || p.status === 'rejected') out.push(p);
+    }
+    return out;
+  }, [positions, feed.positions]);
+
   const positionsLive = useMemo(() => {
-    return positions.map((p) =>
+    return mergedPositions.map((p) =>
       p.status === 'closed' || p.status === 'rejected' ? p : { ...p, greeksLive: resolveGreeks(p.strike, p.type) }
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [positions, feed.price, feed.greeksMap, T]);
+  }, [mergedPositions, feed.price, feed.greeksMap, T]);
 
   const openPL = positionsLive
     .filter((p) => p.status === 'open' && p.entryPremium != null)
@@ -174,31 +222,43 @@ export default function App() {
     setTimeout(() => setPulse(false), 420);
   };
 
-  const closePosition = (id) => {
+  // Mark the matching local open position as closing, or — when the position is
+  // only known from server truth (opened on another device) — add a local
+  // closing shadow so the fill still resolves into closed P&L on this device.
+  const markClosing = (prev, pos, closeRef) => {
+    const k = posKey(pos.strike, rightOf(pos.type), pos.expiry);
+    const hasLocalOpen = prev.some((p) => p.status === 'open' && posKey(p.strike, rightOf(p.type), p.expiry) === k);
+    if (hasLocalOpen) {
+      return prev.map((p) => (p.status === 'open' && posKey(p.strike, rightOf(p.type), p.expiry) === k ? { ...p, status: 'closing', closeRef } : p));
+    }
+    return [...prev, {
+      id: posSeq++, type: pos.type, side: pos.side, strike: pos.strike, qty: pos.qty, expiry: pos.expiry,
+      status: 'closing', entryPremium: pos.entryPremium, entryPrice: pos.entryPrice, openedAt: pos.openedAt, closeRef
+    }];
+  };
+
+  const closePosition = (pos) => {
     if (!feed.executionEnabled) { showToast('Execution disabled', 'err'); return; }
-    setPositions((prev) => prev.map((p) => {
-      if (p.id !== id || p.status !== 'open') return p;
-      const ref = feed.sendOrder({ intent: 'close', action: 'SELL', strike: p.strike, right: rightOf(p.type), qty: p.qty, expiry: p.expiry });
-      if (!ref) { showToast('Close not sent — not connected', 'err'); return p; }
-      return { ...p, status: 'closing', closeRef: ref };
-    }));
+    if (!pos || pos.status !== 'open') return;
+    const ref = feed.sendOrder({ intent: 'close', action: pos.side === 'long' ? 'SELL' : 'BUY', strike: pos.strike, right: rightOf(pos.type), qty: pos.qty, expiry: pos.expiry });
+    if (!ref) { showToast('Close not sent — not connected', 'err'); return; }
+    setPositions((prev) => markClosing(prev, pos, ref));
     triggerPulse();
   };
 
-  const reversePosition = (id) => {
+  const reversePosition = (pos) => {
     if (!feed.executionEnabled) { showToast('Execution disabled', 'err'); return; }
-    const original = positions.find((p) => p.id === id);
-    if (!original || original.status !== 'open') return;
-    const closeRef = feed.sendOrder({ intent: 'close', action: 'SELL', strike: original.strike, right: rightOf(original.type), qty: original.qty, expiry: original.expiry });
+    if (!pos || pos.status !== 'open') return;
+    const closeRef = feed.sendOrder({ intent: 'close', action: pos.side === 'long' ? 'SELL' : 'BUY', strike: pos.strike, right: rightOf(pos.type), qty: pos.qty, expiry: pos.expiry });
     if (!closeRef) { showToast('Reverse not sent — not connected', 'err'); return; }
-    const oppositeType = original.type === 'call' ? 'put' : 'call';
+    const oppositeType = pos.type === 'call' ? 'put' : 'call';
     const newStrike = nearestOtmStrike(feed.price, oppositeType, 5);
-    const openRef = feed.sendOrder({ intent: 'open', action: 'BUY', strike: newStrike, right: rightOf(oppositeType), qty: original.qty, expiry: feed.expiry });
+    const openRef = feed.sendOrder({ intent: 'open', action: 'BUY', strike: newStrike, right: rightOf(oppositeType), qty: pos.qty, expiry: feed.expiry });
     const g = resolveGreeks(newStrike, oppositeType);
     setPositions((prev) => [
-      ...prev.map((p) => (p.id === id ? { ...p, status: 'closing', closeRef } : p)),
+      ...markClosing(prev, pos, closeRef),
       {
-        id: posSeq++, type: oppositeType, side: 'long', strike: newStrike, qty: original.qty, expiry: feed.expiry,
+        id: posSeq++, type: oppositeType, side: 'long', strike: newStrike, qty: pos.qty, expiry: feed.expiry,
         status: 'pending', openRef, entryPremium: null, estPremium: g.premium,
         entryPrice: feed.price, openedAt: Date.now(), greeksLive: g
       }
@@ -276,6 +336,7 @@ export default function App() {
             onClose={closePosition}
             onReverse={reversePosition}
             executionEnabled={feed.executionEnabled}
+            funds={feed.funds}
           />
 
           <TradeHistory trades={feed.trades} theme={theme} />
