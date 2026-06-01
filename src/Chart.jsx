@@ -71,6 +71,7 @@ export default function Chart({
   const [priceScale, setPriceScale] = useState(1); // vertical zoom (drag the price axis)
   const [fullscreen, setFullscreen] = useState(false);
   const [showMarkers, setShowMarkers] = useState(true); // entry/exit trade arrows
+  const [showVolume, setShowVolume] = useState(true);   // volume pane below candles
   const pinchRef = useRef(null); // { startDist, startVisible }
   const dragRef = useRef(null); // { startX, lastX, lastT, startOffset, moved, vel }
   const momentumRef = useRef(null); // { vel, lastT, raf }
@@ -217,7 +218,7 @@ export default function Chart({
     const h = size.h;
     const chartW = w - RIGHT_AXIS;
     const totalH = h - BOTTOM_AXIS;
-    const volH = totalH * VOLUME_HEIGHT_FRAC;
+    const volH = showVolume ? totalH * VOLUME_HEIGHT_FRAC : 0;
     const priceH = totalH - volH - PADDING_TOP;
     const priceTop = PADDING_TOP;
     const priceBot = PADDING_TOP + priceH;
@@ -332,12 +333,14 @@ export default function Chart({
       ctx.fillText(fmtTime(c.t), x, layout.h - 8);
     }
 
-    // separator between price + volume
-    ctx.strokeStyle = theme.border;
-    ctx.beginPath();
-    ctx.moveTo(0, layout.priceBot + 0.5);
-    ctx.lineTo(layout.chartW, layout.priceBot + 0.5);
-    ctx.stroke();
+    // separator between price + volume (only when the volume pane is visible)
+    if (showVolume) {
+      ctx.strokeStyle = theme.border;
+      ctx.beginPath();
+      ctx.moveTo(0, layout.priceBot + 0.5);
+      ctx.lineTo(layout.chartW, layout.priceBot + 0.5);
+      ctx.stroke();
+    }
 
     // ITM shaded regions for open positions
     for (const pos of positions) {
@@ -388,15 +391,17 @@ export default function Chart({
       }
     }
 
-    // volume bars
-    for (let i = 0; i < view.slotCount; i++) {
-      const c = view.slots[i];
-      if (!c) continue;
-      const x = indexToX(i);
-      const isUp = c.close >= c.open;
-      const h = ((c.volume / Math.max(1, view.vmax)) * (layout.volBot - layout.volTop));
-      ctx.fillStyle = isUp ? theme.volUp : theme.volDown;
-      ctx.fillRect(x - bodyW / 2, layout.volBot - h, bodyW, h);
+    // volume bars (skipped entirely when the volume pane is toggled off)
+    if (showVolume) {
+      for (let i = 0; i < view.slotCount; i++) {
+        const c = view.slots[i];
+        if (!c) continue;
+        const x = indexToX(i);
+        const isUp = c.close >= c.open;
+        const h = ((c.volume / Math.max(1, view.vmax)) * (layout.volBot - layout.volTop));
+        ctx.fillStyle = isUp ? theme.volUp : theme.volDown;
+        ctx.fillRect(x - bodyW / 2, layout.volBot - h, bodyW, h);
+      }
     }
 
     // current price dashed line
@@ -512,7 +517,7 @@ export default function Chart({
         markerHitsRef.current.push({ x: exitXY.x, y: ay, half: MARKER_HALF + 3, position: pos, kind: 'exit' });
       }
     }
-  }, [candles, price, positions, theme, size, view, layout, priceToY, indexToX, timeframe, showMarkers]);
+  }, [candles, price, positions, theme, size, view, layout, priceToY, indexToX, timeframe, showMarkers, showVolume]);
 
   // wheel zoom — attach non-passive so we can preventDefault page scroll
   useEffect(() => {
@@ -895,6 +900,18 @@ export default function Chart({
         <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor">
           <path d="M12 3 L16 9 L8 9 Z" />
           <path d="M12 21 L16 15 L8 15 Z" />
+        </svg>
+      </button>
+      <button
+        className={`vol-btn${showVolume ? ' active' : ''}`}
+        onClick={() => setShowVolume((v) => !v)}
+        aria-label="Toggle volume pane"
+        title={showVolume ? 'Hide volume (give candles full height)' : 'Show volume'}
+      >
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor">
+          <rect x="4" y="13" width="4" height="7" rx="1" />
+          <rect x="10" y="8" width="4" height="12" rx="1" />
+          <rect x="16" y="4" width="4" height="16" rx="1" />
         </svg>
       </button>
       {(Math.abs(viewOffset) > 0.5 || Math.abs(priceOffset) > 0.01 || Math.abs(priceScale - 1) > 0.01) && (

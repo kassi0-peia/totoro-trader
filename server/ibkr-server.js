@@ -75,6 +75,8 @@ let basis = null;
 let basisFrozen = true;
 let basisEstimated = false; // true when from the cold-start fallback, not a real 4:00 capture
 let basisCaptureDate = null; // YYYYMMDD of the day we captured the 4:00 basis
+let esClose = null;          // raw ES price at the 4:00 capture (persisted)
+let spxClose = null;         // raw SPX price at the 4:00 capture (persisted)
 
 let session = computeSession();
 let currentExpiry = null; // SPXW expiry the chain is currently subscribed to
@@ -641,6 +643,8 @@ function captureCloseBasis() {
     basisFrozen = true;
     basisEstimated = false;
     basisCaptureDate = today;
+    esClose = esPrice;
+    spxClose = spxPrice;
     saveBasis();
     console.log(`[ibkr] 4:00 PM basis captured = ${basis.toFixed(2)} (ES ${esPrice.toFixed(2)} − SPX ${spxPrice.toFixed(2)}, simultaneous)`);
   }
@@ -978,7 +982,7 @@ function snapshotMsg() {
 
 function saveBasis() {
   try {
-    fs.writeFileSync(BASIS_FILE, JSON.stringify({ basis, basisEstimated, ts: Date.now() }));
+    fs.writeFileSync(BASIS_FILE, JSON.stringify({ basis, basisEstimated, esClose, spxClose, ts: Date.now() }));
   } catch {}
 }
 
@@ -1080,7 +1084,11 @@ function loadBasis() {
       basis = d.basis;
       basisEstimated = false;
       basisFrozen = true;
-      console.log(`[ibkr] loaded persisted 4:00 basis ${basis.toFixed(2)}`);
+      if (typeof d.esClose === 'number') esClose = d.esClose;
+      if (typeof d.spxClose === 'number') spxClose = d.spxClose;
+      const tail = (esClose != null && spxClose != null)
+        ? ` (ES ${esClose.toFixed(2)} − SPX ${spxClose.toFixed(2)})` : '';
+      console.log(`[ibkr] loaded persisted 4:00 basis ${basis.toFixed(2)}${tail}`);
     }
   } catch {}
 }
