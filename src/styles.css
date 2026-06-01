@@ -448,7 +448,8 @@ button {
 
 .snap-now-btn,
 .fs-btn,
-.markers-btn {
+.markers-btn,
+.vol-btn {
   position: absolute;
   bottom: 30px;
   width: 34px;
@@ -465,13 +466,16 @@ button {
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28);
   transition: color 160ms, border-color 160ms;
 }
-.fs-btn { right: 12px; }          /* far bottom-right corner */
-.markers-btn { right: 54px; }     /* left of fullscreen */
-.snap-now-btn { right: 96px; }    /* left of the markers toggle (only when off-centre) */
+.fs-btn { right: 12px; }            /* far bottom-right corner */
+.markers-btn { right: 54px; }
+.vol-btn { right: 96px; }
+.snap-now-btn { right: 138px; }     /* leftmost — only when off-centre */
 .snap-now-btn:hover,
 .fs-btn:hover,
 .markers-btn:hover,
-.markers-btn.active {
+.markers-btn.active,
+.vol-btn:hover,
+.vol-btn.active {
   color: var(--c-accent);
   border-color: var(--c-accent);
 }
