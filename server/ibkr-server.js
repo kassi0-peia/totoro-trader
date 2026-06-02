@@ -78,6 +78,14 @@ let basisCaptureDate = null; // YYYYMMDD of the day we captured the 4:00 basis
 let esClose = null;          // raw ES price at the 4:00 capture (persisted)
 let spxClose = null;         // raw SPX price at the 4:00 capture (persisted)
 
+// Watchdog: catches a stalled mkt-data feed or a runaway candle builder (e.g. after
+// the IBKR session is kicked when the mobile app logs in) and forces a reconnect.
+const watchdogState = { lastSpxTick: 0, lastEsTick: 0, recentBars: [] };
+const SPX_STALE_MS = 120_000;        // > 2 min with no SPX tick during RTH = stall
+const ES_STALE_MS = 300_000;         // > 5 min with no ES tick when ES is the source = stall
+const BAR_RUNAWAY = 3;               // > 3 new bars in any 60s window = runaway
+let lastWatchdogAction = 0;
+
 let session = computeSession();
 let currentExpiry = null; // SPXW expiry the chain is currently subscribed to
 
@@ -389,6 +397,9 @@ function wireHandlers(api) {
     ibPositions.clear();
     funds = null;
     acctSummaryReqId = null;
+    watchdogState.lastSpxTick = 0;
+    watchdogState.lastEsTick = 0;
+    watchdogState.recentBars = [];
     broadcastAccount();
     broadcastPositions();
     broadcastFunds();
@@ -584,22 +595,26 @@ function requestEsHistory() {
 // ── Tick handling, candles, basis ─────────────────────────────────────────────
 
 function feedSeries(series, price) {
+  // Bucket-based: derive everything from Date.now() so a drifted `series.edge`
+  // can never trigger more than one new bar per minute. The bucket is the
+  // authoritative boundary; `series.edge` is kept in sync but never trusted.
   const now = Date.now();
-  if (!series.candles.length || now >= series.edge) {
-    const last = series.candles[series.candles.length - 1];
+  const bucket = Math.floor(now / CANDLE_MS) * CANDLE_MS;
+  const last = series.candles[series.candles.length - 1];
+  if (!last || last.t < bucket) {
     const open = last ? last.close : price;
     series.candles.push({
-      t: series.edge - CANDLE_MS,
+      t: bucket,
       open,
       high: Math.max(open, price),
       low: Math.min(open, price),
       close: price,
       volume: 0
     });
-    series.edge += CANDLE_MS;
+    series.edge = bucket + CANDLE_MS;
+    watchdogState.recentBars.push(now);
     if (series.candles.length > HISTORY_CANDLES + 32) series.candles = series.candles.slice(-HISTORY_CANDLES - 32);
   } else {
-    const last = series.candles[series.candles.length - 1];
     last.high = Math.max(last.high, price);
     last.low = Math.min(last.low, price);
     last.close = price;
@@ -609,6 +624,7 @@ function feedSeries(series, price) {
 
 function feedSpxTick(price) {
   spxPrice = price;
+  watchdogState.lastSpxTick = Date.now();
   const candle = feedSeries(spx, price);
   if (session.source === 'SPX') {
     broadcast({ type: 'tick', source: 'SPX', price: spxPrice, candle });
@@ -618,6 +634,7 @@ function feedSpxTick(price) {
 
 function feedEsTick(price) {
   esPrice = price;
+  watchdogState.lastEsTick = Date.now();
   const candle = feedSeries(es, price);
   ensureOvernightBasis();
   if (session.source === 'ES') {
@@ -626,6 +643,39 @@ function feedEsTick(price) {
   }
   maybeRecenterChain(displayPrice());
 }
+
+// Watchdog: every 15s, check for (a) stalled mkt-data for the active source and
+// (b) candle-builder runaway. Either condition forces a disconnect, which the
+// 7s tryConnect loop then re-establishes (re-subscribes, re-seeds history,
+// reqExecutions backfills any missed fills, reqPositions re-emits).
+function watchdogTick() {
+  if (!connected || !ib) return;
+  const now = Date.now();
+  if (now - lastWatchdogAction < 30_000) return; // throttle to one action / 30s
+
+  if (session.source === 'SPX' && session.rth && watchdogState.lastSpxTick &&
+      now - watchdogState.lastSpxTick > SPX_STALE_MS) {
+    console.log(`[watchdog] SPX feed stalled ${Math.round((now - watchdogState.lastSpxTick) / 1000)}s — reconnecting`);
+    lastWatchdogAction = now;
+    try { ib.disconnect(); } catch {}
+    return;
+  }
+  if (session.source === 'ES' && watchdogState.lastEsTick &&
+      now - watchdogState.lastEsTick > ES_STALE_MS) {
+    console.log(`[watchdog] ES feed stalled ${Math.round((now - watchdogState.lastEsTick) / 1000)}s — reconnecting`);
+    lastWatchdogAction = now;
+    try { ib.disconnect(); } catch {}
+    return;
+  }
+  watchdogState.recentBars = watchdogState.recentBars.filter((t) => now - t < 60_000);
+  if (watchdogState.recentBars.length > BAR_RUNAWAY) {
+    console.log(`[watchdog] candle runaway (${watchdogState.recentBars.length} bars/min) — reconnecting`);
+    lastWatchdogAction = now;
+    watchdogState.recentBars = [];
+    try { ib.disconnect(); } catch {}
+  }
+}
+setInterval(watchdogTick, 15_000);
 
 // Authoritative basis: a SIMULTANEOUS snapshot of live ES and live SPX taken at
 // 4:00 PM ET. Both feeds are live at the cash close, so this is a true ES−SPX
