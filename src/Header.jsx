@@ -26,9 +26,12 @@ function formatExpiry(expiry, now) {
   return `${MONTHS[d.getMonth()]} ${d.getDate()}`;
 }
 
-export default function Header({ price, lastPrice, theme, mood, earsUp, pulse, onToggleSettings, now, live, source = 'SPX', expiry = null, account = null, accountType = null, allowLive = false }) {
-  const change = price - lastPrice;
-  const changeColor = change >= 0 ? theme.profit : theme.loss;
+export default function Header({ price, prevClose, theme, mood, earsUp, pulse, onToggleSettings, now, live, source = 'SPX', expiry = null, account = null, accountType = null, allowLive = false }) {
+  // Daily change vs the previous 4:00 PM SPX cash close.
+  const haveDaily = Number.isFinite(prevClose) && prevClose > 0 && Number.isFinite(price);
+  const change = haveDaily ? price - prevClose : NaN;
+  const changePct = haveDaily ? (change / prevClose) * 100 : NaN;
+  const changeColor = haveDaily ? (change >= 0 ? theme.profit : theme.loss) : theme.muted;
   const { h, m } = expiryCountdown(now);
   const feedColor = live ? theme.profit : theme.muted;
   const feedLabel = live ? 'LIVE' : 'SIM';
@@ -74,7 +77,9 @@ export default function Header({ price, lastPrice, theme, mood, earsUp, pulse, o
           <div className="symbol">{sourceLabel}</div>
           <div className="price">{Number.isFinite(price) ? price.toFixed(2) : '—'}</div>
           <div className="change" style={{ color: changeColor }}>
-            {change >= 0 ? '+' : '−'}{Math.abs(Number.isFinite(change) ? change : 0).toFixed(2)}
+            {haveDaily
+              ? `${change >= 0 ? '+' : '−'}${Math.abs(change).toFixed(2)} (${changePct >= 0 ? '+' : '−'}${Math.abs(changePct).toFixed(2)}%)`
+              : '—'}
           </div>
         </div>
         <button className="gear-btn" onClick={onToggleSettings} aria-label="settings">

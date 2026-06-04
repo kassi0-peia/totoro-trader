@@ -215,10 +215,6 @@ export default function App() {
     return hi - lo > 5;
   })();
 
-  const lastPriceForHeader = useMemo(() => {
-    const c = feed.candles[feed.candles.length - 1];
-    return c ? c.open : feed.price;
-  }, [feed.candles, feed.price]);
 
   const handleRequestTrade = ({ strike, type }) => {
     const g = resolveGreeks(strike, type);
@@ -321,7 +317,7 @@ export default function App() {
 
       <Header
         price={feed.price}
-        lastPrice={lastPriceForHeader}
+        prevClose={feed.spxClose}
         theme={theme}
         mood={mood}
         earsUp={earsUp}

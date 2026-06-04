@@ -1024,7 +1024,8 @@ function snapshotMsg() {
     executionEnabled,
     trades,
     positions: positionsList(),
-    funds
+    funds,
+    spxClose
   };
 }
 
