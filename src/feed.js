@@ -43,7 +43,8 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent } = {}) {
       executionEnabled: false,
       trades: [],            // today's fills (blotter)
       positions: [],         // IBKR-authoritative open option positions
-      funds: null            // { availableFunds, buyingPower, netLiquidation }
+      funds: null,           // { availableFunds, buyingPower, netLiquidation }
+      spxClose: null         // previous trading day's 4:00 PM SPX cash close
     };
   });
 
@@ -155,7 +156,8 @@ function applyMessage(s, msg) {
       executionEnabled: !!msg.executionEnabled,
       trades: Array.isArray(msg.trades) ? msg.trades : s.trades,
       positions: Array.isArray(msg.positions) ? msg.positions : s.positions,
-      funds: msg.funds ?? s.funds
+      funds: msg.funds ?? s.funds,
+      spxClose: msg.spxClose ?? s.spxClose
     };
   }
 
