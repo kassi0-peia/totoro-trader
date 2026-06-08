@@ -42,10 +42,8 @@ const WS_PORT = parseInt(process.env.WS_PORT || '8787', 10);
 // 1=live, 2=frozen, 3=delayed, 4=delayed-frozen.
 const MARKET_DATA_TYPE = parseInt(process.env.IBKR_MD_TYPE || '3', 10);
 
-// SAFETY: execution is paper-only unless ALLOW_LIVE=true is explicitly set.
-// Paper accounts (id starts with 'DU') can always execute; a live account
-// requires ALLOW_LIVE=true or all order placement is refused.
-const ALLOW_LIVE = process.env.ALLOW_LIVE === 'true';
+// The IBKR Gateway login (paper vs live) is itself the deliberate choice — no
+// secondary env-var gate. Execution is enabled whenever an account is connected.
 
 // The authoritative basis is captured at 4:00 PM ET (BASIS_CAPTURE_MIN) as a
 // SIMULTANEOUS snapshot of live ES minus live SPX, then frozen and applied to all
@@ -100,7 +98,7 @@ let reqSeq = 100;
 // Account safety + order execution state.
 let account = null;             // e.g. "DU1234567"
 let accountType = null;         // 'paper' | 'live' | null (unknown)
-let executionEnabled = false;   // gated by account type + ALLOW_LIVE
+let executionEnabled = false;   // true once an IBKR account is identified
 const orders = new Map();        // orderId -> { clientRef, action, strike, right, qty, expiry, status, filled, avgFillPrice }
 
 let trades = [];                 // today's fills (blotter): { id, orderId, ts, action, strike, right, expiry, qty, price }
@@ -687,8 +685,16 @@ function captureCloseBasis() {
   const mins = e.hh * 60 + e.mm;
   const today = ymd(e.y, e.mo, e.d);
   // session.rth is true only on weekdays in [09:30, 16:15); gate to the close window.
+  // Freshness guard: if a watchdog-driven reconnect lands just before 4:00 PM
+  // the cached esPrice/spxPrice can be stale ticks from before the stall.
+  // Capturing them would freeze a wrong basis for the next session, so we
+  // defer until a fresh tick (< 30 s old) is available on each leg. The 5-s
+  // session timer keeps retrying through the 16:00–16:15 window.
+  const now = Date.now();
+  const spxFresh = watchdogState.lastSpxTick && now - watchdogState.lastSpxTick < 30_000;
+  const esFresh = watchdogState.lastEsTick && now - watchdogState.lastEsTick < 30_000;
   if (session.rth && mins >= BASIS_CAPTURE_MIN && basisCaptureDate !== today &&
-      esPrice != null && spxPrice != null) {
+      esPrice != null && spxPrice != null && spxFresh && esFresh) {
     basis = esPrice - spxPrice;
     basisFrozen = true;
     basisEstimated = false;
@@ -838,13 +844,8 @@ function setAccount(id) {
   if (account === id) return;
   account = id;
   accountType = id.startsWith('DU') ? 'paper' : 'live';
-  // Paper can always execute; live requires the explicit ALLOW_LIVE=true opt-in.
-  executionEnabled = accountType === 'paper' || ALLOW_LIVE;
-  const banner =
-    accountType === 'live' && !ALLOW_LIVE ? 'LIVE ACCOUNT DETECTED — EXECUTION DISABLED'
-    : accountType === 'live' && ALLOW_LIVE ? 'LIVE TRADING — REAL MONEY'
-    : null;
-  console.log(`[ibkr] account ${id} (${accountType}); ALLOW_LIVE=${ALLOW_LIVE}; execution ${executionEnabled ? 'ENABLED' : 'DISABLED'}${banner ? ' — ' + banner : ''}`);
+  executionEnabled = true; // any identified IBKR account is executable
+  console.log(`[ibkr] account ${id} (${accountType}); execution ENABLED`);
   broadcastAccount();
 }
 
@@ -853,7 +854,6 @@ function accountMsg(type) {
     type,
     account,
     accountType,
-    allowLive: ALLOW_LIVE,
     executionEnabled
   };
 }
@@ -924,7 +924,7 @@ function handleOrderRequest(ws, msg) {
   const reject = (reason) => send({ type: 'orderAck', clientRef, accepted: false, reason });
 
   if (!executionEnabled) {
-    const why = accountType === 'live' ? 'live account and ALLOW_LIVE is not set' : 'no executable account connected';
+    const why = 'no executable account connected';
     return reject(`execution disabled (${why})`);
   }
   if (!ib || !connected) return reject('IBKR not connected');
@@ -1020,7 +1020,6 @@ function snapshotMsg() {
     vix: { last: vixLast, close: vixClose },
     account,
     accountType,
-    allowLive: ALLOW_LIVE,
     executionEnabled,
     trades,
     positions: positionsList(),

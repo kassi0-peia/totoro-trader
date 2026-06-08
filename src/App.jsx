@@ -155,6 +155,16 @@ export default function App() {
         localWorkingByKey.set(posKey(p.strike, rightOf(p.type), p.expiry), p);
       }
     }
+    // For positions entered via another path (mobile IBKR app, TWS, etc.) there's
+    // no local handleExecute timestamp — derive openedAt + entryPremium from the
+    // earliest matching BUY in the trade blotter so the chart can still draw
+    // an entry marker at the right time.
+    const earliestBuy = (strike, right, expiry) => {
+      const buys = (feed.trades || [])
+        .filter((t) => t.strike === strike && t.right === right && t.expiry === expiry && t.action === 'BUY')
+        .sort((a, b) => a.ts - b.ts);
+      return buys[0] || null;
+    };
     const out = [];
     const usedKeys = new Set();
     // 1. server-truth open positions, enriched with local lifecycle where present
@@ -162,6 +172,7 @@ export default function App() {
       const k = posKey(sp.strike, sp.right, sp.expiry);
       usedKeys.add(k);
       const loc = localWorkingByKey.get(k);
+      const buy = !loc ? earliestBuy(sp.strike, sp.right, sp.expiry) : null;
       out.push({
         id: loc?.id ?? `srv:${sp.conId}`,
         source: 'ibkr',
@@ -171,9 +182,9 @@ export default function App() {
         qty: Math.abs(sp.qty),
         expiry: sp.expiry,
         status: loc?.status === 'closing' ? 'closing' : 'open',
-        entryPremium: loc?.entryPremium ?? sp.avgPremium ?? null,
+        entryPremium: loc?.entryPremium ?? sp.avgPremium ?? buy?.price ?? null,
         entryPrice: loc?.entryPrice ?? null,
-        openedAt: loc?.openedAt ?? null,
+        openedAt: loc?.openedAt ?? buy?.ts ?? null,
         closeRef: loc?.closeRef ?? null,
         note: loc?.note ?? null
       });
@@ -189,7 +200,7 @@ export default function App() {
       if (p.status === 'closed' || p.status === 'rejected') out.push(p);
     }
     return out;
-  }, [positions, feed.positions]);
+  }, [positions, feed.positions, feed.trades]);
 
   const positionsLive = useMemo(() => {
     return mergedPositions.map((p) =>
@@ -294,20 +305,15 @@ export default function App() {
     triggerPulse();
   };
 
-  // Safety banner: red when a live account is detected without ALLOW_LIVE,
-  // yellow when live trading is explicitly enabled.
-  const banner =
-    feed.accountType === 'live' && !feed.allowLive
-      ? { text: 'LIVE ACCOUNT DETECTED — EXECUTION DISABLED', kind: 'danger' }
-      : feed.accountType === 'live' && feed.allowLive
-        ? { text: 'LIVE TRADING — REAL MONEY', kind: 'warn' }
-        : null;
+  // Informational banner: green LIVE TRADING when the connected account is live.
+  const banner = feed.accountType === 'live'
+    ? { text: 'LIVE TRADING', kind: 'live' }
+    : null;
 
-  // Account badge (green PAPER / yellow LIVE-enabled / red LIVE-detected), shown on the chart.
+  // Account badge — green PAPER or green LIVE; the banner across the top is what
+  // distinguishes the two visually.
   const acctLabel = feed.accountType === 'paper' ? 'PAPER' : feed.accountType === 'live' ? 'LIVE' : '—';
-  const acctColor = feed.accountType === 'paper' ? theme.profit
-    : feed.accountType === 'live' ? (feed.allowLive ? '#e0c34a' : theme.loss)
-    : theme.muted;
+  const acctColor = feed.accountType ? theme.profit : theme.muted;
 
   return (
     <div className="app" style={{ background: theme.bg, color: theme.text }}>
@@ -329,7 +335,6 @@ export default function App() {
         expiry={feed.live ? feed.expiry : null}
         account={feed.account}
         accountType={feed.accountType}
-        allowLive={feed.allowLive}
       />
 
       {settingsOpen && (

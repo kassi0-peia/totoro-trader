@@ -112,18 +112,18 @@ tracked from IBKR's reported fills — the entry/exit prices shown are the actua
 `avgFillPrice`, not the model estimate. A fill confirmation toast appears over
 the chart.
 
-**Safety is paper-only by default.** On connect the bridge reads the account id:
+**Paper or live is chosen at the IBKR Gateway login** — there's no secondary
+env-var gate. On connect the bridge reads the account id and execution is
+enabled as soon as an account is identified:
 
-| Account | `ALLOW_LIVE` | Result |
-| ------- | ------------ | ------ |
-| `DU…` (paper) | (any) | green **PAPER** badge, execution **enabled** |
-| live (non-`DU`) | unset / not `true` | red banner **"LIVE ACCOUNT DETECTED — EXECUTION DISABLED"**, all EXECUTE disabled |
-| live (non-`DU`) | `true` | yellow banner **"LIVE TRADING — REAL MONEY"**, yellow **LIVE** badge, execution enabled |
+| Account | Badge | Banner |
+| ------- | ----- | ------ |
+| `DU…` (paper) | green **PAPER** | (none) |
+| live (non-`DU`) | green **LIVE** | green **"LIVE TRADING"** across the top |
 
-The account id (e.g. `DU1234567`) is always shown next to the badge. The gate is
-enforced **both** server-side (orders are refused) and in the UI (buttons
-disabled), and fails safe — execution is disabled until an executable account is
-confirmed, and drops if the connection is lost.
+The account id (e.g. `DU1234567` / `U…`) is shown next to the badge. Execution
+fails safe — it stays disabled until an account is confirmed, and drops if the
+connection is lost.
 
 **Prerequisites / behavior:**
 - IB Gateway must have **Read-Only API disabled** (Configure → Settings → API →
@@ -133,16 +133,6 @@ confirmed, and drops if the connection is lost.
   placed until the open") — it's non-fatal and the order still fills in GTH; the
   UI surfaces it as a note, not a rejection.
 - A verified paper round-trip: BUY 1 SPXW 7515C filled @ 18.40, SELL @ 17.70.
-
-Default (no env var) is safe paper mode. To enable live trading you must
-explicitly opt in:
-
-```bash
-ALLOW_LIVE=true npm start            # or: ALLOW_LIVE=true npm run serve:https
-```
-
-The systemd unit runs without `ALLOW_LIVE`, so the service is paper-safe; add
-`Environment=ALLOW_LIVE=true` to the unit only if you intend live trading.
 
 ## Progressive Web App (install to home screen)
 
