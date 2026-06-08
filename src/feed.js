@@ -39,7 +39,6 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent } = {}) {
       // account safety gate
       account: null,
       accountType: null,     // 'paper' | 'live' | null
-      allowLive: false,
       executionEnabled: false,
       trades: [],            // today's fills (blotter)
       positions: [],         // IBKR-authoritative open option positions
@@ -152,7 +151,6 @@ function applyMessage(s, msg) {
       vix: msg.vix || s.vix,
       account: msg.account ?? null,
       accountType: msg.accountType ?? null,
-      allowLive: !!msg.allowLive,
       executionEnabled: !!msg.executionEnabled,
       trades: Array.isArray(msg.trades) ? msg.trades : s.trades,
       positions: Array.isArray(msg.positions) ? msg.positions : s.positions,
@@ -187,7 +185,6 @@ function applyMessage(s, msg) {
       ...s,
       account: msg.account ?? null,
       accountType: msg.accountType ?? null,
-      allowLive: !!msg.allowLive,
       executionEnabled: !!msg.executionEnabled
     };
   }

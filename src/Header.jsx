@@ -26,7 +26,7 @@ function formatExpiry(expiry, now) {
   return `${MONTHS[d.getMonth()]} ${d.getDate()}`;
 }
 
-export default function Header({ price, prevClose, theme, mood, earsUp, pulse, onToggleSettings, now, live, source = 'SPX', expiry = null, account = null, accountType = null, allowLive = false }) {
+export default function Header({ price, prevClose, theme, mood, earsUp, pulse, onToggleSettings, now, live, source = 'SPX', expiry = null, account = null, accountType = null }) {
   // Daily change vs the previous 4:00 PM SPX cash close.
   const haveDaily = Number.isFinite(prevClose) && prevClose > 0 && Number.isFinite(price);
   const change = haveDaily ? price - prevClose : NaN;

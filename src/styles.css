@@ -1005,8 +1005,7 @@ button {
   padding: 7px 12px;
   z-index: 30;
 }
-.safety-danger { background: #c0392b; color: #fff; }
-.safety-warn { background: #e0c34a; color: #1a1a22; }
+.safety-live { background: var(--c-profit, #5cb85c); color: #0a0c12; }
 
 .acct-block {
   display: none;            /* desktop: feed status lives in the title block */
