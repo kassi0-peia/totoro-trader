@@ -2,27 +2,44 @@ import React, { useState, useEffect } from 'react';
 
 export default function TradeModal({ pending, theme, onCancel, onExecute, executionEnabled = false, accountType = null }) {
   const [qty, setQty] = useState(1);
+  const [orderKind, setOrderKind] = useState('MKT'); // market is always the default
+  const [limitStr, setLimitStr] = useState('');
+  const [tpStr, setTpStr] = useState('');  // optional bracket take-profit (SELL LMT, native — works overnight)
+  const [slStr, setSlStr] = useState('');  // optional bracket stop (IBKR-simulated; unreliable pre-midnight)
 
   useEffect(() => {
     setQty(1);
-  }, [pending?.id]);
+    setOrderKind('MKT');
+    // Prefill the limit field with the live ask so switching to LMT is one click.
+    setLimitStr(pending?.ask != null ? pending.ask.toFixed(2) : '');
+    setTpStr('');
+    setSlStr('');
+  }, [pending?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const limit = orderKind === 'LMT' ? parseFloat(limitStr) : null;
+  const limitOk = orderKind === 'MKT' || (Number.isFinite(limit) && limit > 0);
+  const tp = tpStr.trim() === '' ? null : parseFloat(tpStr);
+  const sl = slStr.trim() === '' ? null : parseFloat(slStr);
+  const bracketOk = (tp == null || (Number.isFinite(tp) && tp > 0)) && (sl == null || (Number.isFinite(sl) && sl > 0));
+  const canExecute = executionEnabled && limitOk && bracketOk;
+  const execute = () => canExecute && onExecute(qty, orderKind === 'LMT' ? limit : null, tp, sl);
 
   useEffect(() => {
     const onKey = (e) => {
       if (e.key === 'Escape') onCancel();
-      if (e.key === 'Enter' && executionEnabled) onExecute(qty);
+      if (e.key === 'Enter') execute();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onCancel, onExecute, qty, executionEnabled]);
+  }, [onCancel, onExecute, qty, canExecute, orderKind, limitStr, tpStr, slStr]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!pending) return null;
   const { strike, type, greeks, bid, ask } = pending;
   const color = type === 'call' ? theme.callLine : theme.putLine;
   const hasQuote = bid != null && ask != null;
   const spread = hasQuote ? ask - bid : null;
-  // Market BUY pays the ask; estimate max risk off it when we have a live quote.
-  const maxRisk = (hasQuote ? ask : greeks.premium) * 100 * qty;
+  // Market BUY pays the ask (when quoted); a limit BUY can't pay more than the limit.
+  const maxRisk = (orderKind === 'LMT' && Number.isFinite(limit) ? limit : hasQuote ? ask : greeks.premium) * 100 * qty;
 
   return (
     <div className="modal-backdrop" onClick={onCancel}>
@@ -64,6 +81,62 @@ export default function TradeModal({ pending, theme, onCancel, onExecute, execut
           </div>
         </div>
 
+        <div className="qty-row">
+          <span className="qty-label">Order</span>
+          <div className="order-kind">
+            <button
+              className={`kind-btn${orderKind === 'MKT' ? ' active' : ''}`}
+              onClick={() => setOrderKind('MKT')}
+            >MKT</button>
+            <button
+              className={`kind-btn${orderKind === 'LMT' ? ' active' : ''}`}
+              onClick={() => setOrderKind('LMT')}
+            >LMT</button>
+            <input
+              className="limit-input"
+              type="number"
+              step="0.05"
+              min="0.05"
+              inputMode="decimal"
+              value={limitStr}
+              placeholder={ask != null ? ask.toFixed(2) : 'price'}
+              disabled={orderKind !== 'LMT'}
+              onChange={(e) => setLimitStr(e.target.value)}
+              aria-label="limit price"
+            />
+          </div>
+        </div>
+
+        <div className="qty-row">
+          <span className="qty-label">Bracket</span>
+          <div className="order-kind">
+            <input
+              className="limit-input"
+              type="number"
+              step="0.05"
+              min="0.05"
+              inputMode="decimal"
+              value={tpStr}
+              placeholder="TP"
+              onChange={(e) => setTpStr(e.target.value)}
+              aria-label="take profit price"
+              title="Take-profit: SELL limit attached to this entry (native — works overnight)"
+            />
+            <input
+              className="limit-input"
+              type="number"
+              step="0.05"
+              min="0.05"
+              inputMode="decimal"
+              value={slStr}
+              placeholder="SL"
+              onChange={(e) => setSlStr(e.target.value)}
+              aria-label="stop loss price"
+              title="Stop: SELL stop attached to this entry (IBKR-simulated — may not trigger before ~00:10 overnight)"
+            />
+          </div>
+        </div>
+
         <div className="risk-row">
           <span>Max Risk</span>
           <b style={{ color: theme.loss }}>${maxRisk.toFixed(0)}</b>
@@ -81,11 +154,11 @@ export default function TradeModal({ pending, theme, onCancel, onExecute, execut
           <button className="btn-ghost" onClick={onCancel}>Cancel</button>
           <button
             className="btn-execute"
-            style={{ background: executionEnabled ? color : theme.surfaceAlt, color: executionEnabled ? '#0a0c12' : theme.muted, cursor: executionEnabled ? 'pointer' : 'not-allowed' }}
-            onClick={() => executionEnabled && onExecute(qty)}
-            disabled={!executionEnabled}
+            style={{ background: canExecute ? color : theme.surfaceAlt, color: canExecute ? '#0a0c12' : theme.muted, cursor: canExecute ? 'pointer' : 'not-allowed' }}
+            onClick={execute}
+            disabled={!canExecute}
           >
-            {executionEnabled ? 'EXECUTE' : 'DISABLED'}
+            {!executionEnabled ? 'DISABLED' : orderKind === 'LMT' ? `BUY LMT ${limitOk ? limitStr : '…'}` : 'EXECUTE'}
           </button>
         </div>
       </div>
