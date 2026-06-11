@@ -15,5 +15,14 @@ server/.trades.json
 # generated basis-check reports
 basis-check-*.txt
 
+# recorded demo clips (REC button)
+*.webm
+
 # original mascot source (the transparent cut-out lives at src/totoro.png)
 totoro-original.png
+
+# desktop screenshots dropped in the repo folder
+Screenshot from *.png
+
+# session recaps stay local (our little secret)
+RECAP-*.md
