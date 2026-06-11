@@ -18,7 +18,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { IBApi, EventName } from '@stoqey/ib';
 import { WebSocketServer } from 'ws';
-import { computeSession, etParts, ymd } from './session.js';
+import { computeSession, etParts, ymd, lastCloseEt } from './session.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_DIR = path.resolve(__dirname, '..', 'dist');
@@ -53,10 +53,14 @@ const COLD_START_BASIS = process.env.COLD_START_BASIS != null ? parseFloat(proce
 const BASIS_CAPTURE_MIN = 16 * 60; // 4:00 PM ET — when SPX cash settles and both feeds are live
 
 const STRIKE_STEP = 5;
-const CHAIN_HALF_WIDTH = 10;
+// ±20 strikes (±100 pts) — 82 option subs + SPX/ES/VIX = 85 lines, under IBKR's
+// default 100-line market-data cap. Covers far-OTM strikes on wide-range days.
+const CHAIN_HALF_WIDTH = 20;
 const RECENTRE_THRESHOLD = 2;
 const CANDLE_MS = 60_000;
-const HISTORY_CANDLES = 480;
+// ~2 days of 1-min bars (ES trades ~23h/day ≈ 1380/day). Snapshot payload at
+// this size is ~250 KB — fine for the LAN websocket.
+const HISTORY_CANDLES = 3000;
 
 let connected = false;
 
@@ -78,10 +82,23 @@ let spxClose = null;         // raw SPX price at the 4:00 capture (persisted)
 
 // Watchdog: catches a stalled mkt-data feed or a runaway candle builder (e.g. after
 // the IBKR session is kicked when the mobile app logs in) and forces a reconnect.
-const watchdogState = { lastSpxTick: 0, lastEsTick: 0, recentBars: [] };
+const watchdogState = {
+  lastSpxTick: 0,
+  lastEsTick: 0,
+  recentBars: [],
+  // History-seed health: if a request was issued (Requested != 0) and the
+  // matching "finished" event never landed (Seeded < Requested) within
+  // HIST_SEED_TIMEOUT_MS, the watchdog re-requests against a (hopefully now
+  // healthy) HMDS farm.
+  spxHistRequestedAt: 0,
+  spxHistSeededAt: 0,
+  esHistRequestedAt: 0,
+  esHistSeededAt: 0
+};
 const SPX_STALE_MS = 120_000;        // > 2 min with no SPX tick during RTH = stall
 const ES_STALE_MS = 300_000;         // > 5 min with no ES tick when ES is the source = stall
 const BAR_RUNAWAY = 3;               // > 3 new bars in any 60s window = runaway
+const HIST_SEED_TIMEOUT_MS = 60_000; // hist seed never finishes within 60s = retry
 let lastWatchdogAction = 0;
 
 let session = computeSession();
@@ -115,7 +132,7 @@ let ib = null;
 let connectedPort = null;
 let connecting = false;
 let mktDataTypeSent = false;
-let warnedCompeting = false;
+let dataDelayed = false;         // true after 10197: a competing live session holds the market-data line
 
 loadBasis();
 loadTrades();
@@ -156,6 +173,9 @@ wss.on('connection', (ws) => {
     try { msg = JSON.parse(data); } catch { return; }
     if (!msg) return;
     if (msg.type === 'order') handleOrderRequest(ws, msg);
+    else if (msg.type === 'history') handleHistoryRequest(ws, msg);
+    else if (msg.type === 'optHistory') handleOptHistoryRequest(ws, msg);
+    else if (msg.type === 'quote') handleQuoteRequest(ws, msg);
     else if (msg.type === 'cancel') handleCancel(ws, msg);
     else if (msg.type === 'cancelAll') {
       if (ib && connected) { try { ib.reqGlobalCancel(); console.log('[ibkr] global cancel requested'); } catch (e) { console.log('cancelAll failed', e.message); } }
@@ -268,10 +288,7 @@ function wireHandlers(api) {
     if (code >= 2100 && code < 2200) return;
     if (QUIET_CODES.has(code)) return;
     if (code === 10197) {
-      if (!warnedCompeting) {
-        warnedCompeting = true;
-        console.log('[ibkr] 10197: another live session holds the market-data line; using delayed data. Close the other IBKR session (mobile/web/live TWS) for live ticks.');
-      }
+      setDelayed(true);
       return;
     }
     // Order-related messages arrive with reqId = the orderId. IBKR sends both hard
@@ -302,6 +319,10 @@ function wireHandlers(api) {
     console.log('[ibkr] socket connected, waiting for handshake');
   });
 
+  api.on(EventName.tickSnapshotEnd, (reqId) => {
+    finishQuoteSnap(reqId);
+  });
+
   // Account list arrives on connect; the first account drives the safety gate.
   api.on(EventName.managedAccounts, (accountsList) => {
     const first = String(accountsList || '').split(',')[0].trim();
@@ -319,11 +340,14 @@ function wireHandlers(api) {
         right: contract?.right,
         expiry: String(contract?.lastTradeDateOrContractMonth || '').slice(0, 8),
         qty: order?.totalQuantity,
+        orderType: order?.orderType,
+        limit: order?.lmtPrice ?? null,
         status: orderState?.status || 'open',
         filled: 0,
         avgFillPrice: 0
       });
       console.log(`[ibkr] recovered open order ${orderId}: ${order?.action} ${contract?.strike}${contract?.right} (${orderState?.status})`);
+      broadcastOrders();
     }
   });
 
@@ -333,6 +357,7 @@ function wireHandlers(api) {
     o.status = status;
     o.filled = filled;
     o.avgFillPrice = avgFillPrice;
+    broadcastOrders();
     broadcast({
       type: 'fill',
       clientRef: o.clientRef,
@@ -384,9 +409,13 @@ function wireHandlers(api) {
     console.log('[ibkr] socket disconnected');
     setStatus(false);
     resetSubscriptions();
+    resetBasisFill();
+    tfHistInFlight.clear();
+    optHistInFlight.clear();
     ib = null;
     connectedPort = null;
     mktDataTypeSent = false;
+    dataDelayed = false;
     // Drop the safety gate until a fresh account is confirmed.
     account = null;
     accountType = null;
@@ -398,6 +427,10 @@ function wireHandlers(api) {
     watchdogState.lastSpxTick = 0;
     watchdogState.lastEsTick = 0;
     watchdogState.recentBars = [];
+    watchdogState.spxHistRequestedAt = 0;
+    watchdogState.spxHistSeededAt = 0;
+    watchdogState.esHistRequestedAt = 0;
+    watchdogState.esHistSeededAt = 0;
     broadcastAccount();
     broadcastPositions();
     broadcastFunds();
@@ -427,10 +460,28 @@ function wireHandlers(api) {
     evaluateSession();    // establish currentExpiry (chain subscribes once a price arrives)
   });
 
+  // TWS reports the type actually served per subscription (1 live, 2 frozen,
+  // 3 delayed, 4 delayed-frozen). This is the only "all clear" after a 10197.
+  // Only the SPX sub drives the flag: it sits on the entitlement 10197 takes
+  // away, and per-farm mixes (e.g. CME live while CBOE delayed) must not flap it.
+  api.on(EventName.marketDataType, (reqId, mdType) => {
+    if (subs.get(reqId)?.kind !== 'spx') return;
+    setDelayed(mdType === 3 || mdType === 4);
+  });
+
   api.on(EventName.tickPrice, (tickerId, field, value) => {
     const s = subs.get(tickerId);
     if (!s) return;
     // 4=LAST, 9=CLOSE, 68=DELAYED_LAST, 75=DELAYED_CLOSE; 1/2=BID/ASK, 66/67=DELAYED_BID/ASK.
+    if (s.kind === 'quote-snap') {
+      if (!(value > 0)) return;
+      if (field === 1 || field === 66) s.bid = value;
+      else if (field === 2 || field === 67) s.ask = value;
+      else if (field === 4 || field === 68) s.last = value;
+      else if (field === 6 || field === 72) s.high = value;  // day high / delayed
+      else if (field === 7 || field === 73) s.low = value;   // day low / delayed
+      return;
+    }
     if (s.kind === 'spx') {
       if (!(value > 0)) return;
       if (field === 4 || field === 68) feedSpxTick(value);
@@ -444,6 +495,8 @@ function wireHandlers(api) {
       if (!entry || entry.expiry !== currentExpiry || value < 0) return; // -1 = no quote
       if (field === 1 || field === 66) { entry.bid = value; broadcast(chainPayload(entry)); }
       else if (field === 2 || field === 67) { entry.ask = value; broadcast(chainPayload(entry)); }
+      else if (field === 6 || field === 72) { entry.dayHigh = value; broadcast(chainPayload(entry)); }
+      else if (field === 7 || field === 73) { entry.dayLow = value; broadcast(chainPayload(entry)); }
     } else if (s.kind === 'vix') {
       if (!(value > 0)) return;
       if (field === 4 || field === 68) { vixLast = value; broadcastVix(); }
@@ -492,6 +545,45 @@ function wireHandlers(api) {
   api.on(EventName.historicalData, (reqId, time, open, high, low, close, volume) => {
     const s = subs.get(reqId);
     if (!s) return;
+    if (s.kind === 'opt-hist') {
+      if (typeof time === 'string' && time.startsWith('finished')) {
+        subs.delete(reqId);
+        optHistInFlight.delete(s.key);
+        optHistCache.set(s.key, { candles: s.candles, ts: Date.now() });
+        broadcast({ type: 'optHistoryResult', strike: s.strike, right: s.right, expiry: s.expiry, candles: s.candles });
+        return;
+      }
+      const t = parseHistTime(time);
+      if (t != null) s.candles.push({ t, close });
+      return;
+    }
+    if (s.kind === 'tf-hist') {
+      if (typeof time === 'string' && time.startsWith('finished')) {
+        subs.delete(reqId);
+        tfHistInFlight.delete(s.tf);
+        tfHistCache.set(s.tf, { candles: s.candles, ts: Date.now() });
+        broadcast({ type: 'historyResult', tf: s.tf, candles: s.candles });
+        console.log(`[ibkr] tf-hist ${s.tf}m complete (${s.candles.length} bars)`);
+        return;
+      }
+      const t = parseHistTime(time);
+      if (t != null) s.candles.push({ t, open, high, low, close, volume: Math.max(volume, 0) });
+      return;
+    }
+    if (s.kind === 'basis-fill-spx' || s.kind === 'basis-fill-es') {
+      if (typeof time === 'string' && time.startsWith('finished')) {
+        subs.delete(reqId);
+        finishBasisFill();
+        return;
+      }
+      const t = parseHistTime(time);
+      if (t == null || !basisFill.target) return;
+      if (t === basisFill.target.closeMs - 60_000) {
+        if (s.kind === 'basis-fill-spx') basisFill.spxBarClose = close;
+        else basisFill.esBarClose = close;
+      }
+      return;
+    }
     const series = s.kind === 'spx-hist' ? spx : s.kind === 'es-hist' ? es : null;
     if (!series) return;
     if (typeof time === 'string' && time.startsWith('finished')) {
@@ -499,8 +591,11 @@ function wireHandlers(api) {
       const lastClose = series.candles.length ? series.candles[series.candles.length - 1].close : null;
       if (s.kind === 'spx-hist' && spxPrice == null) spxPrice = lastClose;
       if (s.kind === 'es-hist' && esPrice == null) { esPrice = lastClose; ensureOvernightBasis(); }
+      if (s.kind === 'spx-hist') watchdogState.spxHistSeededAt = Date.now();
+      if (s.kind === 'es-hist') watchdogState.esHistSeededAt = Date.now();
       broadcast(snapshotMsg());
       console.log(`[ibkr] ${s.kind} seed complete (${series.candles.length} bars)`);
+      maybeBackfillBasis(); // a missed 4:00 capture may now be reconstructable
       return;
     }
     const t = parseHistTime(time);
@@ -541,13 +636,15 @@ function broadcastVix() {
 function requestSpxHistory() {
   if (!ib) return;
   spx.candles = []; // fresh seed — avoid stacking duplicates on reconnect/re-seed
+  watchdogState.spxHistRequestedAt = Date.now();
+  watchdogState.spxHistSeededAt = 0;
   const reqId = reqSeq++;
   subs.set(reqId, { kind: 'spx-hist' });
   try {
     ib.reqHistoricalData(
       reqId,
       { symbol: 'SPX', secType: 'IND', exchange: 'CBOE', currency: 'USD' },
-      '', '1 D', '1 min', 'TRADES', 1, 2, false
+      '', '2 D', '1 min', 'TRADES', 1, 2, false
     );
   } catch (e) {
     console.log('[ibkr] SPX reqHistoricalData failed:', e.message);
@@ -580,11 +677,13 @@ function subscribeEs() {
 function requestEsHistory() {
   if (!ib || !esContract) return;
   es.candles = []; // fresh seed — avoid stacking duplicates on reconnect/re-seed
+  watchdogState.esHistRequestedAt = Date.now();
+  watchdogState.esHistSeededAt = 0;
   const reqId = reqSeq++;
   subs.set(reqId, { kind: 'es-hist' });
   try {
     // useRTH=0 to include the overnight Globex session.
-    ib.reqHistoricalData(reqId, esContract, '', '1 D', '1 min', 'TRADES', 0, 2, false);
+    ib.reqHistoricalData(reqId, esContract, '', '2 D', '1 min', 'TRADES', 0, 2, false);
   } catch (e) {
     console.log('[ibkr] ES reqHistoricalData failed:', e.message);
   }
@@ -671,6 +770,26 @@ function watchdogTick() {
     lastWatchdogAction = now;
     watchdogState.recentBars = [];
     try { ib.disconnect(); } catch {}
+    return;
+  }
+
+  // History-seed stall: HMDS can silently no-reply on slow days. If a request
+  // went out but "finished" never arrived within HIST_SEED_TIMEOUT_MS, re-issue.
+  // We don't disconnect for this — just retry the historical request itself.
+  if (watchdogState.spxHistRequestedAt &&
+      watchdogState.spxHistSeededAt < watchdogState.spxHistRequestedAt &&
+      now - watchdogState.spxHistRequestedAt > HIST_SEED_TIMEOUT_MS) {
+    console.log('[watchdog] spx-hist seed stalled — re-requesting');
+    lastWatchdogAction = now;
+    requestSpxHistory();
+    return;
+  }
+  if (esContract && watchdogState.esHistRequestedAt &&
+      watchdogState.esHistSeededAt < watchdogState.esHistRequestedAt &&
+      now - watchdogState.esHistRequestedAt > HIST_SEED_TIMEOUT_MS) {
+    console.log('[watchdog] es-hist seed stalled — re-requesting');
+    lastWatchdogAction = now;
+    requestEsHistory();
   }
 }
 setInterval(watchdogTick, 15_000);
@@ -719,6 +838,104 @@ function ensureOvernightBasis() {
   }
 }
 
+// Basis backfill: if the 4:00 PM live capture was missed (e.g. delayed data
+// while a competing live session held the data line through the close), the
+// persisted snapshot silently goes a day stale — the header daily change and
+// expired-position settlement marks then measure against the wrong day's close.
+// Reconstruct the snapshot from the 1-min bars that close at 16:00 ET: the bar
+// closes of both legs are near-simultaneous, so this matches a live capture to
+// within ticks. Tries the seeded series first; falls back to a targeted 2-min
+// history request when the close minute fell outside the seed windows (the ES
+// seed keeps only the last 480 bars).
+let basisFillInFlight = false;
+let basisFillTimer = null;
+const basisFill = { target: null, spxBarClose: null, esBarClose: null };
+
+function maybeBackfillBasis() {
+  if (basisFillInFlight || !ib || !connected) return;
+  const target = lastCloseEt();
+  if (!target) return;
+  if (basisCaptureDate === target.ymd && !basisEstimated) return; // snapshot is current
+  const barT = target.closeMs - 60_000; // 1-min bar covering 15:59–16:00 ET
+  const spxBar = spx.candles.find((c) => c.t === barT);
+  const esBar = es.candles.find((c) => c.t === barT);
+  if (spxBar && esBar) {
+    applyBackfilledBasis(target, spxBar.close, esBar.close, 'seeded');
+    return;
+  }
+  basisFillInFlight = true;
+  basisFill.target = target;
+  basisFill.spxBarClose = spxBar ? spxBar.close : null;
+  basisFill.esBarClose = esBar ? esBar.close : null;
+  const end = histEndUtc(target.closeMs);
+  if (basisFill.spxBarClose == null) {
+    requestCloseBar('basis-fill-spx', { symbol: 'SPX', secType: 'IND', exchange: 'CBOE', currency: 'USD' }, end, 1);
+  }
+  if (basisFill.esBarClose == null) {
+    if (!esContract) { resetBasisFill(); return; } // can't fetch the ES leg yet
+    requestCloseBar('basis-fill-es', esContract, end, 0);
+  }
+  // HMDS can silently no-reply (or error without a finished event) — don't let
+  // a dead request pin the in-flight flag forever.
+  clearTimeout(basisFillTimer);
+  basisFillTimer = setTimeout(resetBasisFill, 60_000);
+}
+
+function requestCloseBar(kind, contract, end, useRth) {
+  const reqId = reqSeq++;
+  subs.set(reqId, { kind });
+  try {
+    ib.reqHistoricalData(reqId, contract, end, '120 S', '1 min', 'TRADES', useRth, 2, false);
+  } catch (e) {
+    console.log(`[ibkr] ${kind} reqHistoricalData failed:`, e.message);
+  }
+}
+
+// IBKR endDateTime in instant form: "YYYYMMDD-HH:MM:SS" (UTC).
+function histEndUtc(ms) {
+  const d = new Date(ms);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getUTCFullYear()}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}-${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`;
+}
+
+function finishBasisFill() {
+  // Two legs may finish at different times — wait until no basis-fill request remains.
+  for (const s of subs.values()) {
+    if (s.kind === 'basis-fill-spx' || s.kind === 'basis-fill-es') return;
+  }
+  const t = basisFill.target;
+  if (t && basisFill.spxBarClose != null && basisFill.esBarClose != null) {
+    applyBackfilledBasis(t, basisFill.spxBarClose, basisFill.esBarClose, 'fetched');
+  } else if (t) {
+    console.log(`[ibkr] basis backfill for ${t.ymd}: 16:00 close bars unavailable (spx=${basisFill.spxBarClose}, es=${basisFill.esBarClose})`);
+  }
+  resetBasisFill();
+}
+
+function resetBasisFill() {
+  clearTimeout(basisFillTimer);
+  basisFillTimer = null;
+  basisFillInFlight = false;
+  basisFill.target = null;
+  basisFill.spxBarClose = null;
+  basisFill.esBarClose = null;
+  for (const [reqId, s] of [...subs]) {
+    if (s.kind === 'basis-fill-spx' || s.kind === 'basis-fill-es') subs.delete(reqId);
+  }
+}
+
+function applyBackfilledBasis(target, spxBarClose, esBarClose, how) {
+  basis = esBarClose - spxBarClose;
+  basisFrozen = true;
+  basisEstimated = false;
+  basisCaptureDate = target.ymd;
+  esClose = esBarClose;
+  spxClose = spxBarClose;
+  saveBasis();
+  console.log(`[ibkr] 4:00 basis backfilled (${how} bars, ${target.ymd}) = ${basis.toFixed(2)} (ES ${esBarClose.toFixed(2)} − SPX ${spxBarClose.toFixed(2)})`);
+  broadcast(snapshotMsg());
+}
+
 function shiftCandle(c, b) {
   return { t: c.t, open: c.open - b, high: c.high - b, low: c.low - b, close: c.close - b, volume: c.volume };
 }
@@ -731,9 +948,15 @@ function displayPrice() {
 }
 
 function displayCandles() {
-  if (session.source === 'SPX') return spx.candles;
   const b = basis ?? 0;
-  return es.candles.map((c) => shiftCandle(c, b));
+  if (session.source === 'ES') return es.candles.map((c) => shiftCandle(c, b));
+  // SPX (RTH): show overnight ES (shifted to SPX-equiv) before today's RTH SPX
+  // bars so the previous session's flow stays visible past 9:30. Merge by
+  // timestamp — SPX wins on collisions because cash is the truth during RTH.
+  const byT = new Map();
+  for (const c of es.candles) byT.set(c.t, shiftCandle(c, b));
+  for (const c of spx.candles) byT.set(c.t, c);
+  return [...byT.values()].sort((a, b) => a.t - b.t);
 }
 
 // ── Option chain ──────────────────────────────────────────────────────────────
@@ -820,6 +1043,24 @@ function evaluateSession() {
 
 setInterval(evaluateSession, 5000);
 
+// Retry a missed basis backfill every 5 min (no-op while the snapshot is
+// current). Catches the case where HMDS was still blocked at seed time.
+setInterval(maybeBackfillBasis, 300_000);
+
+// While DELAYED, re-subscribe SPX every 2 min: TWS only re-evaluates the data
+// line on a fresh request, so without this the badge stays stuck after the
+// competing session logs out. A live verdict (marketDataType 1) flips the flag
+// and setDelayed() reconnects to refresh the remaining subscriptions.
+setInterval(() => {
+  if (!dataDelayed || !ib || !connected) return;
+  for (const [reqId, s] of [...subs]) {
+    if (s.kind !== 'spx') continue;
+    try { ib.cancelMktData(reqId); } catch {}
+    subs.delete(reqId);
+  }
+  subscribeSpx();
+}, 120_000);
+
 // ── Misc ──────────────────────────────────────────────────────────────────────
 
 function resetSubscriptions() {
@@ -836,6 +1077,21 @@ function setStatus(s) {
   connected = s;
   console.log(`[ibkr] status -> ${s ? 'LIVE' : 'DISCONNECTED'}`);
   broadcast({ type: 'status', connected });
+}
+
+function setDelayed(d) {
+  if (dataDelayed === d) return;
+  dataDelayed = d;
+  console.log(d
+    ? '[ibkr] market data -> DELAYED (10197: a competing live session holds the line; close the other IBKR session for live ticks)'
+    : '[ibkr] market data -> live');
+  broadcast({ type: 'dataDelayed', delayed: d });
+  if (!d && ib) {
+    // The upgrade verdict came from the SPX probe alone — reconnect so every
+    // other sub (chain greeks, ES, VIX) is re-established on the live line too.
+    console.log('[ibkr] data line restored — reconnecting to refresh all subscriptions');
+    try { ib.disconnect(); } catch {}
+  }
 }
 
 // ── Account safety ──────────────────────────────────────────────────────────
@@ -893,6 +1149,30 @@ function broadcastPositions() {
   broadcast({ type: 'positions', positions: positionsList() });
 }
 
+// Working (unfilled, uncanceled) orders — shown on every device so a resting
+// order can always be seen and canceled, even after a page reload.
+const DEAD_ORDER_STATUSES = new Set(['Filled', 'Cancelled', 'ApiCancelled', 'Inactive', 'error']);
+
+function workingOrdersList() {
+  return [...orders.entries()]
+    .filter(([, o]) => !DEAD_ORDER_STATUSES.has(o.status))
+    .map(([orderId, o]) => ({
+      orderId,
+      action: o.action,
+      strike: o.strike,
+      right: o.right,
+      expiry: o.expiry,
+      qty: o.qty,
+      orderType: o.orderType ?? null,
+      limit: o.limit ?? null,
+      status: o.status
+    }));
+}
+
+function broadcastOrders() {
+  broadcast({ type: 'orders', orders: workingOrdersList() });
+}
+
 function broadcastFunds() {
   broadcast({ type: 'funds', funds });
 }
@@ -936,22 +1216,59 @@ function handleOrderRequest(ws, msg) {
   const expiry = /^\d{8}$/.test(String(msg.expiry || '')) ? String(msg.expiry) : currentExpiry;
   if (!(strike > 0) || !qty || !expiry) return reject('invalid order (strike/qty/expiry)');
 
+  // Optional limit price: caps what a resting order can pay (a queued MKT order
+  // fills at whatever the overnight opening rotation prints — a blank check).
+  const limit = Number(msg.limit);
+  const isLimit = Number.isFinite(limit) && limit > 0;
+  // Optional bracket children (BUY-to-open only): take-profit limit and/or stop.
+  // The TP is a native limit (works overnight); the stop is IBKR-simulated for
+  // options, so overnight it inherits the evening-hold behavior — caller beware.
+  const takeProfit = Number(msg.takeProfit);
+  const stopLoss = Number(msg.stopLoss);
+  const wantTp = action === 'BUY' && Number.isFinite(takeProfit) && takeProfit > 0;
+  const wantSl = action === 'BUY' && Number.isFinite(stopLoss) && stopLoss > 0;
+
   const orderId = reqSeq++;
   const order = {
     action,
-    orderType: 'MKT',
+    orderType: isLimit ? 'LMT' : 'MKT',
+    ...(isLimit ? { lmtPrice: limit } : {}),
     totalQuantity: qty,
     tif: 'DAY',
-    transmit: true,
+    // With children attached, transmit only the LAST of the group — IBKR then
+    // activates the whole bracket atomically.
+    transmit: !(wantTp || wantSl),
     account,
     // SPXW trades the CBOE overnight session (~8:15pm–9:15am ET); without this an
     // order placed outside RTH would be held until the regular open.
     outsideRth: true
   };
-  orders.set(orderId, { clientRef, action, strike, right, expiry, qty, status: 'submitted', filled: 0, avgFillPrice: 0 });
+  orders.set(orderId, { clientRef, action, strike, right, expiry, qty, orderType: order.orderType, limit: isLimit ? limit : null, status: 'submitted', filled: 0, avgFillPrice: 0 });
   try {
     ib.placeOrder(orderId, spxwContract(strike, right, expiry), order);
-    console.log(`[ibkr] placed ${action} MKT ${qty} SPXW ${strike}${right} ${expiry} (order ${orderId})`);
+    if (wantTp || wantSl) {
+      const contract = spxwContract(strike, right, expiry);
+      if (wantTp) {
+        const tpId = reqSeq++;
+        orders.set(tpId, { clientRef: `${clientRef}:tp`, action: 'SELL', strike, right, expiry, qty, orderType: 'LMT', limit: takeProfit, status: 'submitted', filled: 0, avgFillPrice: 0 });
+        ib.placeOrder(tpId, contract, {
+          action: 'SELL', orderType: 'LMT', lmtPrice: takeProfit, totalQuantity: qty,
+          tif: 'DAY', parentId: orderId, transmit: !wantSl, account, outsideRth: true
+        });
+        console.log(`[ibkr] bracket TP SELL LMT@${takeProfit} (order ${tpId}, parent ${orderId})`);
+      }
+      if (wantSl) {
+        const slId = reqSeq++;
+        orders.set(slId, { clientRef: `${clientRef}:sl`, action: 'SELL', strike, right, expiry, qty, orderType: 'STP', limit: stopLoss, status: 'submitted', filled: 0, avgFillPrice: 0 });
+        ib.placeOrder(slId, contract, {
+          action: 'SELL', orderType: 'STP', auxPrice: stopLoss, totalQuantity: qty,
+          tif: 'DAY', parentId: orderId, transmit: true, account, outsideRth: true
+        });
+        console.log(`[ibkr] bracket SL SELL STP@${stopLoss} (order ${slId}, parent ${orderId})`);
+      }
+    }
+    console.log(`[ibkr] placed ${action} ${isLimit ? `LMT@${limit}` : 'MKT'} ${qty} SPXW ${strike}${right} ${expiry} (order ${orderId})`);
+    broadcastOrders();
     send({ type: 'orderAck', clientRef, orderId, accepted: true });
   } catch (e) {
     orders.delete(orderId);
@@ -959,11 +1276,141 @@ function handleOrderRequest(ws, msg) {
   }
 }
 
+// ── Per-timeframe history (past days/weeks/months for the chart) ─────────────
+// Bar size matched to span per IBKR's historical limits; cached so timeframe
+// flipping doesn't hammer HMDS (it rate-limits ~60 requests / 10 min).
+const HIST_TF = {
+  5:    { bar: '5 mins',  dur: '1 W' },
+  15:   { bar: '15 mins', dur: '1 M' },
+  60:   { bar: '1 hour',  dur: '3 M' },
+  240:  { bar: '4 hours', dur: '6 M' },
+  1440: { bar: '1 day',   dur: '1 Y' }
+};
+const tfHistCache = new Map();    // tf -> { candles, ts }
+const tfHistInFlight = new Set(); // tf values with a request on the wire
+
+function handleHistoryRequest(_ws, msg) {
+  const tf = Number(msg.tf);
+  const spec = HIST_TF[tf];
+  if (!spec || !ib || !connected) return;
+  const cached = tfHistCache.get(tf);
+  if (cached && Date.now() - cached.ts < 600_000) {
+    broadcast({ type: 'historyResult', tf, candles: cached.candles });
+    return;
+  }
+  if (tfHistInFlight.has(tf)) return;
+  tfHistInFlight.add(tf);
+  const reqId = reqSeq++;
+  subs.set(reqId, { kind: 'tf-hist', tf, candles: [] });
+  try {
+    ib.reqHistoricalData(reqId, { symbol: 'SPX', secType: 'IND', exchange: 'CBOE', currency: 'USD' },
+      '', spec.dur, spec.bar, 'TRADES', 1, 2, false);
+  } catch (e) {
+    console.log('[ibkr] tf-hist request failed:', e.message);
+    tfHistInFlight.delete(tf);
+    subs.delete(reqId);
+  }
+}
+
+// ── Option intraday history (the premium graph when inspecting a position) ──
+// MIDPOINT rather than TRADES: far-OTM options print sparsely, but the quote
+// mid is continuous — that's the line IBKR's own app draws.
+const optHistCache = new Map(); // strike|right|expiry -> { candles, ts }
+const optHistInFlight = new Set();
+
+function handleOptHistoryRequest(_ws, msg) {
+  const strike = Number(msg.strike);
+  const right = msg.right === 'P' ? 'P' : 'C';
+  const expiry = String(msg.expiry || currentExpiry || session.expiry);
+  if (!Number.isFinite(strike) || !ib || !connected) return;
+  const key = `${strike}|${right}|${expiry}`;
+  const cached = optHistCache.get(key);
+  if (cached && Date.now() - cached.ts < 60_000) {
+    broadcast({ type: 'optHistoryResult', strike, right, expiry, candles: cached.candles });
+    return;
+  }
+  if (optHistInFlight.has(key)) return;
+  optHistInFlight.add(key);
+  const reqId = reqSeq++;
+  subs.set(reqId, { kind: 'opt-hist', key, strike, right, expiry, candles: [] });
+  try {
+    // useRTH=0: include the GTH overnight session in the premium graph.
+    ib.reqHistoricalData(reqId, spxwContract(strike, right, expiry), '', '1 D', '1 min', 'MIDPOINT', 0, 2, false);
+  } catch (e) {
+    console.log('[ibkr] opt-hist request failed:', e.message);
+    optHistInFlight.delete(key);
+    subs.delete(reqId);
+  }
+}
+
+// ── One-shot quote snapshots (far strikes outside the streamed chain) ────────
+// reqMktData with snapshot=true borrows a market-data line only momentarily,
+// so it works for any strike without hitting the 100-line streaming cap.
+// Results are cached briefly and broadcast so every client benefits.
+const QUOTE_CACHE_MS = 4000;
+const quoteCache = new Map();   // strike|right|expiry -> { bid, ask, last, ts }
+const quoteInFlight = new Map(); // same key -> reqId
+
+function handleQuoteRequest(_ws, msg) {
+  const strike = Number(msg.strike);
+  const right = msg.right === 'P' ? 'P' : 'C';
+  const expiry = String(msg.expiry || currentExpiry || session.expiry);
+  if (!Number.isFinite(strike) || !ib || !connected) return;
+  const key = `${strike}|${right}|${expiry}`;
+  const cached = quoteCache.get(key);
+  if (cached && Date.now() - cached.ts < QUOTE_CACHE_MS) {
+    broadcast({ type: 'quoteResult', strike, right, expiry, ...cached });
+    return;
+  }
+  if (quoteInFlight.has(key)) return; // snapshot already on the wire
+  const reqId = reqSeq++;
+  quoteInFlight.set(key, reqId);
+  subs.set(reqId, { kind: 'quote-snap', key, strike, right, expiry, bid: null, ask: null, last: null });
+  try {
+    ib.reqMktData(reqId, {
+      symbol: 'SPX', secType: 'OPT', exchange: 'SMART', currency: 'USD', tradingClass: 'SPXW',
+      lastTradeDateOrContractMonth: expiry, strike, right, multiplier: 100
+    }, '', true, false, []);
+  } catch (e) {
+    console.log('[ibkr] quote snapshot failed:', e.message);
+    quoteInFlight.delete(key);
+    subs.delete(reqId);
+    return;
+  }
+  // Belt and braces: finalize even if tickSnapshotEnd never arrives.
+  setTimeout(() => finishQuoteSnap(reqId), 5000);
+}
+
+function finishQuoteSnap(reqId) {
+  const s = subs.get(reqId);
+  if (!s || s.kind !== 'quote-snap') return;
+  subs.delete(reqId);
+  quoteInFlight.delete(s.key);
+  if (s.bid == null && s.ask == null && s.last == null) return; // nothing quoted
+  const q = { bid: s.bid, ask: s.ask, last: s.last, dayHigh: s.high ?? null, dayLow: s.low ?? null, ts: Date.now() };
+  quoteCache.set(s.key, q);
+  broadcast({ type: 'quoteResult', strike: s.strike, right: s.right, expiry: s.expiry, ...q });
+}
+
 function handleCancel(ws, msg) {
   const send = (m) => { if (ws.readyState === 1) ws.send(JSON.stringify(m)); };
-  const orderId = parseInt(msg.orderId, 10);
-  if (!ib || !connected) return send({ type: 'cancelAck', orderId, ok: false, reason: 'not connected' });
-  if (!orderId) return send({ type: 'cancelAck', ok: false, reason: 'no orderId' });
+  if (!ib || !connected) return send({ type: 'cancelAck', ok: false, reason: 'not connected' });
+  let orderId = parseInt(msg.orderId, 10) || null;
+  // Resolve by clientRef, then by contract — clientRefs don't survive a bridge
+  // restart, but recovered open orders still carry strike/right/expiry.
+  if (!orderId && msg.clientRef) {
+    for (const [id, o] of orders) {
+      if (o.clientRef === msg.clientRef) { orderId = id; break; }
+    }
+  }
+  if (!orderId && msg.strike != null) {
+    for (const [id, o] of orders) {
+      if (o.strike === msg.strike && o.right === msg.right &&
+          (!msg.expiry || o.expiry === msg.expiry) &&
+          o.status !== 'Filled' && o.status !== 'Cancelled' && o.status !== 'error') { orderId = id; break; }
+    }
+  }
+  if (!orderId) return send({ type: 'cancelAck', ok: false, reason: 'order not found' });
   try {
     ib.cancelOrder(orderId, '');
     console.log(`[ibkr] cancel requested for order ${orderId}`);
@@ -988,7 +1435,7 @@ function chainPayload(e) {
     strike: e.strike,
     optionType: e.right === 'C' ? 'call' : 'put',
     premium: e.premium, delta: e.delta, gamma: e.gamma, theta: e.theta, vega: e.vega, iv: e.iv,
-    bid: e.bid, ask: e.ask
+    bid: e.bid, ask: e.ask, dayHigh: e.dayHigh, dayLow: e.dayLow
   };
 }
 
@@ -1001,12 +1448,13 @@ function snapshotMsg() {
       strike: e.strike,
       type: e.right === 'C' ? 'call' : 'put',
       premium: e.premium, delta: e.delta, gamma: e.gamma, theta: e.theta, vega: e.vega, iv: e.iv,
-      bid: e.bid, ask: e.ask
+      bid: e.bid, ask: e.ask, dayHigh: e.dayHigh, dayLow: e.dayLow
     });
   }
   return {
     type: 'snapshot',
     connected,
+    delayed: dataDelayed,
     source: session.source,
     price: displayPrice(),
     candles: displayCandles(),
@@ -1023,6 +1471,7 @@ function snapshotMsg() {
     executionEnabled,
     trades,
     positions: positionsList(),
+    orders: workingOrdersList(),
     funds,
     spxClose
   };
@@ -1032,15 +1481,18 @@ function snapshotMsg() {
 
 function saveBasis() {
   try {
-    fs.writeFileSync(BASIS_FILE, JSON.stringify({ basis, basisEstimated, esClose, spxClose, ts: Date.now() }));
+    fs.writeFileSync(BASIS_FILE, JSON.stringify({ basis, basisEstimated, esClose, spxClose, captureDate: basisCaptureDate, ts: Date.now() }));
   } catch {}
 }
 
 // ── Trade blotter (today's fills) ───────────────────────────────────────────
 
+// The blotter's "day" is the TRADE date, which rolls at 16:15 ET — not
+// midnight. Evening GTH fills (8 PM–midnight) carry the NEXT day's trade date,
+// so a midnight roll would orphan them halfway through their own session.
+// computeSession's expiry is exactly this boundary (weekend-aware too).
 function todayET() {
-  const e = etParts();
-  return ymd(e.y, e.mo, e.d);
+  return session.expiry;
 }
 
 function recordTrade(orderId, o, filled, avgFillPrice) {
@@ -1136,6 +1588,13 @@ function loadBasis() {
       basisFrozen = true;
       if (typeof d.esClose === 'number') esClose = d.esClose;
       if (typeof d.spxClose === 'number') spxClose = d.spxClose;
+      // Capture date drives the staleness check for the backfill. Older cache
+      // files lack the field — derive it from the save timestamp's ET date.
+      if (typeof d.captureDate === 'string') basisCaptureDate = d.captureDate;
+      else if (typeof d.ts === 'number') {
+        const e = etParts(new Date(d.ts));
+        basisCaptureDate = ymd(e.y, e.mo, e.d);
+      }
       const tail = (esClose != null && spxClose != null)
         ? ` (ES ${esClose.toFixed(2)} − SPX ${spxClose.toFixed(2)})` : '';
       console.log(`[ibkr] loaded persisted 4:00 basis ${basis.toFixed(2)}${tail}`);
@@ -1150,6 +1609,10 @@ function nextCandleEdge(t) {
 function parseHistTime(time) {
   if (typeof time === 'number') return time * 1000;
   const s = String(time);
+  // Daily bars come back as a bare date even with formatDate=2 — must be
+  // checked before the epoch branch (an 8-digit "20260610" is not seconds).
+  const dm = s.match(/^(\d{4})(\d{2})(\d{2})$/);
+  if (dm) return Date.UTC(+dm[1], +dm[2] - 1, +dm[3], 12);
   if (/^\d+$/.test(s)) return parseInt(s, 10) * 1000;
   const m = s.match(/^(\d{4})(\d{2})(\d{2})\s+(\d{2}):(\d{2}):(\d{2})/);
   if (m) return Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);

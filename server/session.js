@@ -48,6 +48,32 @@ export function thisOrNextTradingDay(y, mo, d) {
   return c;
 }
 
+// Epoch ms of 16:00 ET on the given ET calendar date. DST-proof: 16:00 ET is
+// 20:00 UTC under EDT and 21:00 UTC under EST — try both and verify.
+export function etCloseEpoch(y, mo, d) {
+  for (const utcHour of [20, 21]) {
+    const t = Date.UTC(y, mo - 1, d, utcHour, 0, 0);
+    const e = etParts(new Date(t));
+    if (e.y === y && e.mo === mo && e.d === d && e.hh === 16 && e.mm === 0) return t;
+  }
+  return null;
+}
+
+// Most recent weekday 16:00 ET that has already passed. Holidays are not
+// modelled (consistent with the rest of this file), so after a holiday this
+// names a day with no close bar — callers must tolerate the bar being absent.
+export function lastCloseEt(date = new Date()) {
+  let { y, mo, d } = etParts(date);
+  for (let i = 0; i < 7; i++) {
+    if (isWeekday(y, mo, d)) {
+      const closeMs = etCloseEpoch(y, mo, d);
+      if (closeMs != null && closeMs <= date.getTime()) return { ymd: ymd(y, mo, d), closeMs };
+    }
+    ({ y, mo, d } = addDays(y, mo, d, -1));
+  }
+  return null;
+}
+
 export function computeSession(date = new Date()) {
   const e = etParts(date);
   const mins = e.hh * 60 + e.mm;
