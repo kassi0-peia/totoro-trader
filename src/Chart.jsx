@@ -13,6 +13,14 @@ function fmtPrice(p) {
   return p.toFixed(2);
 }
 
+// Timeframe-aware axis label: dates for daily bars, dates+time for hourly+.
+function fmtTimeTf(t, tf) {
+  const d = new Date(t);
+  if (tf >= 1440) return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  if (tf >= 60) return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}`;
+  return fmtTime(t);
+}
+
 function fmtTime(t) {
   const d = new Date(t);
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
@@ -56,7 +64,13 @@ export default function Chart({
   timeToExpiryYears,
   timeframe,
   onRequestTrade,
-  greeksMap
+  onQuickTrade = null,
+  onClosePosition = null,
+  greeksMap,
+  requestQuote = null,
+  expectedMove = null,
+  histCandles = null,
+  showTotoro = true
 }) {
   const wrapRef = useRef(null);
   const canvasRef = useRef(null);
@@ -72,11 +86,16 @@ export default function Chart({
   const [fullscreen, setFullscreen] = useState(false);
   const [showMarkers, setShowMarkers] = useState(true); // entry/exit trade arrows
   const [showVolume, setShowVolume] = useState(true);   // volume pane below candles
+  const [recording, setRecording] = useState(false);    // screen-capture clip in progress
+  const recRef = useRef(null);                          // active MediaRecorder
+  const lastQuoteReqRef = useRef({ key: null, t: 0 });  // snapshot-quote throttle
+  const [quickMode, setQuickMode] = useState(false);    // ⚡ right-click = instant MKT order (opt-in, per session)
   const pinchRef = useRef(null); // { startDist, startVisible }
   const dragRef = useRef(null); // { startX, lastX, lastT, startOffset, moved, vel }
   const momentumRef = useRef(null); // { vel, lastT, raf }
   const suppressClickRef = useRef(false);
   const markerHitsRef = useRef([]); // [{ x, y, half, position, kind }]
+  const closeHitsRef = useRef([]);  // ✕ boxes on position lines: [{ x0, y0, x1, y1, position }]
   const dprRef = useRef(window.devicePixelRatio || 1);
 
   // aggregate 1-minute candles into the selected timeframe. De-duplicate by
@@ -86,8 +105,14 @@ export default function Chart({
     const byT = new Map();
     for (const c of candles) byT.set(c.t, c);
     const unique = [...byT.values()].sort((a, b) => a.t - b.t);
-    return aggregateCandles(unique, timeframe);
-  }, [candles, timeframe]);
+    const local = aggregateCandles(unique, timeframe);
+    if (!histCandles?.length) return local;
+    // Deep history (past days/weeks) prepended strictly before the live data's
+    // coverage — IBKR's bar alignment differs from our epoch buckets, so
+    // overlapping periods would double-draw.
+    const cutoff = local[0]?.t ?? Infinity;
+    return [...histCandles.filter((c) => c.t < cutoff), ...local];
+  }, [candles, timeframe, histCandles]);
 
   // refs that need fresh values inside RAF closures
   const tfLenRef = useRef(tfCandles.length);
@@ -318,7 +343,21 @@ export default function Chart({
     const realPx = view.want * layout.candleW;
     const maxLabels = Math.max(1, Math.floor(realPx / (labelW * 1.6)));
     const spanMin = view.want * timeframe;
-    const stepMs = niceTimeStep(spanMin / maxLabels, timeframe) * 60000;
+    let stepMin = niceTimeStep(spanMin / maxLabels, timeframe);
+    // When zoomed in tight, the chosen "nice" step can be wider than the entire
+    // visible window — then no candle's timestamp aligns to it and the time
+    // line disappears. Fall back to the largest TIME_STEP that fits the window
+    // so at least one label is guaranteed.
+    if (stepMin > spanMin) {
+      let fallback = timeframe;
+      for (const s of TIME_STEPS) {
+        if (s < timeframe) continue;
+        if (s > spanMin) break;
+        fallback = s;
+      }
+      stepMin = fallback;
+    }
+    const stepMs = stepMin * 60000;
     ctx.textAlign = 'center';
     for (let i = 0; i < view.slotCount; i++) {
       const c = view.slots[i];
@@ -330,7 +369,7 @@ export default function Chart({
       ctx.strokeStyle = theme.grid;
       ctx.stroke();
       ctx.fillStyle = theme.muted;
-      ctx.fillText(fmtTime(c.t), x, layout.h - 8);
+      ctx.fillText(fmtTimeTf(c.t, timeframe), x, layout.h - 8);
     }
 
     // separator between price + volume (only when the volume pane is visible)
@@ -425,12 +464,44 @@ export default function Chart({
     ctx.textBaseline = 'middle';
     ctx.fillText(fmtPrice(price), layout.chartW + 6, yPrice);
 
+    // Expected-move band: the range the ATM straddle prices for expiry,
+    // anchored at the previous 4:00 PM cash close.
+    if (expectedMove && Number.isFinite(expectedMove.anchor) && expectedMove.width > 0) {
+      const yU = priceToY(expectedMove.anchor + expectedMove.width);
+      const yL = priceToY(expectedMove.anchor - expectedMove.width);
+      ctx.save();
+      ctx.globalAlpha = 0.35;
+      ctx.setLineDash([3, 5]);
+      ctx.strokeStyle = theme.muted;
+      ctx.lineWidth = 1;
+      for (const yy of [yU, yL]) {
+        ctx.beginPath();
+        ctx.moveTo(0, yy + 0.5);
+        ctx.lineTo(layout.chartW, yy + 0.5);
+        ctx.stroke();
+      }
+      ctx.font = '9px "JetBrains Mono", monospace';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'bottom';
+      ctx.fillStyle = theme.muted;
+      ctx.globalAlpha = 0.7;
+      ctx.fillText(`+EM ${(expectedMove.anchor + expectedMove.width).toFixed(0)}`, 6, yU - 2);
+      ctx.fillText(`−EM ${(expectedMove.anchor - expectedMove.width).toFixed(0)}`, 6, yL - 2);
+      ctx.restore();
+    }
+
     // position dashed lines + labels
     ctx.font = '10px "JetBrains Mono", monospace';
+    closeHitsRef.current = [];
     for (const pos of positions) {
       if (pos.status !== 'open') continue;
       const y = priceToY(pos.strike);
-      const color = pos.type === 'call' ? theme.callLine : theme.putLine;
+      // Line + label colored by the position's live P/L, not call/put.
+      const live = pos.greeksLive?.premium ?? pos.entryPremium;
+      const pl = pos.entryPremium != null
+        ? (live - pos.entryPremium) * 100 * pos.qty * (pos.side === 'long' ? 1 : -1)
+        : 0;
+      const color = pl >= 0 ? theme.profit : theme.loss;
       ctx.save();
       ctx.setLineDash([6, 5]);
       ctx.strokeStyle = color;
@@ -441,16 +512,28 @@ export default function Chart({
       ctx.stroke();
       ctx.restore();
 
-      const live = pos.greeksLive?.premium ?? pos.entryPremium;
-      const pl = (live - pos.entryPremium) * 100 * pos.qty * (pos.side === 'long' ? 1 : -1);
       const sign = pl >= 0 ? '+' : '−';
-      const label = `${pos.type === 'call' ? 'C' : 'P'} ${pos.strike} ×${pos.qty}  ${sign}$${Math.abs(pl).toFixed(0)}`;
+      const label = `${pos.strike}${pos.type === 'call' ? 'C' : 'P'} ×${pos.qty}  ${sign}$${Math.abs(pl).toFixed(0)}`;
+      const lw = ctx.measureText(label).width + 12;
+      const xw = 18; // ✕ close box appended to the label (TradingView-style)
+      const lx = layout.chartW - lw - xw - 8; // right edge, next to the price axis
       ctx.fillStyle = color;
-      ctx.fillRect(8, y - 9, ctx.measureText(label).width + 12, 18);
+      ctx.fillRect(lx, y - 9, lw, 18);
       ctx.fillStyle = '#0a0c12';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
-      ctx.fillText(label, 14, y);
+      ctx.fillText(label, lx + 6, y);
+      // ✕ box: click closes the position at a marketable limit
+      ctx.fillStyle = '#0a0c12';
+      ctx.fillRect(lx + lw, y - 9, xw, 18);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(lx + lw + 0.5, y - 8.5, xw - 1, 17);
+      ctx.fillStyle = color;
+      ctx.textAlign = 'center';
+      ctx.fillText('✕', lx + lw + xw / 2, y);
+      ctx.textAlign = 'left';
+      closeHitsRef.current.push({ x0: lx + lw, y0: y - 9, x1: lx + lw + xw, y1: y + 9, position: pos });
     }
 
     // trade markers (entry arrows, exit arrows, dotted connectors)
@@ -466,24 +549,122 @@ export default function Chart({
       return slot;
     };
 
-    const drawArrow = (cx, cy, half, dir, color) => {
+    // Outlined chevron (ʌ / v) — lighter on the eye than a filled triangle.
+    const drawChevron = (cx, cy, half, dir, color) => {
       ctx.save();
-      ctx.globalAlpha = 0.6; // subtle — let the candles dominate
-      ctx.fillStyle = color;
+      ctx.globalAlpha = 0.85;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.8;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      const v = half * 0.7;
       ctx.beginPath();
       if (dir === 'up') {
-        ctx.moveTo(cx, cy - half);
-        ctx.lineTo(cx + half, cy + half);
-        ctx.lineTo(cx - half, cy + half);
+        ctx.moveTo(cx - half, cy + v);
+        ctx.lineTo(cx, cy - v);
+        ctx.lineTo(cx + half, cy + v);
       } else {
-        ctx.moveTo(cx, cy + half);
-        ctx.lineTo(cx + half, cy - half);
-        ctx.lineTo(cx - half, cy - half);
+        ctx.moveTo(cx - half, cy - v);
+        ctx.lineTo(cx, cy + v);
+        ctx.lineTo(cx + half, cy - v);
       }
-      ctx.closePath();
-      ctx.fill();
+      ctx.stroke();
       ctx.restore();
     };
+
+    // 🐾 Totoro detector: double top = the ears. Discord chart folklore made code.
+    // Two local maxima of similar height with a real trough between → "totoro";
+    // a third matching peak → "tritoro"; a lower bump after the ears → small paw.
+    // Toggled by clicking the mascot in the header.
+    if (showTotoro) {
+      const real = [];
+      for (let i = 0; i < view.slotCount; i++) if (view.slots[i]) real.push({ slot: i, c: view.slots[i] });
+      const peaks = [];
+      for (let k = 2; k < real.length - 2; k++) {
+        const h = real[k].c.high;
+        if (h >= real[k - 1].c.high && h >= real[k - 2].c.high && h >= real[k + 1].c.high && h >= real[k + 2].c.high) {
+          if (!peaks.length || real[k].slot - peaks[peaks.length - 1].slot > 3) peaks.push({ slot: real[k].slot, h, k });
+          else if (h > peaks[peaks.length - 1].h) peaks[peaks.length - 1] = { slot: real[k].slot, h, k };
+        }
+      }
+      const depthTol = Math.max(2.5, price * 0.0007); // minimum trough between the ears
+      const troughBetween = (a, b) => {
+        let lo = Infinity;
+        for (let k = a.k + 1; k < b.k; k++) lo = Math.min(lo, real[k].c.low);
+        return lo;
+      };
+      // Ears must match in height RELATIVE to the pattern's own size (35% of the
+      // valley depth) — a fixed tolerance rejects big totoros whose ears differ
+      // by a few points but are proportionally near-identical. Among qualifying
+      // pairs, draw the most PROMINENT (deepest valley), not the most recent.
+      const simTolFor = (depth) => Math.max(1.5, depth * 0.35);
+      // Ears must live in the same trading session: a span that crosses a big
+      // time gap (session close / halt) has an overnight hole for a valley, not
+      // a real trough. 30 buckets ≈ a 30-min gap on the 1m chart; daily charts
+      // keep weekend-spanning patterns legal (a 3-day gap is only 3 buckets).
+      const crossesBreak = (a, b) => {
+        for (let k = a.k + 1; k <= b.k; k++) {
+          if (real[k].c.t - real[k - 1].c.t > bucketMs * 30) return true;
+        }
+        return false;
+      };
+      const qualifying = [];
+      for (let j = peaks.length - 1; j > 0; j--) {
+        for (let i = j - 1; i >= 0; i--) {
+          const a = peaks[i], b = peaks[j];
+          if (b.slot - a.slot < 4 || b.slot - a.slot > 200) continue;
+          const depth = Math.min(a.h, b.h) - troughBetween(a, b);
+          if (depth < depthTol) continue;
+          if (Math.abs(a.h - b.h) > simTolFor(depth)) continue;
+          if (crossesBreak(a, b)) continue;
+          qualifying.push({ a, b, depth });
+        }
+      }
+      // Up to two non-overlapping totoros, most prominent first — a session can
+      // hold both the big structural one and a smaller one elsewhere.
+      qualifying.sort((x, y) => y.depth - x.depth);
+      const chosen = [];
+      for (const q of qualifying) {
+        if (chosen.length >= 2) break;
+        if (chosen.some((c) => !(q.b.slot < c.a.slot - 3 || q.a.slot > c.b.slot + 3))) continue;
+        chosen.push(q);
+      }
+      for (const { a, b, depth } of chosen) {
+        const simTol = simTolFor(depth);
+        // third matching ear before the pair → tritoro (same-session only)
+        const third = peaks.find((p) => p.slot < a.slot && Math.abs(p.h - a.h) <= simTol &&
+          a.slot - p.slot >= 4 && troughBetween(p, a) <= Math.min(p.h, a.h) - depthTol &&
+          !crossesBreak(p, a));
+        // price later breaking up THROUGH the ears → the totoro failed (no collapse)
+        const earTop = Math.max(a.h, b.h);
+        const failed = real.some((r) => r.slot > b.slot && r.c.high > earTop + Math.max(1, depth * 0.15));
+        // smaller bump after the second ear → the small paw (failed breakout before the drop)
+        const paw = !failed && peaks.find((p) => p.slot > b.slot && p.h < b.h - depthTol && p.h > b.h - depthTol * 4);
+        ctx.save();
+        ctx.strokeStyle = theme.muted;
+        ctx.globalAlpha = failed ? 0.5 : 0.8;
+        ctx.lineWidth = 1.5;
+        const earR = Math.min(Math.max(layout.candleW * 1.2, 5), 12);
+        for (const p of [third, a, b].filter(Boolean)) {
+          const ex = indexToX(p.slot);
+          const ey = priceToY(p.h) - earR - 2;
+          ctx.beginPath();
+          ctx.arc(ex, ey + earR, earR, Math.PI, 0); // little ear arc over the peak
+          ctx.stroke();
+        }
+        ctx.font = '10px "JetBrains Mono", monospace';
+        ctx.fillStyle = theme.muted;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';
+        const label = `${third ? 'tritoro' : 'totoro'}${failed ? ' (failed)' : ''}${paw ? ' + small paw 🐾' : ''}`;
+        ctx.fillText(label, (indexToX(a.slot) + indexToX(b.slot)) / 2, priceToY(Math.max(a.h, b.h)) - earR - 6);
+        if (paw) {
+          const px = indexToX(paw.slot);
+          ctx.fillText('🐾', px, priceToY(paw.h) - 4);
+        }
+        ctx.restore();
+      }
+    }
 
     for (const pos of (showMarkers ? positions : [])) {
       const color = pos.type === 'call' ? theme.up : theme.down;
@@ -507,17 +688,16 @@ export default function Chart({
 
       if (entryXY) {
         const ay = entryXY.y + MARKER_HALF + 16;
-        drawArrow(entryXY.x, ay, MARKER_HALF, 'up', '#fff'); // entry symbols: white
-
+        drawChevron(entryXY.x, ay, MARKER_HALF, 'up', '#fff'); // entry: white ʌ below
         markerHitsRef.current.push({ x: entryXY.x, y: ay, half: MARKER_HALF + 3, position: pos, kind: 'entry' });
       }
       if (exitXY) {
         const ay = exitXY.y - MARKER_HALF - 16;
-        drawArrow(exitXY.x, ay, MARKER_HALF, 'down', color);
+        drawChevron(exitXY.x, ay, MARKER_HALF, 'down', color); // exit: colored v above
         markerHitsRef.current.push({ x: exitXY.x, y: ay, half: MARKER_HALF + 3, position: pos, kind: 'exit' });
       }
     }
-  }, [candles, price, positions, theme, size, view, layout, priceToY, indexToX, timeframe, showMarkers, showVolume]);
+  }, [candles, price, positions, theme, size, view, layout, priceToY, indexToX, timeframe, showMarkers, showVolume, expectedMove, showTotoro]);
 
   // wheel zoom — attach non-passive so we can preventDefault page scroll
   useEffect(() => {
@@ -525,12 +705,19 @@ export default function Chart({
     if (!canvas) return;
     const onWheel = (e) => {
       e.preventDefault();
-      // delta > 0 means scroll down → zoom out (show more candles)
+      // delta > 0 means scroll down → zoom out
       const factor = e.deltaY > 0 ? 1.15 : 1 / 1.15;
-      setVisibleCount((v) => {
-        const next = Math.round(v * factor);
-        return Math.max(MIN_VISIBLE, Math.min(MAX_VISIBLE, next));
-      });
+      // Plain wheel zooms the PRICE axis (see far strikes / full daily range);
+      // ctrl/shift/meta-wheel keeps the old time zoom (candle count), which
+      // also remains on two-finger pinch.
+      if (e.ctrlKey || e.shiftKey || e.metaKey) {
+        setVisibleCount((v) => {
+          const next = Math.round(v * factor);
+          return Math.max(MIN_VISIBLE, Math.min(MAX_VISIBLE, next));
+        });
+      } else {
+        setPriceScale((s) => Math.max(0.05, Math.min(20, s * factor)));
+      }
     };
     canvas.addEventListener('wheel', onWheel, { passive: false });
     return () => canvas.removeEventListener('wheel', onWheel);
@@ -579,6 +766,50 @@ export default function Chart({
     cancelMomentum();
   }, [timeframe, cancelMomentum]);
 
+  // Screen-capture clip: records the tab/window the user picks in the browser
+  // prompt and downloads a .webm. Click again (or the browser's "stop sharing")
+  // to finish; auto-stops at 90 s as a safety net.
+  const toggleRecord = useCallback(async () => {
+    if (recRef.current) {
+      if (recRef.current.state === 'recording') recRef.current.stop();
+      return;
+    }
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { frameRate: 30 },
+        audio: false,
+        preferCurrentTab: true
+      });
+    } catch {
+      return; // user dismissed the share picker
+    }
+    const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp9') ? 'video/webm;codecs=vp9' : 'video/webm';
+    const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 6_000_000 });
+    const chunks = [];
+    rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+    rec.onstop = () => {
+      stream.getTracks().forEach((t) => t.stop());
+      const blob = new Blob(chunks, { type: 'video/webm' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `totoro-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}.webm`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+      recRef.current = null;
+      setRecording(false);
+    };
+    // Browser's own "Stop sharing" bar should also finalize the clip.
+    stream.getVideoTracks()[0].addEventListener('ended', () => {
+      if (rec.state === 'recording') rec.stop();
+    });
+    rec.start();
+    recRef.current = rec;
+    setRecording(true);
+    setTimeout(() => { if (recRef.current === rec && rec.state === 'recording') rec.stop(); }, 90_000);
+  }, []);
+
   // pointer handlers
   const updateHover = useCallback(
     (clientX, clientY) => {
@@ -614,11 +845,25 @@ export default function Chart({
       const rawPrice = yToPrice(y);
       const type = rawPrice > price ? 'call' : 'put';
       const strike = snapStrike(rawPrice, 5);
+      // Strike-picking (premium tooltip, quotes, trading) only applies at the
+      // live candle and rightward — hovering history is for reading the chart.
+      const future = di >= tfCandles.length - 1;
       const g = greeks({ S: price, K: strike, T: timeToExpiryYears, sigma: ivol, type });
       const q = liveQuote(greeksMap, strike, type);
-      setHover({ x, y, strike, type, greeks: g, ask: q?.ask, bid: q?.bid });
+      // No streamed quote (strike outside the chain) or snapshot gone stale →
+      // ask the bridge for a one-shot snapshot, throttled per strike.
+      const quoteStale = !q || q.bid == null || (q.snapshotTs && Date.now() - q.snapshotTs > 4000);
+      if (future && quoteStale && requestQuote) {
+        const rk = `${strike}${type}`;
+        const lr = lastQuoteReqRef.current;
+        if (lr.key !== rk || Date.now() - lr.t > 4000) {
+          lastQuoteReqRef.current = { key: rk, t: Date.now() };
+          requestQuote({ strike, right: type === 'call' ? 'C' : 'P' });
+        }
+      }
+      setHover({ x, y, strike, type, future, greeks: g, ask: q?.ask, bid: q?.bid });
     },
-    [layout, view, tfCandles, yToPrice, price, ivol, timeToExpiryYears, greeksMap]
+    [layout, view, tfCandles, yToPrice, price, ivol, timeToExpiryYears, greeksMap, requestQuote]
   );
 
   // shared drag-move logic, used by mouse + single-finger touch
@@ -645,6 +890,13 @@ export default function Chart({
         setPriceScale(Math.max(0.05, Math.min(20, nextScale)));
         return;
       }
+      // Drag on the bottom time axis → stretch candles (TradingView-style):
+      // drag right = fatter / fewer candles, drag left = skinnier / more.
+      if (drag.timeAxis) {
+        const next = Math.round(drag.startVisible * Math.exp(-totalDx / 220));
+        setVisibleCount(Math.max(MIN_VISIBLE, Math.min(MAX_VISIBLE, next)));
+        return;
+      }
       // horizontal pan (candles)
       const candleDelta = totalDx / layout.candleW;
       setViewOffset(clampOffset(drag.startOffset - candleDelta));
@@ -663,7 +915,9 @@ export default function Chart({
       cancelMomentum();
       const rect = canvasRef.current?.getBoundingClientRect();
       const x = rect ? clientX - rect.left : 0;
+      const y = rect ? clientY - rect.top : 0;
       const onAxis = !!layout && x >= layout.chartW; // right gutter → price-scale zoom
+      const onTimeAxis = !onAxis && y >= size.h - BOTTOM_AXIS; // bottom strip → candle-width zoom
       dragRef.current = {
         startX: clientX,
         lastX: clientX,
@@ -671,13 +925,15 @@ export default function Chart({
         startOffset: viewOffset,
         startPriceOffset: priceOffset,
         startScale: priceScale,
+        startVisible: visibleCount,
         axis: onAxis,
+        timeAxis: onTimeAxis,
         lastT: performance.now(),
         moved: false,
         vel: 0
       };
     },
-    [viewOffset, priceOffset, priceScale, layout, cancelMomentum]
+    [viewOffset, priceOffset, priceScale, visibleCount, size.h, layout, cancelMomentum]
   );
 
   const endDrag = useCallback(() => {
@@ -735,9 +991,19 @@ export default function Chart({
     const x = clientX - rect.left;
     const y = clientY - rect.top;
     if (x < 0 || x > layout.chartW || y < layout.priceTop || y > layout.priceBot) return;
+    // ✕ on a position line → close that position (marketable limit, via App)
+    for (const c of closeHitsRef.current) {
+      if (x >= c.x0 && x <= c.x1 && y >= c.y0 && y <= c.y1) {
+        onClosePosition?.(c.position);
+        return;
+      }
+    }
     for (const m of markerHitsRef.current) {
       if (Math.abs(x - m.x) <= m.half && Math.abs(y - m.y) <= m.half) return;
     }
+    // Trading clicks only at the live candle and rightward (history is read-only).
+    const di = view.baseIdx + Math.floor(x / layout.candleW);
+    if (di < tfCandles.length - 1) return;
     const rawPrice = yToPrice(y);
     const type = rawPrice > price ? 'call' : 'put';
     const strike = snapStrike(rawPrice, 5);
@@ -801,6 +1067,10 @@ export default function Chart({
         onPointerCancel={handlePointerUp}
         onPointerLeave={handlePointerLeave}
         onClick={handleClickEvent}
+        onContextMenu={(e) => {
+          e.preventDefault(); // chart owns right-click; no browser menu
+          if (quickMode && onQuickTrade && hover && hover.future && !markerHover) onQuickTrade(hover.strike, hover.type, hover.ask ?? null);
+        }}
         onTouchStart={handleTouchStart}
         onTouchMove={handleTouchMove}
         onTouchEnd={handleTouchEnd}
@@ -848,7 +1118,27 @@ export default function Chart({
           </div>
         );
       })()}
-      {hover && !markerHover && (
+      {hover && !markerHover && layout && (
+        <>
+          <div
+            className="crosshair-v"
+            style={{ left: hover.x, top: layout.priceTop, height: layout.volBot - layout.priceTop, borderColor: theme.muted }}
+          />
+          <div
+            className="crosshair-h"
+            style={{ top: hover.y, width: layout.chartW, borderColor: theme.muted }}
+          />
+          <div className="crosshair-price" style={{ top: hover.y - 9, background: theme.muted, color: '#0a0c12' }}>
+            {yToPrice(hover.y).toFixed(2)}
+          </div>
+          {hoverIdx != null && tfCandles[hoverIdx] && (
+            <div className="crosshair-time" style={{ left: hover.x, top: size.h - BOTTOM_AXIS + 2, background: theme.muted, color: '#0a0c12' }}>
+              {fmtTimeTf(tfCandles[hoverIdx].t, timeframe)}
+            </div>
+          )}
+        </>
+      )}
+      {hover && hover.future && !markerHover && (
         <div
           ref={tooltipRef}
           className="chart-tooltip"
@@ -913,6 +1203,44 @@ export default function Chart({
           <rect x="10" y="8" width="4" height="12" rx="1" />
           <rect x="16" y="4" width="4" height="16" rx="1" />
         </svg>
+      </button>
+      <button
+        className="cw-btn cw-plus"
+        onClick={() => setVisibleCount((v) => Math.max(MIN_VISIBLE, Math.round(v / 1.3)))}
+        aria-label="Fatter candles"
+        title="Fatter candles (show fewer)"
+      >+</button>
+      <button
+        className="cw-btn cw-minus"
+        onClick={() => setVisibleCount((v) => Math.min(MAX_VISIBLE, Math.round(v * 1.3)))}
+        aria-label="Skinnier candles"
+        title="Skinnier candles (show more)"
+      >−</button>
+      <button
+        className={`quick-btn${quickMode ? ' active' : ''}`}
+        onClick={() => setQuickMode((v) => !v)}
+        aria-label="Toggle quick trade mode"
+        title={quickMode ? 'Quick mode ARMED — right-click places a market order. Click to disarm.' : 'Quick mode: right-click on a strike = instant 1-lot market order'}
+      >
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor">
+          <path d="M13 2 4 14h6l-1 8 9-12h-6z" />
+        </svg>
+      </button>
+      <button
+        className={`rec-btn${recording ? ' recording' : ''}`}
+        onClick={toggleRecord}
+        aria-label={recording ? 'Stop recording' : 'Record a clip'}
+        title={recording ? 'Stop recording (downloads the clip)' : 'Record a clip of the app (max 90 s)'}
+      >
+        {recording ? (
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor">
+            <rect x="7" y="7" width="10" height="10" rx="1.5" />
+          </svg>
+        ) : (
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor">
+            <circle cx="12" cy="12" r="6" />
+          </svg>
+        )}
       </button>
       {(Math.abs(viewOffset) > 0.5 || Math.abs(priceOffset) > 0.01 || Math.abs(priceScale - 1) > 0.01) && (
         <button
