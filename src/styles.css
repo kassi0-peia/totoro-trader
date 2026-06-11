@@ -366,7 +366,7 @@ button {
 
 .main-inner {
   width: 100%;
-  max-width: 1200px;
+  max-width: none; /* fill the monitor; the chart's resize observer follows */
   display: flex;
   flex-direction: column;
   flex: 1;
@@ -449,7 +449,10 @@ button {
 .snap-now-btn,
 .fs-btn,
 .markers-btn,
-.vol-btn {
+.vol-btn,
+.rec-btn,
+.quick-btn,
+.cw-btn {
   position: absolute;
   bottom: 30px;
   width: 34px;
@@ -469,15 +472,38 @@ button {
 .fs-btn { right: 12px; }            /* far bottom-right corner */
 .markers-btn { right: 54px; }
 .vol-btn { right: 96px; }
-.snap-now-btn { right: 138px; }     /* leftmost — only when off-centre */
+.rec-btn { right: 138px; }
+.quick-btn { right: 180px; }
+.snap-now-btn { right: 222px; }     /* leftmost — only when off-centre */
+.cw-plus { left: 12px; font-size: 17px; }   /* bottom-left: candle width */
+.cw-minus { left: 54px; font-size: 17px; }
+.cw-btn:hover { color: var(--c-accent); border-color: var(--c-accent); }
 .snap-now-btn:hover,
 .fs-btn:hover,
 .markers-btn:hover,
 .markers-btn.active,
 .vol-btn:hover,
-.vol-btn.active {
+.vol-btn.active,
+.rec-btn:hover {
   color: var(--c-accent);
   border-color: var(--c-accent);
+}
+
+.rec-btn.recording {
+  color: #e05555;
+  border-color: #e05555;
+  animation: rec-pulse 1.2s ease-in-out infinite;
+}
+
+/* Quick mode armed: red — right-click fires a real market order. */
+.quick-btn.active {
+  color: #e05555;
+  border-color: #e05555;
+}
+
+@keyframes rec-pulse {
+  0%, 100% { box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28); }
+  50% { box-shadow: 0 0 10px rgba(224, 85, 85, 0.7); }
 }
 
 /* Fullscreen chart: cover the viewport (works on mobile + desktop without the
@@ -553,6 +579,49 @@ button {
   font-style: normal;
   color: var(--c-muted);
   margin-right: 3px;
+}
+
+.crosshair-v {
+  position: absolute;
+  width: 0;
+  border-left: 1px dashed;
+  opacity: 0.45;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.crosshair-h {
+  position: absolute;
+  height: 0;
+  left: 0;
+  border-top: 1px dashed;
+  opacity: 0.45;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.crosshair-price {
+  position: absolute;
+  right: 0;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.crosshair-time {
+  position: absolute;
+  transform: translateX(-50%);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  z-index: 3;
 }
 
 .chart-tooltip {
@@ -750,6 +819,81 @@ button {
   text-align: center;
 }
 
+.order-kind {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.kind-btn {
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 8px;
+  background: var(--c-surfaceAlt);
+  border: 1px solid var(--c-border);
+  color: var(--c-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.kind-btn.active {
+  color: var(--c-accent);
+  border-color: var(--c-accent);
+}
+
+.limit-input {
+  width: 84px;
+  height: 32px;
+  padding: 0 8px;
+  border-radius: 8px;
+  background: var(--c-surfaceAlt);
+  border: 1px solid var(--c-border);
+  color: var(--c-text);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.limit-input:disabled {
+  opacity: 0.4;
+}
+
+.pos-row-click {
+  cursor: pointer;
+}
+
+.pos-inspect {
+  width: min(440px, 94vw);
+}
+
+/* The mascot doubles as the totoro-detector toggle. */
+.mascot-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  transition: filter 200ms, opacity 200ms;
+}
+
+.mascot-btn.off {
+  filter: grayscale(0.85);
+  opacity: 0.55;
+}
+
+/* Hover variant: floats near the cursor, never traps the mouse. */
+.pos-hover-card {
+  width: 340px;
+  pointer-events: none;
+  z-index: 60;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+}
+
+.pos-inspect-graph {
+  width: 100%;
+  height: 150px;
+  display: block;
+  margin: 10px 0 6px;
+}
+
 .risk-row {
   display: flex;
   justify-content: space-between;
@@ -876,10 +1020,11 @@ button {
 
 .pos-row {
   display: grid;
-  grid-template-columns: 32px 64px 1fr 1fr 1fr 1.2fr auto;
-  gap: 12px;
+  /* 8 columns (incl. day H/L) — tightened so the action buttons stay on one line */
+  grid-template-columns: 28px 52px 0.6fr 1fr 1fr 1fr 1.3fr auto;
+  gap: 8px;
   align-items: center;
-  padding: 10px 18px;
+  padding: 10px 12px;
   border-bottom: 1px solid var(--c-border);
   font-variant-numeric: tabular-nums;
 }

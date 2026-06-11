@@ -26,22 +26,32 @@ function formatExpiry(expiry, now) {
   return `${MONTHS[d.getMonth()]} ${d.getDate()}`;
 }
 
-export default function Header({ price, prevClose, theme, mood, earsUp, pulse, onToggleSettings, now, live, source = 'SPX', expiry = null, account = null, accountType = null }) {
+// Amber for the DELAYED state (theme-independent: it's a warning, not a mood).
+const DELAYED_COLOR = '#e6a23c';
+
+export default function Header({ price, prevClose, theme, mood, earsUp, pulse, onToggleSettings, now, live, delayed = false, source = 'SPX', expiry = null, account = null, accountType = null, totoroOn = true, onToggleTotoro = null }) {
   // Daily change vs the previous 4:00 PM SPX cash close.
   const haveDaily = Number.isFinite(prevClose) && prevClose > 0 && Number.isFinite(price);
   const change = haveDaily ? price - prevClose : NaN;
   const changePct = haveDaily ? (change / prevClose) * 100 : NaN;
   const changeColor = haveDaily ? (change >= 0 ? theme.profit : theme.loss) : theme.muted;
   const { h, m } = expiryCountdown(now);
-  const feedColor = live ? theme.profit : theme.muted;
-  const feedLabel = live ? 'LIVE' : 'SIM';
+  const feedColor = live ? (delayed ? DELAYED_COLOR : theme.profit) : theme.muted;
+  const feedLabel = live ? (delayed ? 'DELAYED' : 'LIVE') : 'SIM';
   const sourceLabel = source === 'ES' ? 'ES/SPX' : 'SPX';
   const expiryDate = formatExpiry(expiry, now);
 
   return (
     <header className="header">
       <div className="header-left">
-        <Totoro mood={mood} earsUp={earsUp} pulse={pulse} theme={theme} />
+        <button
+          className={`mascot-btn${totoroOn ? '' : ' off'}`}
+          onClick={() => onToggleTotoro?.()}
+          title={totoroOn ? 'Totoro detector ON — click to let it nap' : 'Totoro detector napping — click to wake it'}
+          aria-label="Toggle totoro pattern detector"
+        >
+          <Totoro mood={mood} earsUp={earsUp} pulse={pulse} theme={theme} />
+        </button>
         <div className="title-block">
           <div className="feed-status">
             <span
