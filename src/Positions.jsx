@@ -14,10 +14,17 @@ function fmtMoney(v) {
   return v.toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
 }
 
-export default function Positions({ positions, theme, onClose, onReverse, executionEnabled = false, funds = null }) {
+export default function Positions({ positions, theme, onClose, onReverse, onCancelOrder, onCancelWorkingOrder, onInspect, onHoverPos, workingOrders = [], executionEnabled = false, funds = null, dayPL = null }) {
   // "Working" = open, or any in-flight order (pending fill / closing).
   const working = positions.filter((p) => p.status === 'open' || p.status === 'pending' || p.status === 'closing');
   const done = positions.filter((p) => p.status === 'closed' || p.status === 'rejected');
+
+  // Server-truth working orders, minus ones already represented by a local
+  // in-flight row (the device that placed an order shows it as FILLING/CLOSING).
+  const localKeys = new Set(positions
+    .filter((p) => p.status === 'pending' || p.status === 'closing')
+    .map((p) => `${p.strike}|${p.type === 'call' ? 'C' : 'P'}|${p.expiry}|${p.status === 'closing' ? 'SELL' : 'BUY'}`));
+  const serverOrders = workingOrders.filter((o) => !localKeys.has(`${o.strike}|${o.right}|${o.expiry}|${o.action}`));
 
   const openPL = positions
     .filter((p) => p.status === 'open' && p.entryPremium != null)
@@ -47,10 +54,37 @@ export default function Positions({ positions, theme, onClose, onReverse, execut
             {closedPL >= 0 ? '+' : '−'}${Math.abs(closedPL).toFixed(2)}
           </b>
         </div>
+        {dayPL != null && (
+          <div className="pl-block" title="Blotter cash flow + marked value of open positions (today)">
+            <span>Day P/L</span>
+            <b style={{ color: dayPL >= 0 ? theme.profit : theme.loss }}>
+              {dayPL >= 0 ? '+' : '−'}${Math.abs(dayPL).toFixed(0)}
+            </b>
+          </div>
+        )}
       </div>
 
       <div className="positions-list">
-        {working.length === 0 && done.length === 0 && (
+        {serverOrders.map((o) => (
+          <div className="pos-row pos-row-order" key={`ord:${o.orderId}`}>
+            <span className="pos-type" style={{ background: theme.surfaceAlt, color: theme.muted }}>
+              {o.right}
+            </span>
+            <span className="pos-strike">{o.strike}</span>
+            <span className="pos-cell"><span className="cell-label">QTY</span>×{o.qty}</span>
+            <span className="pos-cell">
+              <span className="cell-label">{o.action}</span>
+              {o.orderType === 'LMT' && o.limit != null ? `LMT $${Number(o.limit).toFixed(2)}` : o.orderType || 'MKT'}
+            </span>
+            <span className="pos-cell pos-status" style={{ color: theme.muted }}>
+              <span className="cell-label">ORDER</span>{o.status}
+            </span>
+            <div className="pos-actions">
+              <button className="btn-close" onClick={() => onCancelWorkingOrder?.(o)} disabled={!executionEnabled} title="Cancel working order">CANCEL</button>
+            </div>
+          </div>
+        ))}
+        {working.length === 0 && done.length === 0 && serverOrders.length === 0 && (
           <div className="empty">No open positions.</div>
         )}
 
@@ -60,7 +94,13 @@ export default function Positions({ positions, theme, onClose, onReverse, execut
           const tag = p.status === 'pending' ? 'FILLING' : p.status === 'closing' ? 'CLOSING' : null;
           const { live, dollars, pct } = plOf(p);
           return (
-            <div className="pos-row" key={p.id}>
+            <div
+              className={`pos-row${p.status === 'open' ? ' pos-row-click' : ''}`}
+              key={p.id}
+              onClick={() => p.status === 'open' && onInspect?.(p)}
+              onMouseEnter={(e) => p.status === 'open' && onHoverPos?.(p, e.clientX, e.clientY)}
+              onMouseLeave={() => p.status === 'open' && onHoverPos?.(null)}
+            >
               <span className="pos-type" style={{ background: color, color: '#0a0c12' }}>
                 {p.type === 'call' ? 'C' : 'P'}
               </span>
@@ -73,6 +113,10 @@ export default function Positions({ positions, theme, onClose, onReverse, execut
               {p.status === 'open' ? (
                 <>
                   <span className="pos-cell"><span className="cell-label">MARK</span>${live.toFixed(2)}</span>
+                  <span className="pos-cell">
+                    <span className="cell-label">H/L</span>
+                    {p.dayQuote?.dayHigh != null ? p.dayQuote.dayHigh.toFixed(2) : '—'}<span style={{ color: theme.muted }}>/</span>{p.dayQuote?.dayLow != null ? p.dayQuote.dayLow.toFixed(2) : '—'}
+                  </span>
                   <span className="pos-cell pos-pl" style={{ color: dollars >= 0 ? theme.profit : theme.loss }}>
                     {dollars >= 0 ? '+' : '−'}${Math.abs(dollars).toFixed(2)}
                     <span className="pl-pct">({pct >= 0 ? '+' : ''}{pct.toFixed(1)}%)</span>
@@ -83,14 +127,14 @@ export default function Positions({ positions, theme, onClose, onReverse, execut
                   <span className="cell-label">STATUS</span>{tag}
                 </span>
               )}
-              <div className="pos-actions">
+              <div className="pos-actions" onClick={(e) => e.stopPropagation()}>
                 {p.status === 'open' ? (
                   <>
                     <button className="btn-rev" onClick={() => onReverse(p)} disabled={!executionEnabled} title="Reverse">↻</button>
                     <button className="btn-close" onClick={() => onClose(p)} disabled={!executionEnabled}>CLOSE</button>
                   </>
                 ) : (
-                  <span className="closed-tag" style={{ color: theme.muted }}>{tag}</span>
+                  <button className="btn-close" onClick={() => onCancelOrder?.(p)} disabled={!executionEnabled} title="Cancel working order">CANCEL</button>
                 )}
               </div>
             </div>
@@ -116,7 +160,7 @@ export default function Positions({ positions, theme, onClose, onReverse, execut
                 {rejected ? '—' : `${p.closedPL >= 0 ? '+' : '−'}$${Math.abs(p.closedPL).toFixed(2)}`}
               </span>
               <div className="pos-actions">
-                <span className="closed-tag">{rejected ? 'REJECTED' : 'CLOSED'}</span>
+                <span className="closed-tag">{rejected ? (p.note === 'canceled' ? 'CANCELED' : 'REJECTED') : 'CLOSED'}</span>
               </div>
             </div>
           );

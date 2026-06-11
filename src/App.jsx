@@ -4,6 +4,7 @@ import Chart from './Chart.jsx';
 import Positions from './Positions.jsx';
 import TradeHistory from './TradeHistory.jsx';
 import TradeModal from './TradeModal.jsx';
+import PositionModal from './PositionModal.jsx';
 import ThemePanel from './ThemePanel.jsx';
 import TimeframeBar from './TimeframeBar.jsx';
 import QuoteStrip from './QuoteStrip.jsx';
@@ -45,6 +46,9 @@ export default function App() {
   const [timeframe, setTimeframe] = useState(1);
   const [positions, setPositions] = useState([]);
   const [pending, setPending] = useState(null);
+  const [inspectId, setInspectId] = useState(null); // position id shown in the inspect modal (click/touch)
+  const [hoverPos, setHoverPos] = useState(null);   // { id, x, y } — hover card over a position row
+  const [showTotoro, setShowTotoro] = useState(true); // 🐾 pattern detector — toggled by clicking the mascot
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [now, setNow] = useState(Date.now());
   const [pulse, setPulse] = useState(false);
@@ -82,7 +86,37 @@ export default function App() {
       showToast(`Order error: ${msg.reason}`, 'err');
       return;
     }
+    if (msg.type === 'cancelAck') {
+      if (!msg.ok) showToast(`Cancel failed: ${msg.reason}`, 'err');
+      return;
+    }
     if (msg.type === 'fill') {
+      // Bracket child fills (clientRef "<base>:tp" / "<base>:sl") close the
+      // position the parent opened.
+      const childMatch = typeof msg.clientRef === 'string' && msg.clientRef.match(/^(.*):(tp|sl)$/);
+      if (childMatch && msg.status === 'Filled' && (msg.remaining === 0 || msg.remaining == null)) {
+        const base = childMatch[1];
+        const px = priceRef.current;
+        setPositions((prev) => prev.map((p) => {
+          if (p.openRef === base && p.status === 'open') {
+            const sign = p.side === 'long' ? 1 : -1;
+            const dollars = (msg.avgFillPrice - (p.entryPremium ?? 0)) * 100 * p.qty * sign;
+            return { ...p, status: 'closed', exitPremium: msg.avgFillPrice, exitPrice: px, closedPL: dollars, closedAt: Date.now() };
+          }
+          return p;
+        }));
+        showToast(`BRACKET ${childMatch[2].toUpperCase()} FILLED ${msg.strike}${msg.right} @ $${Number(msg.avgFillPrice).toFixed(2)}`, 'ok');
+        return;
+      }
+      if (msg.status === 'Cancelled' || msg.status === 'ApiCancelled') {
+        setPositions((prev) => prev.map((p) => {
+          if (p.openRef === msg.clientRef && p.status === 'pending') return { ...p, status: 'rejected', note: 'canceled' };
+          if (p.closeRef === msg.clientRef && p.status === 'closing') return { ...p, status: 'open', note: 'close canceled' };
+          return p;
+        }));
+        showToast(`CANCELED ${msg.action} ${msg.strike}${msg.right}`, 'ok');
+        return;
+      }
       const done = msg.status === 'Filled' && (msg.remaining === 0 || msg.remaining == null);
       if (!done) return;
       const px = priceRef.current;
@@ -102,6 +136,20 @@ export default function App() {
   }, [showToast]);
 
   const feed = useIbkrFeed({ onOrderEvent: handleOrderEvent });
+
+  // Keep marks honest for open positions outside the streamed chain: nudge a
+  // snapshot quote every 30 s (server caches + dedupes) so P/L reflects the
+  // real market instead of the flat-IV model, which misprices far wings badly.
+  const openStrikesRef = useRef([]);
+  useEffect(() => {
+    if (!feed.live) return;
+    const poll = () => {
+      for (const p of openStrikesRef.current) feed.requestQuote(p);
+    };
+    poll();
+    const id = setInterval(poll, 30_000);
+    return () => clearInterval(id);
+  }, [feed.live, feed.requestQuote]);
   priceRef.current = feed.price;
 
   useEffect(() => {
@@ -135,12 +183,28 @@ export default function App() {
 
   const T = useMemo(() => timeToExpiryYearsAt(now), [now]);
 
-  const resolveGreeks = (strike, type) => {
+  const resolveGreeks = (strike, type, expiry = null) => {
+    // The greeks map is keyed by strike+right only and always holds the chain's
+    // CURRENT target expiry. After the 16:15 roll a still-open position from the
+    // expired chain would be marked against the NEXT day's quotes at the same
+    // strike — mark it at settlement intrinsic (SPXW PM-settles at the 4:00 SPX
+    // cash close, captured as spxClose) instead.
+    if (expiry && feed.expiry && expiry < feed.expiry) {
+      const S = feed.spxClose ?? feed.price;
+      const intrinsic = Math.max(0, type === 'call' ? S - strike : strike - S);
+      return { premium: intrinsic, delta: 0, gamma: 0, theta: 0, vega: 0, source: 'expired' };
+    }
     const live = liveGreeks(feed.greeksMap, strike, type);
     if (live) {
       return { premium: live.premium, delta: live.delta, gamma: live.gamma, theta: live.theta, vega: live.vega, source: 'ibkr' };
     }
+    // No model premium, but a real quote (e.g. snapshot for a far strike):
+    // mark at the bid/ask mid — the flat-IV model misprices wings badly.
+    const q = liveQuote(feed.greeksMap, strike, type);
     const g = bsGreeks({ S: feed.price, K: strike, T, sigma: IVOL, type });
+    if (q && q.bid != null && q.ask != null) {
+      return { ...g, premium: (q.bid + q.ask) / 2, source: 'quote' };
+    }
     return { ...g, source: 'bs' };
   };
 
@@ -204,10 +268,44 @@ export default function App() {
 
   const positionsLive = useMemo(() => {
     return mergedPositions.map((p) =>
-      p.status === 'closed' || p.status === 'rejected' ? p : { ...p, greeksLive: resolveGreeks(p.strike, p.type) }
+      p.status === 'closed' || p.status === 'rejected'
+        ? p
+        : { ...p, greeksLive: resolveGreeks(p.strike, p.type, p.expiry), dayQuote: liveQuote(feed.greeksMap, p.strike, p.type) }
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mergedPositions, feed.price, feed.greeksMap, T]);
+
+  // Strikes the snapshot poller keeps fresh (open positions only).
+  openStrikesRef.current = positionsLive
+    .filter((p) => p.status === 'open')
+    .map((p) => ({ strike: p.strike, right: rightOf(p.type) }));
+
+  // Fetch deep history when a higher timeframe is selected (5m → 1 week …
+  // 1D → 1 year). Cached server-side; cheap to re-request on reconnect.
+  useEffect(() => {
+    if (feed.live && timeframe > 1) feed.requestHistory(timeframe);
+  }, [timeframe, feed.live, feed.requestHistory]);
+
+  // Expected move = ATM straddle price (call mid + put mid), anchored at the
+  // previous 4:00 PM cash close: the band the options market prices for expiry.
+  const expectedMove = useMemo(() => {
+    if (!feed.live || !Number.isFinite(feed.spxClose)) return null;
+    const atm = Math.round(feed.price / 5) * 5;
+    const mid = (q) => (q && q.bid != null && q.ask != null ? (q.bid + q.ask) / 2 : q?.premium ?? null);
+    const c = mid(liveQuote(feed.greeksMap, atm, 'call'));
+    const p = mid(liveQuote(feed.greeksMap, atm, 'put'));
+    if (c == null || p == null) return null;
+    return { anchor: feed.spxClose, width: c + p };
+  }, [feed.live, feed.price, feed.greeksMap, feed.spxClose]);
+
+  // Day P/L: blotter cash flow plus the marked value of what's still open.
+  const dayPL = useMemo(() => {
+    const cash = (feed.trades || []).reduce((s, t) => s + (t.action === 'SELL' ? 1 : -1) * t.price * 100 * t.qty, 0);
+    const open = positionsLive
+      .filter((p) => p.status === 'open')
+      .reduce((s, p) => s + (p.greeksLive?.premium ?? 0) * 100 * p.qty * (p.side === 'long' ? 1 : -1), 0);
+    return cash + open;
+  }, [feed.trades, positionsLive]);
 
   const openPL = positionsLive
     .filter((p) => p.status === 'open' && p.entryPremium != null)
@@ -233,17 +331,44 @@ export default function App() {
     setPending({ id: Date.now(), strike, type, greeks: g, bid: q?.bid, ask: q?.ask });
   };
 
-  const handleExecute = (qty) => {
+  const handleExecute = (qty, limit = null, takeProfit = null, stopLoss = null) => {
     if (!pending) return;
     if (!feed.executionEnabled) { showToast('Execution disabled', 'err'); return; }
-    const ref = feed.sendOrder({ intent: 'open', action: 'BUY', strike: pending.strike, right: rightOf(pending.type), qty, expiry: feed.expiry });
+    const ref = feed.sendOrder({
+      intent: 'open', action: 'BUY', strike: pending.strike, right: rightOf(pending.type), qty, expiry: feed.expiry,
+      ...(limit != null ? { limit } : {}),
+      ...(takeProfit != null ? { takeProfit } : {}),
+      ...(stopLoss != null ? { stopLoss } : {})
+    });
     if (!ref) { showToast('Order not sent — not connected', 'err'); return; }
     setPositions((prev) => [...prev, {
       id: posSeq++, type: pending.type, side: 'long', strike: pending.strike, qty, expiry: feed.expiry,
-      status: 'pending', openRef: ref, entryPremium: null, estPremium: pending.greeks.premium,
+      status: 'pending', openRef: ref, entryPremium: null, estPremium: limit ?? pending.greeks.premium,
       entryPrice: feed.price, openedAt: Date.now(), greeksLive: pending.greeks
     }]);
     setPending(null);
+    triggerPulse();
+  };
+
+  // Quick mode (chart right-click): instant 1-lot BUY at the hovered strike —
+  // no modal. Sends a marketable LIMIT at ask + one tick, never a market order:
+  // same speed when the ask is real, but slippage is capped and (unlike MKT,
+  // which IBKR simulates and holds until ~00:10) it routes natively to Cboe's
+  // overnight book. Refuses when there's no live ask — no blind orders.
+  const handleQuickTrade = (strike, type, ask = null) => {
+    if (!feed.executionEnabled) { showToast('Execution disabled', 'err'); return; }
+    if (ask == null || !(ask > 0)) { showToast(`No live ask for ${strike}${rightOf(type)} — hover until a quote loads`, 'err'); return; }
+    const tick = ask < 3 ? 0.05 : 0.10;
+    const limit = Math.round((ask + tick) * 100) / 100;
+    const ref = feed.sendOrder({ intent: 'open', action: 'BUY', strike, right: rightOf(type), qty: 1, expiry: feed.expiry, limit });
+    if (!ref) { showToast('Order not sent — not connected', 'err'); return; }
+    const g = resolveGreeks(strike, type);
+    setPositions((prev) => [...prev, {
+      id: posSeq++, type, side: 'long', strike, qty: 1, expiry: feed.expiry,
+      status: 'pending', openRef: ref, entryPremium: null, estPremium: limit,
+      entryPrice: feed.price, openedAt: Date.now(), greeksLive: g
+    }]);
+    showToast(`⚡ BUY 1 ${strike}${rightOf(type)} LMT ${limit.toFixed(2)}`, 'ok');
     triggerPulse();
   };
 
@@ -267,10 +392,27 @@ export default function App() {
     }];
   };
 
+  // Marketable limit prices: cross the spread by one SPXW tick. The app never
+  // sends a naked MKT — IBKR simulates MKT-outside-RTH and holds it until the
+  // ~00:10 reset, and in thin books MKT slippage is uncapped.
+  const tickFor = (px) => (px < 3 ? 0.05 : 0.10);
+  const sellLimitFor = (strike, type) => {
+    const q = liveQuote(feed.greeksMap, strike, type);
+    if (!q || !(q.bid > 0)) return null;
+    return Math.max(0.05, Math.round((q.bid - tickFor(q.bid)) * 100) / 100);
+  };
+  const buyLimitFor = (strike, type) => {
+    const q = liveQuote(feed.greeksMap, strike, type);
+    if (!q || !(q.ask > 0)) return null;
+    return Math.round((q.ask + tickFor(q.ask)) * 100) / 100;
+  };
+
   const closePosition = (pos) => {
     if (!feed.executionEnabled) { showToast('Execution disabled', 'err'); return; }
     if (!pos || pos.status !== 'open') return;
-    const ref = feed.sendOrder({ intent: 'close', action: pos.side === 'long' ? 'SELL' : 'BUY', strike: pos.strike, right: rightOf(pos.type), qty: pos.qty, expiry: pos.expiry });
+    const limit = sellLimitFor(pos.strike, pos.type);
+    if (limit == null) { showToast(`No live bid for ${pos.strike}${rightOf(pos.type)} — wait for a quote`, 'err'); return; }
+    const ref = feed.sendOrder({ intent: 'close', action: pos.side === 'long' ? 'SELL' : 'BUY', strike: pos.strike, right: rightOf(pos.type), qty: pos.qty, expiry: pos.expiry, limit });
     if (!ref) { showToast('Close not sent — not connected', 'err'); return; }
     setPositions((prev) => markClosing(prev, pos, ref));
     triggerPulse();
@@ -285,14 +427,29 @@ export default function App() {
     showToast(`Closing ${open.length} position${open.length > 1 ? 's' : ''}`, 'ok');
   };
 
+  const cancelOrder = (pos) => {
+    if (!pos) return;
+    const ref = pos.status === 'closing' ? pos.closeRef : pos.openRef;
+    const sent = feed.sendCancel({ clientRef: ref ?? undefined, strike: pos.strike, right: rightOf(pos.type), expiry: pos.expiry });
+    if (!sent) showToast('Cancel not sent — not connected', 'err');
+  };
+
+  const cancelWorkingOrder = (o) => {
+    const sent = feed.sendCancel({ orderId: o.orderId });
+    if (!sent) showToast('Cancel not sent — not connected', 'err');
+  };
+
   const reversePosition = (pos) => {
     if (!feed.executionEnabled) { showToast('Execution disabled', 'err'); return; }
     if (!pos || pos.status !== 'open') return;
-    const closeRef = feed.sendOrder({ intent: 'close', action: pos.side === 'long' ? 'SELL' : 'BUY', strike: pos.strike, right: rightOf(pos.type), qty: pos.qty, expiry: pos.expiry });
-    if (!closeRef) { showToast('Reverse not sent — not connected', 'err'); return; }
     const oppositeType = pos.type === 'call' ? 'put' : 'call';
     const newStrike = nearestOtmStrike(feed.price, oppositeType, 5);
-    const openRef = feed.sendOrder({ intent: 'open', action: 'BUY', strike: newStrike, right: rightOf(oppositeType), qty: pos.qty, expiry: feed.expiry });
+    const closeLimit = sellLimitFor(pos.strike, pos.type);
+    const openLimit = buyLimitFor(newStrike, oppositeType);
+    if (closeLimit == null || openLimit == null) { showToast('Reverse needs live quotes on both legs — wait a moment', 'err'); return; }
+    const closeRef = feed.sendOrder({ intent: 'close', action: pos.side === 'long' ? 'SELL' : 'BUY', strike: pos.strike, right: rightOf(pos.type), qty: pos.qty, expiry: pos.expiry, limit: closeLimit });
+    if (!closeRef) { showToast('Reverse not sent — not connected', 'err'); return; }
+    const openRef = feed.sendOrder({ intent: 'open', action: 'BUY', strike: newStrike, right: rightOf(oppositeType), qty: pos.qty, expiry: feed.expiry, limit: openLimit });
     const g = resolveGreeks(newStrike, oppositeType);
     setPositions((prev) => [
       ...markClosing(prev, pos, closeRef),
@@ -331,6 +488,14 @@ export default function App() {
         onToggleSettings={() => setSettingsOpen((o) => !o)}
         now={now}
         live={feed.live}
+        delayed={feed.delayed}
+        totoroOn={showTotoro}
+        onToggleTotoro={() => {
+          setShowTotoro((v) => {
+            showToast(v ? '🐾 totoro detector napping' : '🐾 totoro detector awake', 'ok');
+            return !v;
+          });
+        }}
         source={feed.live ? feed.source : 'SPX'}
         expiry={feed.live ? feed.expiry : null}
         account={feed.account}
@@ -367,7 +532,13 @@ export default function App() {
               timeToExpiryYears={T}
               timeframe={timeframe}
               onRequestTrade={handleRequestTrade}
+              onQuickTrade={handleQuickTrade}
+              onClosePosition={closePosition}
               greeksMap={feed.greeksMap}
+              requestQuote={feed.live ? feed.requestQuote : null}
+              expectedMove={expectedMove}
+              histCandles={feed.histSeries[timeframe] || null}
+              showTotoro={showTotoro}
             />
             {toast && (
               <div className={`fill-toast fill-${toast.kind}`} role="status">{toast.text}</div>
@@ -386,8 +557,14 @@ export default function App() {
             theme={theme}
             onClose={closePosition}
             onReverse={reversePosition}
+            onCancelOrder={cancelOrder}
+            onCancelWorkingOrder={cancelWorkingOrder}
+            onInspect={(p) => setInspectId(p.id)}
+            onHoverPos={(p, x, y) => setHoverPos(p ? { id: p.id, x, y } : null)}
+            workingOrders={feed.orders}
             executionEnabled={feed.executionEnabled}
             funds={feed.funds}
+            dayPL={dayPL}
           />
 
           <TradeHistory trades={feed.trades} theme={theme} />
@@ -402,6 +579,24 @@ export default function App() {
         executionEnabled={feed.executionEnabled}
         accountType={feed.accountType}
       />
+
+      {(() => {
+        const ip = inspectId != null ? positionsLive.find((p) => p.id === inspectId) ?? null : null;
+        const hp = ip == null && hoverPos != null ? positionsLive.find((p) => p.id === hoverPos.id) ?? null : null;
+        const shown = ip ?? hp;
+        if (!shown) return null;
+        return (
+          <PositionModal
+            pos={shown}
+            theme={theme}
+            anchor={ip ? null : { x: hoverPos.x, y: hoverPos.y }}
+            series={feed.optHist[`${shown.strike}${rightOf(shown.type)}`]}
+            quote={liveQuote(feed.greeksMap, shown.strike, shown.type)}
+            onClose={() => setInspectId(null)}
+            onRefresh={(p) => feed.requestOptHistory({ strike: p.strike, right: rightOf(p.type), expiry: p.expiry })}
+          />
+        );
+      })()}
 
       <footer className="footer">
         <span>{feed.live ? 'IBKR LIVE DATA' : 'SIMULATED DATA'}</span>

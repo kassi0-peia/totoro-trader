@@ -26,6 +26,7 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent } = {}) {
     const sim = createSimulator();
     return {
       live: false,
+      delayed: false,        // bridge connected but IBKR served delayed data (code 10197)
       socketOpen: false,
       price: sim.price,
       candles: sim.candles,
@@ -42,6 +43,9 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent } = {}) {
       executionEnabled: false,
       trades: [],            // today's fills (blotter)
       positions: [],         // IBKR-authoritative open option positions
+      orders: [],            // working (unfilled) orders, visible on every device
+      histSeries: {},        // per-timeframe historical candles (5m → 1W … 1D → 1Y)
+      optHist: {},           // per-contract intraday premium series ("7500C" -> candles)
       funds: null,           // { availableFunds, buyingPower, netLiquidation }
       spxClose: null         // previous trading day's 4:00 PM SPX cash close
     };
@@ -89,7 +93,7 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent } = {}) {
         let msg;
         try { msg = JSON.parse(ev.data); } catch { return; }
         // Order lifecycle events are transient — hand them to the callback.
-        if (msg.type === 'orderAck' || msg.type === 'fill' || msg.type === 'orderError' || msg.type === 'orderWarning') {
+        if (msg.type === 'orderAck' || msg.type === 'fill' || msg.type === 'orderError' || msg.type === 'orderWarning' || msg.type === 'cancelAck') {
           onOrderEventRef.current?.(msg);
           return;
         }
@@ -99,7 +103,7 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent } = {}) {
       ws.onclose = () => {
         socketRef.current = null;
         // Connection lost → drop live + the execution gate (fail safe).
-        setSnapshot((s) => ({ ...s, socketOpen: false, live: false, executionEnabled: false }));
+        setSnapshot((s) => ({ ...s, socketOpen: false, live: false, delayed: false, executionEnabled: false }));
         if (!cancelled) scheduleRetry();
       };
 
@@ -129,7 +133,40 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent } = {}) {
     return clientRef;
   }, []);
 
-  return { ...snapshot, sendOrder };
+  // Cancel a working order. Identify it by clientRef when we have one, plus
+  // strike/right/expiry as a fallback (refs don't survive a bridge restart).
+  const sendCancel = useCallback((payload) => {
+    const ws = socketRef.current;
+    if (!ws || ws.readyState !== 1) return false;
+    ws.send(JSON.stringify({ type: 'cancel', ...payload }));
+    return true;
+  }, []);
+
+  // Ask the bridge for a one-shot snapshot quote (far strikes outside the chain).
+  const requestQuote = useCallback((payload) => {
+    const ws = socketRef.current;
+    if (!ws || ws.readyState !== 1) return false;
+    ws.send(JSON.stringify({ type: 'quote', ...payload }));
+    return true;
+  }, []);
+
+  // Ask the bridge for historical candles for a timeframe (cached server-side).
+  const requestHistory = useCallback((tf) => {
+    const ws = socketRef.current;
+    if (!ws || ws.readyState !== 1) return false;
+    ws.send(JSON.stringify({ type: 'history', tf }));
+    return true;
+  }, []);
+
+  // Intraday premium history for one option contract (the position graph).
+  const requestOptHistory = useCallback((payload) => {
+    const ws = socketRef.current;
+    if (!ws || ws.readyState !== 1) return false;
+    ws.send(JSON.stringify({ type: 'optHistory', ...payload }));
+    return true;
+  }, []);
+
+  return { ...snapshot, sendOrder, sendCancel, requestQuote, requestHistory, requestOptHistory };
 }
 
 function applyMessage(s, msg) {
@@ -140,6 +177,7 @@ function applyMessage(s, msg) {
     return {
       ...s,
       live: goLive,
+      delayed: goLive && !!msg.delayed,
       price: goLive && msg.price != null ? msg.price : s.price,
       candles: goLive && msg.candles?.length ? msg.candles : s.candles,
       greeksMap,
@@ -154,6 +192,7 @@ function applyMessage(s, msg) {
       executionEnabled: !!msg.executionEnabled,
       trades: Array.isArray(msg.trades) ? msg.trades : s.trades,
       positions: Array.isArray(msg.positions) ? msg.positions : s.positions,
+      orders: Array.isArray(msg.orders) ? msg.orders : s.orders,
       funds: msg.funds ?? s.funds,
       spxClose: msg.spxClose ?? s.spxClose
     };
@@ -168,6 +207,14 @@ function applyMessage(s, msg) {
     return { ...s, positions: Array.isArray(msg.positions) ? msg.positions : [] };
   }
 
+  if (msg.type === 'orders') {
+    return { ...s, orders: Array.isArray(msg.orders) ? msg.orders : [] };
+  }
+
+  if (msg.type === 'historyResult') {
+    return { ...s, histSeries: { ...s.histSeries, [msg.tf]: msg.candles || [] } };
+  }
+
   if (msg.type === 'funds') {
     return { ...s, funds: msg.funds ?? null };
   }
@@ -177,7 +224,11 @@ function applyMessage(s, msg) {
   }
 
   if (msg.type === 'status') {
-    return { ...s, live: !!msg.connected };
+    return { ...s, live: !!msg.connected, delayed: msg.connected ? s.delayed : false };
+  }
+
+  if (msg.type === 'dataDelayed') {
+    return { ...s, delayed: !!msg.delayed };
   }
 
   if (msg.type === 'account') {
@@ -201,12 +252,34 @@ function applyMessage(s, msg) {
     return { ...s, price: msg.price, candles };
   }
 
+  // One-shot snapshot quote for a strike outside the streamed chain — merge it
+  // into the greeks map so tooltips/modals find it via the normal lookup.
+  if (msg.type === 'quoteResult') {
+    if (msg.expiry && s.expiry && msg.expiry !== s.expiry) return s;
+    const type = msg.right === 'C' ? 'call' : 'put';
+    const k = key(msg.strike, type);
+    const prev = s.greeksMap.get(k);
+    const next = new Map(s.greeksMap);
+    next.set(k, {
+      strike: msg.strike, type,
+      premium: prev?.premium ?? null,
+      delta: prev?.delta, gamma: prev?.gamma, theta: prev?.theta, vega: prev?.vega, iv: prev?.iv,
+      bid: msg.bid, ask: msg.ask, dayHigh: msg.dayHigh ?? prev?.dayHigh, dayLow: msg.dayLow ?? prev?.dayLow, snapshotTs: msg.ts
+    });
+    return { ...s, greeksMap: next };
+  }
+
+  if (msg.type === 'optHistoryResult') {
+    const k = key(msg.strike, msg.right === 'C' ? 'call' : 'put');
+    return { ...s, optHist: { ...s.optHist, [k]: { candles: msg.candles || [], ts: Date.now() } } };
+  }
+
   if (msg.type === 'greeks') {
     const next = new Map(s.greeksMap);
     next.set(key(msg.strike, msg.optionType), {
       strike: msg.strike, type: msg.optionType, premium: msg.premium,
       delta: msg.delta, gamma: msg.gamma, theta: msg.theta, vega: msg.vega, iv: msg.iv,
-      bid: msg.bid, ask: msg.ask
+      bid: msg.bid, ask: msg.ask, dayHigh: msg.dayHigh, dayLow: msg.dayLow
     });
     return { ...s, greeksMap: next };
   }
