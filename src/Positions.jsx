@@ -74,7 +74,7 @@ export default function Positions({ positions, theme, onClose, onReverse, onCanc
             <span className="pos-cell"><span className="cell-label">QTY</span>×{o.qty}</span>
             <span className="pos-cell">
               <span className="cell-label">{o.action}</span>
-              {o.orderType === 'LMT' && o.limit != null ? `LMT $${Number(o.limit).toFixed(2)}` : o.orderType || 'MKT'}
+              {o.limit != null ? `${o.orderType || 'LMT'} $${Number(o.limit).toFixed(2)}` : o.orderType || 'MKT'}
             </span>
             <span className="pos-cell pos-status" style={{ color: theme.muted }}>
               <span className="cell-label">ORDER</span>{o.status}
