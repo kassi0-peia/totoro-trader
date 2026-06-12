@@ -698,9 +698,16 @@ export default function Chart({
       }
 
       if (entryXY) {
-        const ay = entryXY.y + MARKER_HALF + 16;
-        drawChevron(entryXY.x, ay, MARKER_HALF, 'up', '#fff'); // entry: white ʌ below
-        markerHitsRef.current.push({ x: entryXY.x, y: ay, half: MARKER_HALF + 3, position: pos, kind: 'entry' });
+        // Small chevron hugging the execution candle: under its low for calls
+        // (ʌ, bullish), over its high for puts (v, bearish).
+        const half = MARKER_HALF * 0.7;
+        const ec = view.slots[entryIdx];
+        const isCall = pos.type === 'call';
+        const ay = ec
+          ? (isCall ? priceToY(ec.low) + half + 5 : priceToY(ec.high) - half - 5)
+          : entryXY.y + (isCall ? half + 12 : -half - 12);
+        drawChevron(entryXY.x, ay, half, isCall ? 'up' : 'down', '#fff');
+        markerHitsRef.current.push({ x: entryXY.x, y: ay, half: half + 5, position: pos, kind: 'entry' });
       }
       if (exitXY) {
         const ay = exitXY.y - MARKER_HALF - 16;
