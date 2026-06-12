@@ -84,8 +84,18 @@ export default function Chart({
   const [priceOffset, setPriceOffset] = useState(0); // vertical pan, in price units (drag up/down)
   const [priceScale, setPriceScale] = useState(1); // vertical zoom (drag the price axis)
   const [fullscreen, setFullscreen] = useState(false);
-  const [showMarkers, setShowMarkers] = useState(true); // entry/exit trade arrows
-  const [showVolume, setShowVolume] = useState(true);   // volume pane below candles
+  const [showMarkers, setShowMarkers] = useState(() => { // entry/exit trade arrows
+    try { return localStorage.getItem('tt.markers') !== '0'; } catch { return true; }
+  });
+  const [showVolume, setShowVolume] = useState(() => {   // volume pane below candles
+    try { return localStorage.getItem('tt.volume') !== '0'; } catch { return true; }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem('tt.markers', showMarkers ? '1' : '0');
+      localStorage.setItem('tt.volume', showVolume ? '1' : '0');
+    } catch {}
+  }, [showMarkers, showVolume]);
   const [recording, setRecording] = useState(false);    // screen-capture clip in progress
   const recRef = useRef(null);                          // active MediaRecorder
   const lastQuoteReqRef = useRef({ key: null, t: 0 });  // snapshot-quote throttle
@@ -516,7 +526,7 @@ export default function Chart({
       const label = `${pos.strike}${pos.type === 'call' ? 'C' : 'P'} ×${pos.qty}  ${sign}$${Math.abs(pl).toFixed(0)}`;
       const lw = ctx.measureText(label).width + 12;
       const xw = 18; // ✕ close box appended to the label (TradingView-style)
-      const lx = layout.chartW - lw - xw - 8; // right edge, next to the price axis
+      const lx = 8;  // left-aligned (kisa's call: keep the right edge for prices)
       ctx.fillStyle = color;
       ctx.fillRect(lx, y - 9, lw, 18);
       ctx.fillStyle = '#0a0c12';
@@ -533,7 +543,8 @@ export default function Chart({
       ctx.textAlign = 'center';
       ctx.fillText('✕', lx + lw + xw / 2, y);
       ctx.textAlign = 'left';
-      closeHitsRef.current.push({ x0: lx + lw, y0: y - 9, x1: lx + lw + xw, y1: y + 9, position: pos });
+      // hit box padded a few px beyond the drawn ✕ — kinder to fingers
+      closeHitsRef.current.push({ x0: lx + lw - 4, y0: y - 13, x1: lx + lw + xw + 4, y1: y + 13, position: pos });
     }
 
     // trade markers (entry arrows, exit arrows, dotted connectors)
