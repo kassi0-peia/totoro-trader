@@ -1227,12 +1227,21 @@ function handleOrderRequest(ws, msg) {
   const stopLoss = Number(msg.stopLoss);
   const wantTp = action === 'BUY' && Number.isFinite(takeProfit) && takeProfit > 0;
   const wantSl = action === 'BUY' && Number.isFinite(stopLoss) && stopLoss > 0;
+  // Standalone stop (STP, auxPrice) — exits attached to an EXISTING position.
+  // IBKR simulates option stops, so pre-midnight they inherit the evening hold;
+  // the TP limit leg is native and works all night.
+  const stop = Number(msg.stop);
+  const isStop = !isLimit && Number.isFinite(stop) && stop > 0;
+  // OCA group: paired exits cancel each other when one fills.
+  const ocaGroup = typeof msg.ocaGroup === 'string' && msg.ocaGroup ? msg.ocaGroup : null;
 
   const orderId = reqSeq++;
   const order = {
     action,
-    orderType: isLimit ? 'LMT' : 'MKT',
+    orderType: isLimit ? 'LMT' : isStop ? 'STP' : 'MKT',
     ...(isLimit ? { lmtPrice: limit } : {}),
+    ...(isStop ? { auxPrice: stop } : {}),
+    ...(ocaGroup ? { ocaGroup, ocaType: 1 } : {}),
     totalQuantity: qty,
     tif: 'DAY',
     // With children attached, transmit only the LAST of the group — IBKR then
@@ -1243,7 +1252,7 @@ function handleOrderRequest(ws, msg) {
     // order placed outside RTH would be held until the regular open.
     outsideRth: true
   };
-  orders.set(orderId, { clientRef, action, strike, right, expiry, qty, orderType: order.orderType, limit: isLimit ? limit : null, status: 'submitted', filled: 0, avgFillPrice: 0 });
+  orders.set(orderId, { clientRef, action, strike, right, expiry, qty, orderType: order.orderType, limit: isLimit ? limit : isStop ? stop : null, status: 'submitted', filled: 0, avgFillPrice: 0 });
   try {
     ib.placeOrder(orderId, spxwContract(strike, right, expiry), order);
     if (wantTp || wantSl) {
@@ -1267,7 +1276,7 @@ function handleOrderRequest(ws, msg) {
         console.log(`[ibkr] bracket SL SELL STP@${stopLoss} (order ${slId}, parent ${orderId})`);
       }
     }
-    console.log(`[ibkr] placed ${action} ${isLimit ? `LMT@${limit}` : 'MKT'} ${qty} SPXW ${strike}${right} ${expiry} (order ${orderId})`);
+    console.log(`[ibkr] placed ${action} ${isLimit ? `LMT@${limit}` : isStop ? `STP@${stop}` : 'MKT'}${ocaGroup ? ' [oca]' : ''} ${qty} SPXW ${strike}${right} ${expiry} (order ${orderId})`);
     broadcastOrders();
     send({ type: 'orderAck', clientRef, orderId, accepted: true });
   } catch (e) {
