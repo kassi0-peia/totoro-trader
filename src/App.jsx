@@ -48,7 +48,12 @@ export default function App() {
   const [pending, setPending] = useState(null);
   const [inspectId, setInspectId] = useState(null); // position id shown in the inspect modal (click/touch)
   const [hoverPos, setHoverPos] = useState(null);   // { id, x, y } — hover card over a position row
-  const [showTotoro, setShowTotoro] = useState(true); // 🐾 pattern detector — toggled by clicking the mascot
+  const [showTotoro, setShowTotoro] = useState(() => { // 🐾 pattern detector — toggled by clicking the mascot
+    try { return localStorage.getItem('tt.totoro') !== '0'; } catch { return true; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('tt.totoro', showTotoro ? '1' : '0'); } catch {}
+  }, [showTotoro]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [now, setNow] = useState(Date.now());
   const [pulse, setPulse] = useState(false);
@@ -62,6 +67,27 @@ export default function App() {
     setToast({ text, kind });
     clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(null), 4500);
+  }, []);
+
+  // Soft two-note chime on fills — money should be audible. Best-effort: the
+  // browser may block audio before the first user interaction; we just skip.
+  const chime = useCallback(() => {
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      const ctx = new Ctx();
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = 'sine';
+      o.connect(g);
+      g.connect(ctx.destination);
+      o.frequency.setValueAtTime(880, ctx.currentTime);
+      o.frequency.setValueAtTime(1318.5, ctx.currentTime + 0.09); // E6 — a happy fifth-ish hop
+      g.gain.setValueAtTime(0.07, ctx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.35);
+      o.start();
+      o.stop(ctx.currentTime + 0.4);
+      setTimeout(() => ctx.close().catch(() => {}), 600);
+    } catch {}
   }, []);
 
   // Apply IBKR order lifecycle events to local positions. Entry/exit prices come
@@ -106,6 +132,7 @@ export default function App() {
           return p;
         }));
         showToast(`BRACKET ${childMatch[2].toUpperCase()} FILLED ${msg.strike}${msg.right} @ $${Number(msg.avgFillPrice).toFixed(2)}`, 'ok');
+        chime();
         return;
       }
       if (msg.status === 'Cancelled' || msg.status === 'ApiCancelled') {
@@ -134,8 +161,9 @@ export default function App() {
         return p;
       }));
       showToast(`FILLED ${msg.action} ${msg.strike}${msg.right} ×? @ $${Number(msg.avgFillPrice).toFixed(2)}`.replace('×?', `×${msg.filled}`), 'ok');
+      chime();
     }
-  }, [showToast]);
+  }, [showToast, chime]);
 
   const feed = useIbkrFeed({ onOrderEvent: handleOrderEvent });
 
