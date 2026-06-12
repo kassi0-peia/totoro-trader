@@ -124,7 +124,9 @@ export default function App() {
         if (p.openRef === msg.clientRef && p.status === 'pending') {
           return { ...p, status: 'open', entryPremium: msg.avgFillPrice, entryPrice: px, openedAt: Date.now() };
         }
-        if (p.closeRef === msg.clientRef && p.status === 'closing') {
+        // 'closing' = active close in flight; 'open' with a closeRef = a resting
+        // attached exit (TP/SL) that just filled.
+        if (p.closeRef === msg.clientRef && (p.status === 'closing' || p.status === 'open')) {
           const sign = p.side === 'long' ? 1 : -1;
           const dollars = (msg.avgFillPrice - (p.entryPremium ?? 0)) * 100 * p.qty * sign;
           return { ...p, status: 'closed', exitPremium: msg.avgFillPrice, exitPrice: px, closedPL: dollars, closedAt: Date.now() };
@@ -439,6 +441,27 @@ export default function App() {
     if (!sent) showToast('Cancel not sent — not connected', 'err');
   };
 
+  // Attach resting exits (TP limit and/or SL stop) to an EXISTING open
+  // position. Both legs share an OCA group, so one filling cancels the other.
+  // The TP is a native limit (works overnight); the SL is IBKR-simulated.
+  const attachExit = (pos, tp, sl) => {
+    if (!feed.executionEnabled) { showToast('Execution disabled', 'err'); return; }
+    if (!pos || pos.status !== 'open') return;
+    const action = pos.side === 'long' ? 'SELL' : 'BUY';
+    const base = { intent: 'close', action, strike: pos.strike, right: rightOf(pos.type), qty: pos.qty, expiry: pos.expiry };
+    const oca = tp != null && sl != null ? `exit-${pos.strike}${rightOf(pos.type)}-${Date.now().toString(36)}` : null;
+    let ref = null;
+    if (tp != null) ref = feed.sendOrder({ ...base, limit: tp, ...(oca ? { ocaGroup: oca } : {}) });
+    if (sl != null) {
+      const sref = feed.sendOrder({ ...base, stop: sl, ...(oca ? { ocaGroup: oca } : {}) });
+      ref = ref ?? sref;
+    }
+    if (!ref) { showToast('Exit not sent — not connected', 'err'); return; }
+    setPositions((prev) => prev.map((p) => (p.id === pos.id ? { ...p, closeRef: ref } : p)));
+    showToast(`Exit attached ${tp != null ? `TP $${tp.toFixed(2)} ` : ''}${sl != null ? `SL $${sl.toFixed(2)}` : ''}`, 'ok');
+    setInspectId(null);
+  };
+
   const reversePosition = (pos) => {
     if (!feed.executionEnabled) { showToast('Execution disabled', 'err'); return; }
     if (!pos || pos.status !== 'open') return;
@@ -594,6 +617,8 @@ export default function App() {
             quote={liveQuote(feed.greeksMap, shown.strike, shown.type)}
             onClose={() => setInspectId(null)}
             onRefresh={(p) => feed.requestOptHistory({ strike: p.strike, right: rightOf(p.type), expiry: p.expiry })}
+            onAttachExit={attachExit}
+            executionEnabled={feed.executionEnabled}
           />
         );
       })()}

@@ -1,11 +1,15 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 
 // Inspect panel for one position: IBKR-style contract info plus the option's
 // intraday premium graph (quote-mid line, including the overnight session).
 // With `anchor` it renders as a floating hover card (no backdrop, no buttons);
 // without, it's the pinned modal (click / touch path).
-export default function PositionModal({ pos, series, theme, quote, onClose, onRefresh, anchor = null }) {
+export default function PositionModal({ pos, series, theme, quote, onClose, onRefresh, anchor = null, onAttachExit = null, executionEnabled = false }) {
   const canvasRef = useRef(null);
+  const [tpStr, setTpStr] = useState('');
+  const [slStr, setSlStr] = useState('');
+
+  useEffect(() => { setTpStr(''); setSlStr(''); }, [pos?.id]);
 
   // (Re)request the premium history while open — server caches for 60 s.
   useEffect(() => {
@@ -154,6 +158,30 @@ export default function PositionModal({ pos, series, theme, quote, onClose, onRe
           </div>
         </div>
 
+        {!anchor && onAttachExit && pos.status === 'open' && (() => {
+          const tp = tpStr.trim() === '' ? null : parseFloat(tpStr);
+          const sl = slStr.trim() === '' ? null : parseFloat(slStr);
+          const valid = (tp != null || sl != null) &&
+            (tp == null || (Number.isFinite(tp) && tp > 0)) &&
+            (sl == null || (Number.isFinite(sl) && sl > 0));
+          return (
+            <div className="qty-row">
+              <span className="qty-label" title="Resting exits for this position — TP is a native limit (works overnight); SL is an IBKR-simulated stop. Both legs OCA: one fills, the other cancels.">Exit</span>
+              <div className="order-kind">
+                <input className="limit-input" type="number" step="0.05" min="0.05" inputMode="decimal"
+                  value={tpStr} placeholder="TP" onChange={(e) => setTpStr(e.target.value)} aria-label="take profit" />
+                <input className="limit-input" type="number" step="0.05" min="0.05" inputMode="decimal"
+                  value={slStr} placeholder="SL" onChange={(e) => setSlStr(e.target.value)} aria-label="stop loss" />
+                <button
+                  className="kind-btn"
+                  disabled={!executionEnabled || !valid}
+                  style={valid && executionEnabled ? { color: color, borderColor: color } : undefined}
+                  onClick={() => valid && onAttachExit(pos, tp, sl)}
+                >ATTACH</button>
+              </div>
+            </div>
+          );
+        })()}
         {!anchor && (
           <div className="modal-actions">
             <button className="btn-ghost" onClick={onClose}>Close</button>
