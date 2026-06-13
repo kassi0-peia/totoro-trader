@@ -691,6 +691,7 @@ export default function App() {
                   if (!feed.requestReplayDay(date)) showToast('Replay needs the bridge connection', 'err');
                 }}
                 onSet={(patch) => setReplay((r) => (r ? { ...r, ...patch } : r))}
+                onChangeDay={() => { setReplay(null); setReplayPositions([]); setReplayBarOpen(true); }}
                 onExit={() => { setReplay(null); setReplayPositions([]); setReplayBarOpen(false); }}
               />
             )}
