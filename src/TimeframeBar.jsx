@@ -34,7 +34,9 @@ export default function TimeframeBar({ value, onChange, theme, onCloseAll, canCl
             className="tf-panic tf-replay"
             onClick={onReplay}
             title="Replay a past day (practice mode — simulated fills)"
-            style={replayOn ? { borderColor: theme.accent, color: theme.accent } : undefined}
+            style={replayOn
+              ? { background: theme.accent, borderColor: theme.accent, color: '#0a0c12' }
+              : { borderColor: theme.accent, color: theme.accent }}
           >
             ⏪ REPLAY
           </button>

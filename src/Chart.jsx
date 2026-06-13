@@ -1,6 +1,6 @@
 import React, { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { greeks, snapStrike } from './options.js';
-import { aggregateCandles } from './simulator.js';
+import { aggregateCandles } from './candles.js';
 import { liveQuote } from './feed.js';
 
 const RIGHT_AXIS = 64;

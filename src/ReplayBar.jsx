@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import ReplayCalendar from './ReplayCalendar.jsx';
 
 const SPEEDS = [1, 2, 5, 10, 20];
 
@@ -26,12 +27,11 @@ export default function ReplayBar({ theme, replay, loading, onLoad, onSet, onExi
     return (
       <div className="replay-bar">
         <span className="replay-label" style={{ color: theme.accent }}>⏪ REPLAY</span>
-        <input
-          type="date"
-          className="replay-date"
+        <ReplayCalendar
           value={dateStr}
           max={localYmd(new Date())}
-          onChange={(e) => setDateStr(e.target.value)}
+          onChange={setDateStr}
+          theme={theme}
         />
         <button
           className="kind-btn"
@@ -47,7 +47,7 @@ export default function ReplayBar({ theme, replay, loading, onLoad, onSet, onExi
     );
   }
 
-  const { candles, idx, playing, speed } = replay;
+  const { candles, idx, playing, speed, leadIn } = replay;
   const cur = candles[idx];
 
   return (
@@ -62,8 +62,9 @@ export default function ReplayBar({ theme, replay, loading, onLoad, onSet, onExi
       </button>
       <button className="kind-btn" onClick={() => onSet({ idx: Math.max(0, idx - 1), playing: false })}>⏮</button>
       <button
-        className="kind-btn"
+        className={`kind-btn${leadIn ? ' replay-leadin' : ''}`}
         style={playing ? { color: theme.accent, borderColor: theme.accent } : undefined}
+        title={leadIn ? 'Starting in a few seconds…' : undefined}
         onClick={() => onSet({ playing: !playing })}
       >
         {playing ? '⏸' : '▶'}

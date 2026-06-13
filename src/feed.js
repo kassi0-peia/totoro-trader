@@ -1,10 +1,10 @@
-// Live IBKR feed with a built-in simulator fallback. Exposes a stable shape so
-// the UI does not branch on connection state. The hook also carries the account
-// safety gate (account id / type / executionEnabled) and a sendOrder() to place
-// real orders through the bridge; fills come back via the onOrderEvent callback.
+// Live IBKR feed. Exposes a stable shape so the UI does not branch on connection
+// state — before the bridge connects there is simply no price/candles. The hook
+// also carries the account safety gate (account id / type / executionEnabled) and
+// a sendOrder() to place real orders through the bridge; fills come back via the
+// onOrderEvent callback.
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { createSimulator, tick, SIM_CONFIG } from './simulator.js';
 
 function defaultWsUrl() {
   if (typeof window === 'undefined') return 'ws://localhost:8787/ws';
@@ -23,13 +23,12 @@ function nextClientRef() {
 
 export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent } = {}) {
   const [snapshot, setSnapshot] = useState(() => {
-    const sim = createSimulator();
     return {
       live: false,
       delayed: false,        // bridge connected but IBKR served delayed data (code 10197)
       socketOpen: false,
-      price: sim.price,
-      candles: sim.candles,
+      price: null,           // no price until the bridge delivers live data
+      candles: [],           // empty chart until the bridge delivers candles
       greeksMap: new Map(),
       source: 'SPX',
       expiry: null,
@@ -52,25 +51,9 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent } = {}) {
     };
   });
 
-  const simRef = useRef(null);
-  if (simRef.current == null) simRef.current = createSimulator();
-
   const socketRef = useRef(null);
   const onOrderEventRef = useRef(onOrderEvent);
   onOrderEventRef.current = onOrderEvent;
-
-  // Simulator tick loop — runs only while not live.
-  useEffect(() => {
-    const id = setInterval(() => {
-      setSnapshot((s) => {
-        if (s.live) return s;
-        const next = tick(simRef.current);
-        simRef.current = next;
-        return { ...s, price: next.price, candles: next.candles };
-      });
-    }, SIM_CONFIG.TICK_MS);
-    return () => clearInterval(id);
-  }, []);
 
   // WebSocket lifecycle with auto-reconnect.
   useEffect(() => {
