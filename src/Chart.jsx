@@ -70,7 +70,9 @@ export default function Chart({
   requestQuote = null,
   expectedMove = null,
   histCandles = null,
-  showTotoro = true
+  showTotoro = true,
+  axisChain = false,
+  onRung = null
 }) {
   const wrapRef = useRef(null);
   const canvasRef = useRef(null);
@@ -500,6 +502,37 @@ export default function Chart({
       ctx.restore();
     }
 
+    // Axis-as-chain: live call/put premiums painted beside each strike level
+    // in the right gutter — the chain lives on the chart, no bouncing. Falls
+    // back to the model where no quote streams (far strikes, replay).
+    if (axisChain) {
+      ctx.save();
+      ctx.font = '8.5px "JetBrains Mono", monospace';
+      ctx.textBaseline = 'middle';
+      ctx.textAlign = 'left';
+      const pxPer5 = (5 / Math.max(view.hi - view.lo, 0.001)) * (layout.priceBot - layout.priceTop);
+      const step = Math.max(1, Math.ceil(16 / Math.max(pxPer5, 0.0001))) * 5;
+      const firstK = Math.ceil(view.lo / step) * step;
+      const mid = (q) => (q && q.bid != null && q.ask != null ? (q.bid + q.ask) / 2 : q?.premium ?? null);
+      const fmt = (v) => (v == null ? '–' : v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2));
+      for (let k = firstK; k <= view.hi; k += step) {
+        const y = priceToY(k);
+        if (y < layout.priceTop + 10 || y > layout.priceBot - 10) continue;
+        let c = mid(liveQuote(greeksMap, k, 'call'));
+        let p = mid(liveQuote(greeksMap, k, 'put'));
+        if (c == null) c = greeks({ S: price, K: k, T: timeToExpiryYears, sigma: ivol, type: 'call' }).premium;
+        if (p == null) p = greeks({ S: price, K: k, T: timeToExpiryYears, sigma: ivol, type: 'put' }).premium;
+        ctx.globalAlpha = 0.75;
+        const cTxt = fmt(c);
+        ctx.fillStyle = theme.callLine;
+        ctx.fillText(cTxt, layout.chartW + 3, y + 8);
+        const cw = ctx.measureText(cTxt).width;
+        ctx.fillStyle = theme.putLine;
+        ctx.fillText(fmt(p), layout.chartW + 5 + cw, y + 8);
+      }
+      ctx.restore();
+    }
+
     // position dashed lines + labels
     ctx.font = '10px "JetBrains Mono", monospace';
     closeHitsRef.current = [];
@@ -715,7 +748,7 @@ export default function Chart({
         markerHitsRef.current.push({ x: exitXY.x, y: ay, half: MARKER_HALF + 3, position: pos, kind: 'exit' });
       }
     }
-  }, [candles, price, positions, theme, size, view, layout, priceToY, indexToX, timeframe, showMarkers, showVolume, expectedMove, showTotoro]);
+  }, [candles, price, positions, theme, size, view, layout, priceToY, indexToX, timeframe, showMarkers, showVolume, expectedMove, showTotoro, axisChain, greeksMap, ivol, timeToExpiryYears]);
 
   // wheel zoom — attach non-passive so we can preventDefault page scroll
   useEffect(() => {
@@ -1222,6 +1255,18 @@ export default function Chart({
           <rect x="16" y="4" width="4" height="16" rx="1" />
         </svg>
       </button>
+      {onRung && (
+        <button
+          className="rung-btn"
+          onClick={onRung}
+          aria-label="Buy next ladder rung"
+          title="RUNG: buy the next further-OTM strike in your ladder's direction (1 lot, limit at ask)"
+        >
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+            <path d="M7 4v16M17 4v16M7 8h10M7 14h10M7 20h10" />
+          </svg>
+        </button>
+      )}
       <button
         className="cw-btn cw-plus"
         onClick={() => setVisibleCount((v) => Math.max(MIN_VISIBLE, Math.round(v / 1.3)))}
