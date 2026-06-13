@@ -8,11 +8,16 @@ function fmtBarTime(t) {
 
 // Desktop-only replay controls (hidden on small screens via CSS).
 // Inactive: date picker + LOAD. Active: transport controls + scrubber + EXIT.
-export default function ReplayBar({ theme, replay, loading, onLoad, onSet, onExit }) {
+function localYmd(d) {
+  // LOCAL date string — toISOString would jump the UTC fence after 8 PM ET.
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+export default function ReplayBar({ theme, replay, loading, onLoad, onSet, onExit, onChangeDay }) {
   const [dateStr, setDateStr] = useState(() => {
     const d = new Date(Date.now() - 24 * 3600 * 1000);
     while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() - 1);
-    return d.toISOString().slice(0, 10);
+    return localYmd(d);
   });
 
   const active = replay != null && replay.candles.length > 0;
@@ -25,7 +30,7 @@ export default function ReplayBar({ theme, replay, loading, onLoad, onSet, onExi
           type="date"
           className="replay-date"
           value={dateStr}
-          max={new Date().toISOString().slice(0, 10)}
+          max={localYmd(new Date())}
           onChange={(e) => setDateStr(e.target.value)}
         />
         <button
@@ -47,9 +52,14 @@ export default function ReplayBar({ theme, replay, loading, onLoad, onSet, onExi
 
   return (
     <div className="replay-bar replay-active" style={{ borderColor: theme.accent }}>
-      <span className="replay-label" style={{ color: theme.accent }}>
-        ⏪ {replay.date.slice(0, 4)}-{replay.date.slice(4, 6)}-{replay.date.slice(6, 8)}
-      </span>
+      <button
+        className="kind-btn replay-daybtn"
+        style={{ color: theme.accent, borderColor: theme.accent }}
+        title="Pick a different day"
+        onClick={onChangeDay}
+      >
+        ⏪ {replay.date.slice(0, 4)}-{replay.date.slice(4, 6)}-{replay.date.slice(6, 8)} ▾
+      </button>
       <button className="kind-btn" onClick={() => onSet({ idx: Math.max(0, idx - 1), playing: false })}>⏮</button>
       <button
         className="kind-btn"
