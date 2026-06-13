@@ -892,7 +892,6 @@ button {
   font-size: 11px;
 }
 
-.replay-date,
 .replay-speed {
   height: 30px;
   padding: 0 8px;
@@ -903,9 +902,109 @@ button {
   font-size: 12px;
 }
 
+/* Replay day picker — calendar popover */
+.replay-cal {
+  position: relative;
+}
+.replay-cal-field {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 8px;
+  background: var(--c-surfaceAlt);
+  border: 1px solid var(--c-border);
+  color: var(--c-text);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 140ms;
+}
+.replay-cal-icon { font-size: 12px; }
+.replay-cal-text { font-variant-numeric: tabular-nums; }
+
+.replay-cal-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 40;
+  width: 232px;
+  padding: 10px;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+.replay-cal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.replay-cal-title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+.replay-cal-nav {
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  background: transparent;
+  border: 1px solid var(--c-border);
+  color: var(--c-text);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+.replay-cal-nav:hover:not(:disabled) { background: var(--c-surfaceAlt); }
+.replay-cal-nav:disabled { opacity: 0.3; cursor: default; }
+
+.replay-cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 3px;
+}
+.replay-cal-wd {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 22px;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--c-muted);
+}
+.replay-cal-empty { height: 28px; }
+.replay-cal-day {
+  height: 28px;
+  border-radius: 6px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--c-text);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: background 120ms;
+}
+.replay-cal-day:hover:not(:disabled):not(.sel) { background: var(--c-surfaceAlt); }
+.replay-cal-day:disabled { opacity: 0.22; cursor: default; }
+
 .replay-scrub {
   flex: 1;
   accent-color: var(--c-accent);
+}
+
+/* Play button breathes during the 5s lead-in before the tape rolls. */
+.replay-leadin {
+  color: var(--c-accent);
+  border-color: var(--c-accent);
+  animation: replay-leadin-pulse 1s ease-in-out infinite;
+}
+@keyframes replay-leadin-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 transparent; }
+  50% { opacity: 0.55; box-shadow: 0 0 0 3px color-mix(in srgb, var(--c-accent) 30%, transparent); }
 }
 
 .replay-time {
@@ -922,7 +1021,7 @@ button {
 }
 
 @media (max-width: 720px) {
-  .replay-bar, .tf-replay { display: none; } /* desktop-only by design */
+  .replay-bar, .tf-replay, .qs-replay { display: none; } /* desktop-only by design */
 }
 
 /* The mascot doubles as the totoro-detector toggle. */
@@ -1275,6 +1374,23 @@ button {
   letter-spacing: 0.02em;
   flex-wrap: wrap;
 }
+.qs-replay {
+  margin-right: auto;        /* pin to the left; quotes stay right */
+  align-self: center;
+  height: 26px;
+  padding: 0 12px;
+  border-radius: 6px;
+  background: transparent;
+  border: 1px solid var(--c-border);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  font-family: inherit;
+  cursor: pointer;
+  transition: filter 140ms;
+}
+.qs-replay:hover { filter: brightness(1.25); }
+
 .quote-strip .qs-atm { color: var(--c-muted); font-size: 12px; letter-spacing: 0.14em; }
 .qs-leg, .qs-vix { display: inline-flex; align-items: baseline; gap: 6px; }
 .qs-tag { font-size: 12px; }
