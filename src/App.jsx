@@ -5,6 +5,7 @@ import Positions from './Positions.jsx';
 import TradeHistory from './TradeHistory.jsx';
 import TradeModal from './TradeModal.jsx';
 import PositionModal from './PositionModal.jsx';
+import ReplayBar from './ReplayBar.jsx';
 import ThemePanel from './ThemePanel.jsx';
 import TimeframeBar from './TimeframeBar.jsx';
 import QuoteStrip from './QuoteStrip.jsx';
@@ -24,6 +25,7 @@ function timeToExpiryYearsAt(now) {
 }
 
 const rightOf = (type) => (type === 'call' ? 'C' : 'P');
+const EMPTY_GREEKS = new Map(); // replay mode shows no live chain
 const posKey = (strike, right, expiry) => `${strike}${right}:${expiry}`;
 
 let posSeq = 1;
@@ -48,6 +50,16 @@ export default function App() {
   const [pending, setPending] = useState(null);
   const [inspectId, setInspectId] = useState(null); // position id shown in the inspect modal (click/touch)
   const [hoverPos, setHoverPos] = useState(null);   // { id, x, y } — hover card over a position row
+
+  // ── Replay mode (desktop practice): play back a past day's 1-min session ──
+  // and trade it with simulated fills at Black–Scholes prices. No real orders.
+  const [replayBarOpen, setReplayBarOpen] = useState(false);
+  const [replay, setReplay] = useState(null); // { date, candles, idx, speed, playing }
+  const [replayPositions, setReplayPositions] = useState([]);
+  const replayActive = replay != null && replay.candles.length > 0;
+  const replayLoading = replay != null && replay.candles.length === 0;
+  const replayPrice = replayActive ? replay.candles[replay.idx].close : null;
+  const replayNow = replayActive ? replay.candles[replay.idx].t : null;
   const [showTotoro, setShowTotoro] = useState(() => { // 🐾 pattern detector — toggled by clicking the mascot
     try { return localStorage.getItem('tt.totoro') !== '0'; } catch { return true; }
   });
@@ -180,6 +192,31 @@ export default function App() {
     const id = setInterval(poll, 30_000);
     return () => clearInterval(id);
   }, [feed.live, feed.requestQuote]);
+
+  // Replay: the price/time the whole UI prices against.
+  const dispPrice = replayActive ? replayPrice : feed.price;
+
+  // Replay: adopt the day's bars when the bridge delivers them (start a few
+  // bars in so the chart opens with context).
+  useEffect(() => {
+    if (!replay || replay.candles.length > 0) return;
+    const bars = feed.replayDays[replay.date];
+    if (bars && bars.length > 10) {
+      setReplay((r) => (r && r.date === replay.date ? { ...r, candles: bars, idx: 9, playing: false } : r));
+    }
+  }, [feed.replayDays, replay]);
+
+  // Replay: the playback clock (speed = bars per second).
+  useEffect(() => {
+    if (!replayActive || !replay.playing) return;
+    const id = setInterval(() => {
+      setReplay((r) => {
+        if (!r || r.idx >= r.candles.length - 1) return r ? { ...r, playing: false } : r;
+        return { ...r, idx: r.idx + 1 };
+      });
+    }, Math.max(40, 1000 / replay.speed));
+    return () => clearInterval(id);
+  }, [replayActive, replay?.playing, replay?.speed]); // eslint-disable-line react-hooks/exhaustive-deps
   priceRef.current = feed.price;
 
   useEffect(() => {
@@ -211,9 +248,15 @@ export default function App() {
     while (hist.length && hist[0].t < Date.now() - 10000) hist.shift();
   }, [feed.price]);
 
-  const T = useMemo(() => timeToExpiryYearsAt(now), [now]);
+  const T = useMemo(() => timeToExpiryYearsAt(replayActive ? replayNow : now), [now, replayActive, replayNow]);
 
   const resolveGreeks = (strike, type, expiry = null) => {
+    // Replay mode prices everything with the model at the replayed time —
+    // live quotes belong to the present and would poison the practice tape.
+    if (replayActive) {
+      const g = bsGreeks({ S: dispPrice, K: strike, T, sigma: IVOL, type });
+      return { ...g, source: 'replay' };
+    }
     // The greeks map is keyed by strike+right only and always holds the chain's
     // CURRENT target expiry. After the 16:15 roll a still-open position from the
     // expired chain would be marked against the NEXT day's quotes at the same
@@ -297,16 +340,22 @@ export default function App() {
   }, [positions, feed.positions, feed.trades]);
 
   const positionsLive = useMemo(() => {
-    return mergedPositions.map((p) =>
+    const source = replayActive ? replayPositions : mergedPositions;
+    return source.map((p) =>
       p.status === 'closed' || p.status === 'rejected'
         ? p
-        : { ...p, greeksLive: resolveGreeks(p.strike, p.type, p.expiry), dayQuote: liveQuote(feed.greeksMap, p.strike, p.type) }
+        : {
+            ...p,
+            greeksLive: resolveGreeks(p.strike, p.type, replayActive ? null : p.expiry),
+            dayQuote: replayActive ? null : liveQuote(feed.greeksMap, p.strike, p.type)
+          }
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mergedPositions, feed.price, feed.greeksMap, T]);
+  }, [mergedPositions, replayActive, replayPositions, dispPrice, feed.greeksMap, T]);
 
-  // Strikes the snapshot poller keeps fresh (open positions only).
-  openStrikesRef.current = positionsLive
+  // Strikes the snapshot poller keeps fresh (open positions only; replay
+  // positions are imaginary and get no real quotes).
+  openStrikesRef.current = replayActive ? [] : positionsLive
     .filter((p) => p.status === 'open')
     .map((p) => ({ strike: p.strike, right: rightOf(p.type) }));
 
@@ -319,6 +368,7 @@ export default function App() {
   // Expected move = ATM straddle price (call mid + put mid), anchored at the
   // previous 4:00 PM cash close: the band the options market prices for expiry.
   const expectedMove = useMemo(() => {
+    if (replayActive) return null; // no chain in the past
     if (!feed.live || !Number.isFinite(feed.spxClose)) return null;
     const atm = Math.round(feed.price / 5) * 5;
     const mid = (q) => (q && q.bid != null && q.ask != null ? (q.bid + q.ask) / 2 : q?.premium ?? null);
@@ -329,13 +379,21 @@ export default function App() {
   }, [feed.live, feed.price, feed.greeksMap, feed.spxClose]);
 
   // Day P/L: blotter cash flow plus the marked value of what's still open.
+  // In replay: the practice session's P/L (closed + open marks vs entries).
   const dayPL = useMemo(() => {
+    if (replayActive) {
+      return positionsLive.reduce((s, p) => {
+        if (p.status === 'closed') return s + (p.closedPL ?? 0);
+        if (p.status === 'open') return s + ((p.greeksLive?.premium ?? 0) - (p.entryPremium ?? 0)) * 100 * p.qty;
+        return s;
+      }, 0);
+    }
     const cash = (feed.trades || []).reduce((s, t) => s + (t.action === 'SELL' ? 1 : -1) * t.price * 100 * t.qty, 0);
     const open = positionsLive
       .filter((p) => p.status === 'open')
       .reduce((s, p) => s + (p.greeksLive?.premium ?? 0) * 100 * p.qty * (p.side === 'long' ? 1 : -1), 0);
     return cash + open;
-  }, [feed.trades, positionsLive]);
+  }, [feed.trades, positionsLive, replayActive]);
 
   const openPL = positionsLive
     .filter((p) => p.status === 'open' && p.entryPremium != null)
@@ -357,12 +415,24 @@ export default function App() {
 
   const handleRequestTrade = ({ strike, type }) => {
     const g = resolveGreeks(strike, type);
-    const q = liveQuote(feed.greeksMap, strike, type);
+    const q = replayActive ? null : liveQuote(feed.greeksMap, strike, type);
     setPending({ id: Date.now(), strike, type, greeks: g, bid: q?.bid, ask: q?.ask });
   };
 
   const handleExecute = (qty, limit = null, takeProfit = null, stopLoss = null) => {
     if (!pending) return;
+    // Replay: simulated instant fill at the model premium — nothing leaves the laptop.
+    if (replayActive) {
+      setReplayPositions((prev) => [...prev, {
+        id: posSeq++, type: pending.type, side: 'long', strike: pending.strike, qty,
+        expiry: replay.date, status: 'open', entryPremium: pending.greeks.premium,
+        entryPrice: dispPrice, openedAt: replayNow
+      }]);
+      setPending(null);
+      showToast(`REPLAY FILLED BUY ${pending.strike}${rightOf(pending.type)} ×${qty} @ $${pending.greeks.premium.toFixed(2)}`, 'ok');
+      triggerPulse();
+      return;
+    }
     if (!feed.executionEnabled) { showToast('Execution disabled', 'err'); return; }
     const ref = feed.sendOrder({
       intent: 'open', action: 'BUY', strike: pending.strike, right: rightOf(pending.type), qty, expiry: feed.expiry,
@@ -386,6 +456,17 @@ export default function App() {
   // which IBKR simulates and holds until ~00:10) it routes natively to Cboe's
   // overnight book. Refuses when there's no live ask — no blind orders.
   const handleQuickTrade = (strike, type, ask = null) => {
+    // Replay: ⚡ fires a simulated 1-lot at the model premium.
+    if (replayActive) {
+      const g = resolveGreeks(strike, type);
+      setReplayPositions((prev) => [...prev, {
+        id: posSeq++, type, side: 'long', strike, qty: 1, expiry: replay.date,
+        status: 'open', entryPremium: g.premium, entryPrice: dispPrice, openedAt: replayNow
+      }]);
+      showToast(`⚡ REPLAY BUY 1 ${strike}${rightOf(type)} @ $${g.premium.toFixed(2)}`, 'ok');
+      triggerPulse();
+      return;
+    }
     if (!feed.executionEnabled) { showToast('Execution disabled', 'err'); return; }
     if (ask == null || !(ask > 0)) { showToast(`No live ask for ${strike}${rightOf(type)} — hover until a quote loads`, 'err'); return; }
     const tick = ask < 3 ? 0.05 : 0.10;
@@ -438,8 +519,17 @@ export default function App() {
   };
 
   const closePosition = (pos) => {
-    if (!feed.executionEnabled) { showToast('Execution disabled', 'err'); return; }
     if (!pos || pos.status !== 'open') return;
+    // Replay: simulated close at the model premium at the replayed moment.
+    if (replayActive) {
+      const g = resolveGreeks(pos.strike, pos.type);
+      setReplayPositions((prev) => prev.map((p) => (p.id === pos.id
+        ? { ...p, status: 'closed', exitPremium: g.premium, exitPrice: dispPrice, closedPL: (g.premium - (p.entryPremium ?? 0)) * 100 * p.qty, closedAt: replayNow }
+        : p)));
+      showToast(`REPLAY SOLD ${pos.strike}${rightOf(pos.type)} @ $${g.premium.toFixed(2)}`, 'ok');
+      return;
+    }
+    if (!feed.executionEnabled) { showToast('Execution disabled', 'err'); return; }
     const limit = sellLimitFor(pos.strike, pos.type);
     if (limit == null) { showToast(`No live bid for ${pos.strike}${rightOf(pos.type)} — wait for a quote`, 'err'); return; }
     const ref = feed.sendOrder({ intent: 'close', action: pos.side === 'long' ? 'SELL' : 'BUY', strike: pos.strike, right: rightOf(pos.type), qty: pos.qty, expiry: pos.expiry, limit });
@@ -473,6 +563,7 @@ export default function App() {
   // position. Both legs share an OCA group, so one filling cancels the other.
   // The TP is a native limit (works overnight); the SL is IBKR-simulated.
   const attachExit = (pos, tp, sl) => {
+    if (replayActive) { showToast('Exits aren\'t simulated in replay — close manually', 'err'); return; }
     if (!feed.executionEnabled) { showToast('Execution disabled', 'err'); return; }
     if (!pos || pos.status !== 'open') return;
     const action = pos.side === 'long' ? 'SELL' : 'BUY';
@@ -491,8 +582,22 @@ export default function App() {
   };
 
   const reversePosition = (pos) => {
-    if (!feed.executionEnabled) { showToast('Execution disabled', 'err'); return; }
     if (!pos || pos.status !== 'open') return;
+    // Replay: close this leg and open the opposite type, both at model prices.
+    if (replayActive) {
+      closePosition(pos);
+      const oppType = pos.type === 'call' ? 'put' : 'call';
+      const newStrike = nearestOtmStrike(dispPrice, oppType, 5);
+      const g = resolveGreeks(newStrike, oppType);
+      setReplayPositions((prev) => [...prev, {
+        id: posSeq++, type: oppType, side: 'long', strike: newStrike, qty: pos.qty,
+        expiry: replay.date, status: 'open', entryPremium: g.premium,
+        entryPrice: dispPrice, openedAt: replayNow
+      }]);
+      showToast(`REPLAY REVERSED → BUY ${newStrike}${rightOf(oppType)} @ $${g.premium.toFixed(2)}`, 'ok');
+      return;
+    }
+    if (!feed.executionEnabled) { showToast('Execution disabled', 'err'); return; }
     const oppositeType = pos.type === 'call' ? 'put' : 'call';
     const newStrike = nearestOtmStrike(feed.price, oppositeType, 5);
     const closeLimit = sellLimitFor(pos.strike, pos.type);
@@ -530,16 +635,17 @@ export default function App() {
       )}
 
       <Header
-        price={feed.price}
-        prevClose={feed.spxClose}
+        price={dispPrice}
+        prevClose={replayActive ? null : feed.spxClose}
         theme={theme}
         mood={mood}
         earsUp={earsUp}
         pulse={pulse}
         onToggleSettings={() => setSettingsOpen((o) => !o)}
-        now={now}
+        now={replayActive ? replayNow : now}
         live={feed.live}
         delayed={feed.delayed}
+        replayMode={replayActive}
         totoroOn={showTotoro}
         onToggleTotoro={() => {
           setShowTotoro((v) => {
@@ -548,7 +654,7 @@ export default function App() {
           });
         }}
         source={feed.live ? feed.source : 'SPX'}
-        expiry={feed.live ? feed.expiry : null}
+        expiry={replayActive ? replay.date : feed.live ? feed.expiry : null}
         account={feed.account}
         accountType={feed.accountType}
       />
@@ -574,9 +680,23 @@ export default function App() {
               <span className="acct-badge" style={{ color: '#0a0c12', background: acctColor }}>{acctLabel}</span>
               <span className="chart-acct-id">{feed.account || (feed.live ? '…' : 'no acct')}</span>
             </div>
+            {(replayBarOpen || replay != null) && (
+              <ReplayBar
+                theme={theme}
+                replay={replay}
+                loading={replayLoading}
+                onLoad={(date) => {
+                  setReplayPositions([]);
+                  setReplay({ date, candles: [], idx: 0, speed: 2, playing: false });
+                  if (!feed.requestReplayDay(date)) showToast('Replay needs the bridge connection', 'err');
+                }}
+                onSet={(patch) => setReplay((r) => (r ? { ...r, ...patch } : r))}
+                onExit={() => { setReplay(null); setReplayPositions([]); setReplayBarOpen(false); }}
+              />
+            )}
             <Chart
-              candles={feed.candles}
-              price={feed.price}
+              candles={replayActive ? replay.candles.slice(0, replay.idx + 1) : feed.candles}
+              price={dispPrice}
               positions={positionsLive}
               theme={chartTheme}
               ivol={IVOL}
@@ -585,10 +705,10 @@ export default function App() {
               onRequestTrade={handleRequestTrade}
               onQuickTrade={handleQuickTrade}
               onClosePosition={closePosition}
-              greeksMap={feed.greeksMap}
-              requestQuote={feed.live ? feed.requestQuote : null}
+              greeksMap={replayActive ? EMPTY_GREEKS : feed.greeksMap}
+              requestQuote={!replayActive && feed.live ? feed.requestQuote : null}
               expectedMove={expectedMove}
-              histCandles={feed.histSeries[timeframe] || null}
+              histCandles={replayActive ? null : feed.histSeries[timeframe] || null}
               showTotoro={showTotoro}
             />
             {toast && (
@@ -600,7 +720,12 @@ export default function App() {
             onChange={setTimeframe}
             theme={theme}
             onCloseAll={closeAllPositions}
-            canCloseAll={feed.executionEnabled && positionsLive.some((p) => p.status === 'open')}
+            canCloseAll={(replayActive || feed.executionEnabled) && positionsLive.some((p) => p.status === 'open')}
+            onReplay={() => {
+              if (replay != null) { setReplay(null); setReplayPositions([]); setReplayBarOpen(false); }
+              else setReplayBarOpen((v) => !v);
+            }}
+            replayOn={replay != null || replayBarOpen}
           />
 
           <Positions
@@ -612,8 +737,8 @@ export default function App() {
             onCancelWorkingOrder={cancelWorkingOrder}
             onInspect={(p) => setInspectId(p.id)}
             onHoverPos={(p, x, y) => setHoverPos(p ? { id: p.id, x, y } : null)}
-            workingOrders={feed.orders}
-            executionEnabled={feed.executionEnabled}
+            workingOrders={replayActive ? [] : feed.orders}
+            executionEnabled={replayActive ? true : feed.executionEnabled}
             funds={feed.funds}
             dayPL={dayPL}
           />
@@ -627,7 +752,7 @@ export default function App() {
         theme={theme}
         onCancel={() => setPending(null)}
         onExecute={handleExecute}
-        executionEnabled={feed.executionEnabled}
+        executionEnabled={replayActive ? true : feed.executionEnabled}
         accountType={feed.accountType}
       />
 

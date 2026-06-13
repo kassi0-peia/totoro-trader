@@ -29,15 +29,15 @@ function formatExpiry(expiry, now) {
 // Amber for the DELAYED state (theme-independent: it's a warning, not a mood).
 const DELAYED_COLOR = '#e6a23c';
 
-export default function Header({ price, prevClose, theme, mood, earsUp, pulse, onToggleSettings, now, live, delayed = false, source = 'SPX', expiry = null, account = null, accountType = null, totoroOn = true, onToggleTotoro = null }) {
+export default function Header({ price, prevClose, theme, mood, earsUp, pulse, onToggleSettings, now, live, delayed = false, replayMode = false, source = 'SPX', expiry = null, account = null, accountType = null, totoroOn = true, onToggleTotoro = null }) {
   // Daily change vs the previous 4:00 PM SPX cash close.
   const haveDaily = Number.isFinite(prevClose) && prevClose > 0 && Number.isFinite(price);
   const change = haveDaily ? price - prevClose : NaN;
   const changePct = haveDaily ? (change / prevClose) * 100 : NaN;
   const changeColor = haveDaily ? (change >= 0 ? theme.profit : theme.loss) : theme.muted;
   const { h, m } = expiryCountdown(now);
-  const feedColor = live ? (delayed ? DELAYED_COLOR : theme.profit) : theme.muted;
-  const feedLabel = live ? (delayed ? 'DELAYED' : 'LIVE') : 'SIM';
+  const feedColor = replayMode ? theme.accent : live ? (delayed ? DELAYED_COLOR : theme.profit) : theme.muted;
+  const feedLabel = replayMode ? 'REPLAY' : live ? (delayed ? 'DELAYED' : 'LIVE') : 'SIM';
   const sourceLabel = source === 'ES' ? 'ES/SPX' : 'SPX';
   const expiryDate = formatExpiry(expiry, now);
 

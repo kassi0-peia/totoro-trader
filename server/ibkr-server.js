@@ -18,7 +18,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { IBApi, EventName } from '@stoqey/ib';
 import { WebSocketServer } from 'ws';
-import { computeSession, etParts, ymd, lastCloseEt } from './session.js';
+import { computeSession, etParts, ymd, lastCloseEt, etCloseEpoch } from './session.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_DIR = path.resolve(__dirname, '..', 'dist');
@@ -175,6 +175,7 @@ wss.on('connection', (ws) => {
     if (msg.type === 'order') handleOrderRequest(ws, msg);
     else if (msg.type === 'history') handleHistoryRequest(ws, msg);
     else if (msg.type === 'optHistory') handleOptHistoryRequest(ws, msg);
+    else if (msg.type === 'replayDay') handleReplayDayRequest(ws, msg);
     else if (msg.type === 'quote') handleQuoteRequest(ws, msg);
     else if (msg.type === 'cancel') handleCancel(ws, msg);
     else if (msg.type === 'cancelAll') {
@@ -412,6 +413,7 @@ function wireHandlers(api) {
     resetBasisFill();
     tfHistInFlight.clear();
     optHistInFlight.clear();
+    replayInFlight.clear();
     ib = null;
     connectedPort = null;
     mktDataTypeSent = false;
@@ -545,6 +547,19 @@ function wireHandlers(api) {
   api.on(EventName.historicalData, (reqId, time, open, high, low, close, volume) => {
     const s = subs.get(reqId);
     if (!s) return;
+    if (s.kind === 'replay-day') {
+      if (typeof time === 'string' && time.startsWith('finished')) {
+        subs.delete(reqId);
+        replayInFlight.delete(s.date);
+        replayCache.set(s.date, { candles: s.candles, ts: Date.now() });
+        broadcast({ type: 'replayDayResult', date: s.date, candles: s.candles });
+        console.log(`[ibkr] replay-day ${s.date} ready (${s.candles.length} bars)`);
+        return;
+      }
+      const t = parseHistTime(time);
+      if (t != null) s.candles.push({ t, open, high, low, close, volume: Math.max(volume, 0) });
+      return;
+    }
     if (s.kind === 'opt-hist') {
       if (typeof time === 'string' && time.startsWith('finished')) {
         subs.delete(reqId);
@@ -1348,6 +1363,34 @@ function handleOptHistoryRequest(_ws, msg) {
   } catch (e) {
     console.log('[ibkr] opt-hist request failed:', e.message);
     optHistInFlight.delete(key);
+    subs.delete(reqId);
+  }
+}
+
+// ── Replay day (practice mode): full 1-min RTH session for any past date ────
+const replayCache = new Map(); // YYYYMMDD -> { candles, ts }
+const replayInFlight = new Set();
+
+function handleReplayDayRequest(_ws, msg) {
+  const date = String(msg.date || '');
+  if (!/^\d{8}$/.test(date) || !ib || !connected) return;
+  const cached = replayCache.get(date);
+  if (cached) {
+    broadcast({ type: 'replayDayResult', date, candles: cached.candles });
+    return;
+  }
+  if (replayInFlight.has(date)) return;
+  const closeMs = etCloseEpoch(+date.slice(0, 4), +date.slice(4, 6), +date.slice(6, 8));
+  if (closeMs == null) return;
+  replayInFlight.add(date);
+  const reqId = reqSeq++;
+  subs.set(reqId, { kind: 'replay-day', date, candles: [] });
+  try {
+    ib.reqHistoricalData(reqId, { symbol: 'SPX', secType: 'IND', exchange: 'CBOE', currency: 'USD' },
+      histEndUtc(closeMs), '1 D', '1 min', 'TRADES', 1, 2, false);
+  } catch (e) {
+    console.log('[ibkr] replay-day request failed:', e.message);
+    replayInFlight.delete(date);
     subs.delete(reqId);
   }
 }
