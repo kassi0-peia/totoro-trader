@@ -46,6 +46,7 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent } = {}) {
       orders: [],            // working (unfilled) orders, visible on every device
       histSeries: {},        // per-timeframe historical candles (5m → 1W … 1D → 1Y)
       optHist: {},           // per-contract intraday premium series ("7500C" -> candles)
+      replayDays: {},        // replay mode: "YYYYMMDD" -> full 1-min RTH session
       funds: null,           // { availableFunds, buyingPower, netLiquidation }
       spxClose: null         // previous trading day's 4:00 PM SPX cash close
     };
@@ -166,7 +167,15 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent } = {}) {
     return true;
   }, []);
 
-  return { ...snapshot, sendOrder, sendCancel, requestQuote, requestHistory, requestOptHistory };
+  // Replay mode: ask the bridge for a past day's full 1-min RTH session.
+  const requestReplayDay = useCallback((date) => {
+    const ws = socketRef.current;
+    if (!ws || ws.readyState !== 1) return false;
+    ws.send(JSON.stringify({ type: 'replayDay', date }));
+    return true;
+  }, []);
+
+  return { ...snapshot, sendOrder, sendCancel, requestQuote, requestHistory, requestOptHistory, requestReplayDay };
 }
 
 function applyMessage(s, msg) {
@@ -272,6 +281,10 @@ function applyMessage(s, msg) {
   if (msg.type === 'optHistoryResult') {
     const k = key(msg.strike, msg.right === 'C' ? 'call' : 'put');
     return { ...s, optHist: { ...s.optHist, [k]: { candles: msg.candles || [], ts: Date.now() } } };
+  }
+
+  if (msg.type === 'replayDayResult') {
+    return { ...s, replayDays: { ...s.replayDays, [msg.date]: msg.candles || [] } };
   }
 
   if (msg.type === 'greeks') {

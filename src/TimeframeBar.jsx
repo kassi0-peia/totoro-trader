@@ -9,7 +9,7 @@ const OPTIONS = [
   { label: '1D', value: 1440 }
 ];
 
-export default function TimeframeBar({ value, onChange, theme, onCloseAll, canCloseAll }) {
+export default function TimeframeBar({ value, onChange, theme, onCloseAll, canCloseAll, onReplay = null, replayOn = false }) {
   return (
     <div className="tf-bar">
       <span className="tf-label">TIMEFRAME</span>
@@ -29,6 +29,16 @@ export default function TimeframeBar({ value, onChange, theme, onCloseAll, canCl
         })}
       </div>
       <div className="tf-actions">
+        {onReplay && (
+          <button
+            className="tf-panic tf-replay"
+            onClick={onReplay}
+            title="Replay a past day (practice mode — simulated fills)"
+            style={replayOn ? { borderColor: theme.accent, color: theme.accent } : undefined}
+          >
+            ⏪ REPLAY
+          </button>
+        )}
         <button
           className="tf-panic"
           onClick={() => window.open('https://www.interactivebrokers.com/sso/Login', '_blank', 'noopener')}

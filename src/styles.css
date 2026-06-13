@@ -865,6 +865,63 @@ button {
   width: min(440px, 94vw);
 }
 
+/* Replay mode (desktop-only practice controls) */
+.replay-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: 8px;
+  margin-bottom: 6px;
+  font-size: 12px;
+}
+
+.replay-label {
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+
+.replay-hint {
+  color: var(--c-muted);
+  font-size: 11px;
+}
+
+.replay-date,
+.replay-speed {
+  height: 30px;
+  padding: 0 8px;
+  border-radius: 8px;
+  background: var(--c-surfaceAlt);
+  border: 1px solid var(--c-border);
+  color: var(--c-text);
+  font-size: 12px;
+}
+
+.replay-scrub {
+  flex: 1;
+  accent-color: var(--c-accent);
+}
+
+.replay-time {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.replay-exit {
+  margin-left: auto;
+}
+
+.replay-active .replay-exit {
+  margin-left: 0;
+}
+
+@media (max-width: 720px) {
+  .replay-bar, .tf-replay { display: none; } /* desktop-only by design */
+}
+
 /* The mascot doubles as the totoro-detector toggle. */
 .mascot-btn {
   background: none;
