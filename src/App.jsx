@@ -66,6 +66,19 @@ export default function App() {
   useEffect(() => {
     try { localStorage.setItem('tt.totoro', showTotoro ? '1' : '0'); } catch {}
   }, [showTotoro]);
+  // Opt-in tools (kisa's rule: dormant until toggled, in the gear panel).
+  const [axisChain, setAxisChain] = useState(() => {
+    try { return localStorage.getItem('tt.axischain') === '1'; } catch { return false; }
+  });
+  const [rungButton, setRungButton] = useState(() => {
+    try { return localStorage.getItem('tt.rung') === '1'; } catch { return false; }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem('tt.axischain', axisChain ? '1' : '0');
+      localStorage.setItem('tt.rung', rungButton ? '1' : '0');
+    } catch {}
+  }, [axisChain, rungButton]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [now, setNow] = useState(Date.now());
   const [pulse, setPulse] = useState(false);
@@ -581,6 +594,45 @@ export default function App() {
     setInspectId(null);
   };
 
+  // One-click rung: buy the next further-OTM strike in the ladder's direction
+  // (the playbook's "add on the dip" as a single gesture). Limit at ask + tick;
+  // in replay, a simulated model fill.
+  const buyNextRung = () => {
+    const open = positionsLive.filter((p) => p.status === 'open');
+    if (!open.length) { showToast('No ladder yet — open the first rung manually', 'err'); return; }
+    const last = open.reduce((a, b) => (((b.openedAt ?? 0) > (a.openedAt ?? 0)) ? b : a));
+    const type = last.type;
+    const strikes = open.filter((p) => p.type === type).map((p) => p.strike);
+    const next = type === 'put' ? Math.min(...strikes) - 25 : Math.max(...strikes) + 25;
+    if (replayActive) {
+      const g = resolveGreeks(next, type);
+      setReplayPositions((prev) => [...prev, {
+        id: posSeq++, type, side: 'long', strike: next, qty: 1, expiry: replay.date,
+        status: 'open', entryPremium: g.premium, entryPrice: dispPrice, openedAt: replayNow
+      }]);
+      showToast(`RUNG (replay): BUY 1 ${next}${rightOf(type)} @ $${g.premium.toFixed(2)}`, 'ok');
+      triggerPulse();
+      return;
+    }
+    if (!feed.executionEnabled) { showToast('Execution disabled', 'err'); return; }
+    const limit = buyLimitFor(next, type);
+    if (limit == null) {
+      feed.requestQuote({ strike: next, right: rightOf(type) });
+      showToast(`No quote yet for ${next}${rightOf(type)} — fetching, tap again in a second`, 'err');
+      return;
+    }
+    const ref = feed.sendOrder({ intent: 'open', action: 'BUY', strike: next, right: rightOf(type), qty: 1, expiry: feed.expiry, limit });
+    if (!ref) { showToast('Rung not sent — not connected', 'err'); return; }
+    const g = resolveGreeks(next, type);
+    setPositions((prev) => [...prev, {
+      id: posSeq++, type, side: 'long', strike: next, qty: 1, expiry: feed.expiry,
+      status: 'pending', openRef: ref, entryPremium: null, estPremium: limit,
+      entryPrice: feed.price, openedAt: Date.now(), greeksLive: g
+    }]);
+    showToast(`RUNG: BUY 1 ${next}${rightOf(type)} LMT $${limit.toFixed(2)}`, 'ok');
+    triggerPulse();
+  };
+
   const reversePosition = (pos) => {
     if (!pos || pos.status !== 'open') return;
     // Replay: close this leg and open the opposite type, both at model prices.
@@ -668,6 +720,10 @@ export default function App() {
             onClose={() => setSettingsOpen(false)}
             neutralChrome={neutralChrome}
             onToggleNeutral={() => setNeutralChrome((v) => !v)}
+            axisChain={axisChain}
+            onToggleAxisChain={() => setAxisChain((v) => !v)}
+            rungButton={rungButton}
+            onToggleRungButton={() => setRungButton((v) => !v)}
           />
         </div>
       )}
@@ -711,6 +767,8 @@ export default function App() {
               expectedMove={expectedMove}
               histCandles={replayActive ? null : feed.histSeries[timeframe] || null}
               showTotoro={showTotoro}
+              axisChain={axisChain}
+              onRung={rungButton ? buyNextRung : null}
             />
             {toast && (
               <div className={`fill-toast fill-${toast.kind}`} role="status">{toast.text}</div>
