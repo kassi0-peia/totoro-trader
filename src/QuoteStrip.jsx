@@ -6,7 +6,7 @@ const ivPct = (iv) => (Number.isFinite(iv) ? (iv * 100).toFixed(1) + '%' : '—'
 
 // Bold strip above the chart: ATM call/put quote + IV, and the VIX (red when up
 // on the day, green when down). ATM is the nearest 5-point strike to the SPX(-equiv) price.
-export default function QuoteStrip({ price, greeksMap, vix, theme }) {
+export default function QuoteStrip({ price, greeksMap, vix, theme, onReplay = null, replayOn = false }) {
   const atm = Number.isFinite(price) ? Math.round(price / 5) * 5 : null;
   const call = atm != null ? liveQuote(greeksMap, atm, 'call') : null;
   const put = atm != null ? liveQuote(greeksMap, atm, 'put') : null;
@@ -26,6 +26,18 @@ export default function QuoteStrip({ price, greeksMap, vix, theme }) {
 
   return (
     <div className="quote-strip">
+      {onReplay && (
+        <button
+          className="qs-replay"
+          onClick={onReplay}
+          title="Replay a past day (practice mode — simulated fills)"
+          style={replayOn
+            ? { background: theme.accent, borderColor: theme.accent, color: '#0a0c12' }
+            : { borderColor: theme.accent, color: theme.accent }}
+        >
+          ⏪ REPLAY
+        </button>
+      )}
       <span className="qs-atm">ATM {atm ?? '—'}</span>
       {leg('C', call, theme.callLine)}
       {leg('P', put, theme.putLine)}

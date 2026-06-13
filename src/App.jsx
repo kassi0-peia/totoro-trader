@@ -209,26 +209,35 @@ export default function App() {
   // Replay: the price/time the whole UI prices against.
   const dispPrice = replayActive ? replayPrice : feed.price;
 
-  // Replay: adopt the day's bars when the bridge delivers them (start a few
-  // bars in so the chart opens with context).
+  // Replay: adopt the day's bars when the bridge delivers them, starting at the
+  // very first bar of the session.
   useEffect(() => {
     if (!replay || replay.candles.length > 0) return;
     const bars = feed.replayDays[replay.date];
-    if (bars && bars.length > 10) {
-      setReplay((r) => (r && r.date === replay.date ? { ...r, candles: bars, idx: 9, playing: false } : r));
+    if (bars && bars.length > 0) {
+      setReplay((r) => (r && r.date === replay.date ? { ...r, candles: bars, idx: 0, playing: false } : r));
     }
   }, [feed.replayDays, replay]);
 
-  // Replay: the playback clock (speed = bars per second).
+  // Replay: the playback clock (speed = bars per second). Pressing play from the
+  // very first bar gets a 5s breather to get your bearings before the tape rolls;
+  // resuming mid-session starts immediately.
   useEffect(() => {
     if (!replayActive || !replay.playing) return;
-    const id = setInterval(() => {
-      setReplay((r) => {
-        if (!r || r.idx >= r.candles.length - 1) return r ? { ...r, playing: false } : r;
-        return { ...r, idx: r.idx + 1 };
-      });
-    }, Math.max(40, 1000 / replay.speed));
-    return () => clearInterval(id);
+    let interval = null;
+    const start = () => {
+      setReplay((r) => (r && r.leadIn ? { ...r, leadIn: false } : r));
+      interval = setInterval(() => {
+        setReplay((r) => {
+          if (!r || r.idx >= r.candles.length - 1) return r ? { ...r, playing: false } : r;
+          return { ...r, idx: r.idx + 1 };
+        });
+      }, Math.max(40, 1000 / replay.speed));
+    };
+    const leadIn = replay.idx === 0 ? 5000 : 0;
+    if (leadIn) setReplay((r) => (r ? { ...r, leadIn: true } : r));
+    const timer = setTimeout(start, leadIn);
+    return () => { clearTimeout(timer); if (interval) clearInterval(interval); setReplay((r) => (r && r.leadIn ? { ...r, leadIn: false } : r)); };
   }, [replayActive, replay?.playing, replay?.speed]); // eslint-disable-line react-hooks/exhaustive-deps
   priceRef.current = feed.price;
 
@@ -730,27 +739,37 @@ export default function App() {
 
       <main className="main">
         <div className="main-inner">
-          <QuoteStrip price={feed.price} greeksMap={feed.greeksMap} vix={feed.vix} theme={theme} />
+          <QuoteStrip
+            price={feed.price}
+            greeksMap={feed.greeksMap}
+            vix={feed.vix}
+            theme={theme}
+            replayOn={replay != null || replayBarOpen}
+            onReplay={() => {
+              if (replay != null) { setReplay(null); setReplayPositions([]); setReplayBarOpen(false); }
+              else setReplayBarOpen((v) => !v);
+            }}
+          />
+          {(replayBarOpen || replay != null) && (
+            <ReplayBar
+              theme={theme}
+              replay={replay}
+              loading={replayLoading}
+              onLoad={(date) => {
+                setReplayPositions([]);
+                setReplay({ date, candles: [], idx: 0, speed: 2, playing: false });
+                if (!feed.requestReplayDay(date)) showToast('Replay needs the bridge connection', 'err');
+              }}
+              onSet={(patch) => setReplay((r) => (r ? { ...r, ...patch } : r))}
+              onChangeDay={() => { setReplay(null); setReplayPositions([]); setReplayBarOpen(true); }}
+              onExit={() => { setReplay(null); setReplayPositions([]); setReplayBarOpen(false); }}
+            />
+          )}
           <div className="chart-area">
             <div className="chart-acct" title={feed.account ? `IBKR account ${feed.account}` : 'no account connected'}>
               <span className="acct-badge" style={{ color: '#0a0c12', background: acctColor }}>{acctLabel}</span>
               <span className="chart-acct-id">{feed.account || (feed.live ? '…' : 'no acct')}</span>
             </div>
-            {(replayBarOpen || replay != null) && (
-              <ReplayBar
-                theme={theme}
-                replay={replay}
-                loading={replayLoading}
-                onLoad={(date) => {
-                  setReplayPositions([]);
-                  setReplay({ date, candles: [], idx: 0, speed: 2, playing: false });
-                  if (!feed.requestReplayDay(date)) showToast('Replay needs the bridge connection', 'err');
-                }}
-                onSet={(patch) => setReplay((r) => (r ? { ...r, ...patch } : r))}
-                onChangeDay={() => { setReplay(null); setReplayPositions([]); setReplayBarOpen(true); }}
-                onExit={() => { setReplay(null); setReplayPositions([]); setReplayBarOpen(false); }}
-              />
-            )}
             <Chart
               candles={replayActive ? replay.candles.slice(0, replay.idx + 1) : feed.candles}
               price={dispPrice}
@@ -780,11 +799,6 @@ export default function App() {
             theme={theme}
             onCloseAll={closeAllPositions}
             canCloseAll={(replayActive || feed.executionEnabled) && positionsLive.some((p) => p.status === 'open')}
-            onReplay={() => {
-              if (replay != null) { setReplay(null); setReplayPositions([]); setReplayBarOpen(false); }
-              else setReplayBarOpen((v) => !v);
-            }}
-            replayOn={replay != null || replayBarOpen}
           />
 
           <Positions
