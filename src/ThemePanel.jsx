@@ -1,7 +1,7 @@
 import React from 'react';
 import { THEMES, THEME_KEYS } from './themes.js';
 
-export default function ThemePanel({ open, current, onPick, onClose, neutralChrome = false, onToggleNeutral }) {
+export default function ThemePanel({ open, current, onPick, onClose, neutralChrome = false, onToggleNeutral, axisChain = false, onToggleAxisChain = null, rungButton = false, onToggleRungButton = null }) {
   if (!open) return null;
   return (
     <div className="theme-panel" onClick={(e) => e.stopPropagation()}>
@@ -42,6 +42,34 @@ export default function ThemePanel({ open, current, onPick, onClose, neutralChro
           <span className="toggle-knob" />
         </button>
       </div>
+      {onToggleAxisChain && (
+        <div className="theme-toggle-row" title="Paint live call/put premiums beside each strike on the price axis — the chain lives on the chart">
+          <span>Axis premiums</span>
+          <button
+            className={`toggle-switch${axisChain ? ' on' : ''}`}
+            role="switch"
+            aria-checked={axisChain}
+            onClick={onToggleAxisChain}
+            aria-label="Toggle premiums on the price axis"
+          >
+            <span className="toggle-knob" />
+          </button>
+        </div>
+      )}
+      {onToggleRungButton && (
+        <div className="theme-toggle-row" title="Show the RUNG button: one click buys the next further-OTM strike in your ladder's direction (limit at ask)">
+          <span>Rung button</span>
+          <button
+            className={`toggle-switch${rungButton ? ' on' : ''}`}
+            role="switch"
+            aria-checked={rungButton}
+            onClick={onToggleRungButton}
+            aria-label="Toggle the one-click rung button"
+          >
+            <span className="toggle-knob" />
+          </button>
+        </div>
+      )}
     </div>
   );
 }

@@ -452,7 +452,8 @@ button {
 .vol-btn,
 .rec-btn,
 .quick-btn,
-.cw-btn {
+.cw-btn,
+.rung-btn {
   position: absolute;
   bottom: 30px;
   width: 34px;
@@ -478,6 +479,8 @@ button {
 .cw-plus { left: 12px; font-size: 17px; }   /* bottom-left: candle width */
 .cw-minus { left: 54px; font-size: 17px; }
 .cw-btn:hover { color: var(--c-accent); border-color: var(--c-accent); }
+.rung-btn { right: 264px; }                 /* one-click ladder rung (toggle in gear panel) */
+.rung-btn:hover { color: var(--c-accent); border-color: var(--c-accent); }
 .snap-now-btn:hover,
 .fs-btn:hover,
 .markers-btn:hover,
