@@ -560,7 +560,7 @@ button {
   animation: rec-pulse 1.2s ease-in-out infinite;
 }
 
-/* Quick mode armed: red — right-click fires a real market order. */
+/* Quick mode armed: red — right-click fires a real (marketable-limit) order. */
 .quick-btn.active {
   color: #e05555;
   border-color: #e05555;

@@ -1286,7 +1286,7 @@ export default function Chart({
         className={`quick-btn${quickMode ? ' active' : ''}`}
         onClick={() => setQuickMode((v) => !v)}
         aria-label="Toggle quick trade mode"
-        data-tip={quickMode ? 'Quick mode ARMED — right-click places a market order. Click to disarm.' : 'Quick mode: right-click on a strike = instant 1-lot market order'}
+        data-tip={quickMode ? 'Quick mode ARMED — right-click sends a 1-lot marketable limit (ask + 1 tick). Click to disarm.' : 'Quick mode: right-click a strike = instant 1-lot marketable limit at the ask'}
       >
         <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor">
           <path d="M13 2 4 14h6l-1 8 9-12h-6z" />
