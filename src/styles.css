@@ -33,6 +33,68 @@ body {
 button {
   font-family: inherit;
   cursor: pointer;
+  user-select: none;                          /* no blue text-highlight on click/hover */
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Text selection blends with the chart background instead of browser blue. */
+::selection { background: var(--c-bg); color: var(--c-text); }
+::-moz-selection { background: var(--c-bg); color: var(--c-text); }
+
+/* Custom dark tooltips — replace native title= (the OS paints those bright blue). */
+[data-tip] { position: relative; }
+[data-tip]:not([data-tip=""])::after {
+  content: attr(data-tip);
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 7px);
+  transform: translateX(-50%) translateY(3px);
+  z-index: 80;
+  width: max-content;
+  max-width: 230px;
+  padding: 5px 9px;
+  border-radius: 6px;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  color: var(--c-text);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  line-height: 1.25;
+  white-space: normal;
+  text-align: center;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 110ms ease, transform 110ms ease;
+  transition-delay: 220ms;
+}
+[data-tip]:hover::after,
+[data-tip]:focus-visible::after {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+/* The relative above must not reflow hosts that are intentionally absolute. */
+.snap-now-btn, .fs-btn, .markers-btn, .vol-btn, .rec-btn, .quick-btn, .cw-btn, .rung-btn,
+.trades-pull, .chart-acct { position: absolute; }
+
+/* Edge-anchor tooltips on screen-edge controls so they never clip the viewport.
+   The [data-tip] keeps specificity at/above the base rule so these win. */
+.fs-btn[data-tip]::after, .markers-btn[data-tip]::after, .vol-btn[data-tip]::after,
+.rec-btn[data-tip]::after, .quick-btn[data-tip]::after, .snap-now-btn[data-tip]::after,
+.rung-btn[data-tip]::after, .chart-acct[data-tip]::after {
+  left: auto; right: -1px; transform: translateX(0) translateY(3px);
+}
+.fs-btn[data-tip]:hover::after, .markers-btn[data-tip]:hover::after, .vol-btn[data-tip]:hover::after,
+.rec-btn[data-tip]:hover::after, .quick-btn[data-tip]:hover::after, .snap-now-btn[data-tip]:hover::after,
+.rung-btn[data-tip]:hover::after, .chart-acct[data-tip]:hover::after {
+  transform: translateX(0) translateY(0);
+}
+.cw-btn[data-tip]::after, .trades-pull[data-tip]::after, .qs-replay[data-tip]::after {
+  left: -1px; right: auto; transform: translateX(0) translateY(3px);
+}
+.cw-btn[data-tip]:hover::after, .trades-pull[data-tip]:hover::after, .qs-replay[data-tip]:hover::after {
+  transform: translateX(0) translateY(0);
 }
 
 .app {

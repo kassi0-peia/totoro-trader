@@ -120,7 +120,7 @@ export default function TradeModal({ pending, theme, onCancel, onExecute, execut
               placeholder="TP"
               onChange={(e) => setTpStr(e.target.value)}
               aria-label="take profit price"
-              title="Take-profit: SELL limit attached to this entry (native — works overnight)"
+              data-tip="Take-profit: SELL limit attached to this entry (native — works overnight)"
             />
             <input
               className="limit-input"
@@ -132,7 +132,7 @@ export default function TradeModal({ pending, theme, onCancel, onExecute, execut
               placeholder="SL"
               onChange={(e) => setSlStr(e.target.value)}
               aria-label="stop loss price"
-              title="Stop: SELL stop attached to this entry (IBKR-simulated — may not trigger before ~00:10 overnight)"
+              data-tip="Stop: SELL stop attached to this entry (IBKR-simulated — may not trigger before ~00:10 overnight)"
             />
           </div>
         </div>

@@ -33,18 +33,18 @@ export default function TimeframeBar({ value, onChange, theme, onCloseAll, canCl
           <button
             className="tf-panic tf-replay"
             onClick={onReplay}
-            title="Replay a past day (practice mode — simulated fills)"
+            data-tip="Replay a past day (practice mode — simulated fills)"
             style={replayOn
               ? { background: theme.accent, borderColor: theme.accent, color: '#0a0c12' }
               : { borderColor: theme.accent, color: theme.accent }}
           >
-            ⏪ REPLAY
+            REPLAY
           </button>
         )}
         <button
           className="tf-panic"
           onClick={() => window.open('https://www.interactivebrokers.com/sso/Login', '_blank', 'noopener')}
-          title="Open IBKR Client Portal — manual control / escape hatch"
+          data-tip="Open IBKR Client Portal — manual control / escape hatch"
           style={{ borderColor: theme.accent, color: theme.accent }}
         >
           ↗ IBKR
@@ -54,7 +54,7 @@ export default function TimeframeBar({ value, onChange, theme, onCloseAll, canCl
             className="tf-closeall"
             onClick={onCloseAll}
             disabled={!canCloseAll}
-            title="Close all open positions at market"
+            data-tip="Close all open positions at market"
             style={{ borderColor: theme.loss, color: theme.loss }}
           >
             ✕ CLOSE ALL

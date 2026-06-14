@@ -55,7 +55,7 @@ export default function ReplayBar({ theme, replay, loading, onLoad, onSet, onExi
       <button
         className="kind-btn replay-daybtn"
         style={{ color: theme.accent, borderColor: theme.accent }}
-        title="Pick a different day"
+        data-tip="Pick a different day"
         onClick={onChangeDay}
       >
         ⏪ {replay.date.slice(0, 4)}-{replay.date.slice(4, 6)}-{replay.date.slice(6, 8)} ▾
@@ -64,7 +64,7 @@ export default function ReplayBar({ theme, replay, loading, onLoad, onSet, onExi
       <button
         className={`kind-btn${leadIn ? ' replay-leadin' : ''}`}
         style={playing ? { color: theme.accent, borderColor: theme.accent } : undefined}
-        title={leadIn ? 'Starting in a few seconds…' : undefined}
+        data-tip={leadIn ? 'Starting in a few seconds…' : undefined}
         onClick={() => onSet({ playing: !playing })}
       >
         {playing ? '⏸' : '▶'}
@@ -88,7 +88,7 @@ export default function ReplayBar({ theme, replay, loading, onLoad, onSet, onExi
       <span className="replay-time" style={{ color: theme.accent }}>
         {cur ? fmtBarTime(cur.t) : '—'} · {idx + 1}/{candles.length}
       </span>
-      <button className="kind-btn replay-exit" onClick={onExit} title="Exit replay">✕ EXIT</button>
+      <button className="kind-btn replay-exit" onClick={onExit} data-tip="Exit replay">✕ EXIT</button>
     </div>
   );
 }
