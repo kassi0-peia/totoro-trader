@@ -1,8 +1,10 @@
 # TotoroTrader
 
 SPX 0DTE execution practice UI. Connects to Interactive Brokers TWS / IB Gateway
-for real SPX index prices and SPXW option-chain greeks. Falls back to a built-in
-simulator whenever TWS is not reachable, so the UI is always usable.
+for real SPX index prices and SPXW option-chain greeks. When the bridge isn't
+connected the UI shows no live price or candles (an **OFFLINE** state) — there is
+no market simulator. Black–Scholes (`src/options.js`) still prices the chart's
+premium overlay and replay-mode practice fills.
 
 ## One-time TWS setup
 
@@ -30,9 +32,9 @@ npm run server     # node server/ibkr-server.js  (TWS bridge + websocket)
 npm run dev        # vite, http://localhost:5173
 ```
 
-The header subtitle shows **LIVE** when the bridge is connected to TWS, and
-**SIM** when it is not — the simulator silently takes over. The footer
-mirrors the same state.
+The header subtitle shows **LIVE** when the bridge is connected to TWS (**DELAYED**
+if IBKR is serving delayed data), and **OFFLINE** when it is not — there's no live
+price or candles until the bridge connects. The footer mirrors the same state.
 
 By default the bridge **auto-detects** the connection by probing
 `7497 → 4002 → 7496 → 4001` (TWS paper, Gateway paper, TWS live, Gateway live)
@@ -63,13 +65,14 @@ server/ibkr-server.js  ── 1-min candles from SPX + ES ticks,
      ▼
 src/feed.js (useIbkrFeed hook)  ── connects to same-origin /ws
      │   live={true}  → IBKR price + candles + greeks + source/expiry/basis
-     │   live={false} → simulator.js + options.js (Black–Scholes)
+     │   live={false} → OFFLINE: no live price/candles (options.js still prices overlay + replay)
      ▼
 src/App.jsx / Header.jsx (SPX vs ES/SPX label + target expiry date)
 ```
 
-The simulator (`src/simulator.js`) and Black–Scholes greeks (`src/options.js`)
-are unchanged and serve as the offline fallback path.
+Black–Scholes greeks (`src/options.js`) price the chart's premium overlay and
+replay-mode practice fills. There is **no offline market simulator** — without the
+bridge there is simply no live price or candles (the UI shows **OFFLINE**).
 
 ## Market sessions: SPX cash vs ES futures
 
@@ -102,7 +105,8 @@ unit-testable with an injected clock) and switches data source + option expiry:
 > Both feeds need market data from TWS/Gateway. If another IBKR session is logged
 > in from a different IP, the data farm returns `10197` / `162` and blocks live +
 > historical data for this session — close the other session (mobile/web/live TWS)
-> for data to flow. The app falls back to the simulator while data is unavailable.
+> for data to flow. The app shows **OFFLINE** (no live price/candles) while data is
+> unavailable.
 
 ## Order execution & account safety
 

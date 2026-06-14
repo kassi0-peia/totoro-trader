@@ -1,8 +1,8 @@
 // IBKR bridge: connects to TWS / IB Gateway via @stoqey/ib and serves the built
 // app + a /ws WebSocket on one port. Streams SPX index ticks, ES front-month
 // futures ticks, and the SPXW 0DTE option chain; computes the ES-SPX basis and
-// picks the active price source by ET session phase. When TWS is unreachable the
-// frontend falls back to its built-in simulator (this server reports connected:false).
+// picks the active price source by ET session phase. When TWS is unreachable this
+// server reports connected:false and the frontend shows OFFLINE (no market simulator).
 //
 // Session model (all times America/New_York):
 //   09:30–16:15 (RTH, weekday): source = SPX cash. Basis = ES − SPX, updated live.
