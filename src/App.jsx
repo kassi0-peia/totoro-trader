@@ -792,7 +792,7 @@ export default function App() {
             />
           )}
           <div className="chart-area">
-            <div className="chart-acct" title={feed.account ? `IBKR account ${feed.account}` : 'no account connected'}>
+            <div className="chart-acct" data-tip={feed.account ? `IBKR account ${feed.account}` : 'no account connected'}>
               <span className="acct-badge" style={{ color: '#0a0c12', background: acctColor }}>{acctLabel}</span>
               <span className="chart-acct-id">{feed.account || (feed.live ? '…' : 'no acct')}</span>
             </div>
@@ -907,7 +907,7 @@ export default function App() {
       })()}
 
       <footer className="footer">
-        <span>{feed.live ? 'IBKR LIVE DATA' : 'SIMULATED DATA'}</span>
+        <span>{feed.live ? 'IBKR LIVE DATA' : 'OFFLINE — NO CONNECTION'}</span>
         <span>TotoroTrader v0.5</span>
       </footer>
     </div>

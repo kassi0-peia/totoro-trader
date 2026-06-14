@@ -51,7 +51,10 @@ function fmtVol(v) {
 
 const MIN_VISIBLE = 14;
 const MAX_VISIBLE = 240;
-const DEFAULT_VISIBLE = 60;
+// Open two candle-width "+" clicks in from the smallest candles (most zoomed out):
+// 240 → 185 → 142. The "+" button zooms in via Math.round(v / 1.3).
+const zoomInStep = (v) => Math.round(v / 1.3);
+const DEFAULT_VISIBLE = zoomInStep(zoomInStep(MAX_VISIBLE));
 
 const MARKER_HALF = 5;
 
@@ -1220,7 +1223,7 @@ export default function Chart({
         className="fs-btn"
         onClick={() => setFullscreen((f) => !f)}
         aria-label="Toggle fullscreen chart"
-        title={fullscreen ? 'Exit fullscreen' : 'Fullscreen chart'}
+        data-tip={fullscreen ? 'Exit fullscreen' : 'Fullscreen chart'}
       >
         {fullscreen ? (
           <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -1236,7 +1239,7 @@ export default function Chart({
         className={`markers-btn${showMarkers ? ' active' : ''}`}
         onClick={() => setShowMarkers((v) => !v)}
         aria-label="Toggle trade markers"
-        title={showMarkers ? 'Hide trade markers' : 'Show trade markers'}
+        data-tip={showMarkers ? 'Hide trade markers' : 'Show trade markers'}
       >
         <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor">
           <path d="M12 3 L16 9 L8 9 Z" />
@@ -1247,7 +1250,7 @@ export default function Chart({
         className={`vol-btn${showVolume ? ' active' : ''}`}
         onClick={() => setShowVolume((v) => !v)}
         aria-label="Toggle volume pane"
-        title={showVolume ? 'Hide volume (give candles full height)' : 'Show volume'}
+        data-tip={showVolume ? 'Hide volume (give candles full height)' : 'Show volume'}
       >
         <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor">
           <rect x="4" y="13" width="4" height="7" rx="1" />
@@ -1260,7 +1263,7 @@ export default function Chart({
           className="rung-btn"
           onClick={onRung}
           aria-label="Buy next ladder rung"
-          title="RUNG: buy the next further-OTM strike in your ladder's direction (1 lot, limit at ask)"
+          data-tip="RUNG: buy the next further-OTM strike in your ladder's direction (1 lot, limit at ask)"
         >
           <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
             <path d="M7 4v16M17 4v16M7 8h10M7 14h10M7 20h10" />
@@ -1271,19 +1274,19 @@ export default function Chart({
         className="cw-btn cw-plus"
         onClick={() => setVisibleCount((v) => Math.max(MIN_VISIBLE, Math.round(v / 1.3)))}
         aria-label="Fatter candles"
-        title="Fatter candles (show fewer)"
+        data-tip="Fatter candles (show fewer)"
       >+</button>
       <button
         className="cw-btn cw-minus"
         onClick={() => setVisibleCount((v) => Math.min(MAX_VISIBLE, Math.round(v * 1.3)))}
         aria-label="Skinnier candles"
-        title="Skinnier candles (show more)"
+        data-tip="Skinnier candles (show more)"
       >−</button>
       <button
         className={`quick-btn${quickMode ? ' active' : ''}`}
         onClick={() => setQuickMode((v) => !v)}
         aria-label="Toggle quick trade mode"
-        title={quickMode ? 'Quick mode ARMED — right-click places a market order. Click to disarm.' : 'Quick mode: right-click on a strike = instant 1-lot market order'}
+        data-tip={quickMode ? 'Quick mode ARMED — right-click places a market order. Click to disarm.' : 'Quick mode: right-click on a strike = instant 1-lot market order'}
       >
         <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor">
           <path d="M13 2 4 14h6l-1 8 9-12h-6z" />
@@ -1293,7 +1296,7 @@ export default function Chart({
         className={`rec-btn${recording ? ' recording' : ''}`}
         onClick={toggleRecord}
         aria-label={recording ? 'Stop recording' : 'Record a clip'}
-        title={recording ? 'Stop recording (downloads the clip)' : 'Record a clip of the app (max 90 s)'}
+        data-tip={recording ? 'Stop recording (downloads the clip)' : 'Record a clip of the app (max 90 s)'}
       >
         {recording ? (
           <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor">
@@ -1310,7 +1313,7 @@ export default function Chart({
           className="snap-now-btn"
           onClick={snapToNow}
           aria-label="Recenter on current price and candle"
-          title="Snap to now"
+          data-tip="Snap to now"
         >
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
             <circle cx="12" cy="12" r="6" />

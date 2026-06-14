@@ -166,7 +166,7 @@ export default function PositionModal({ pos, series, theme, quote, onClose, onRe
             (sl == null || (Number.isFinite(sl) && sl > 0));
           return (
             <div className="qty-row">
-              <span className="qty-label" title="Resting exits for this position — TP is a native limit (works overnight); SL is an IBKR-simulated stop. Both legs OCA: one fills, the other cancels.">Exit</span>
+              <span className="qty-label" data-tip="Resting exits for this position — TP is a native limit (works overnight); SL is an IBKR-simulated stop. Both legs OCA: one fills, the other cancels.">Exit</span>
               <div className="order-kind">
                 <input className="limit-input" type="number" step="0.05" min="0.05" inputMode="decimal"
                   value={tpStr} placeholder="TP" onChange={(e) => setTpStr(e.target.value)} aria-label="take profit" />

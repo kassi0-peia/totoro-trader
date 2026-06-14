@@ -37,7 +37,7 @@ export default function Header({ price, prevClose, theme, mood, earsUp, pulse, o
   const changeColor = haveDaily ? (change >= 0 ? theme.profit : theme.loss) : theme.muted;
   const { h, m } = expiryCountdown(now);
   const feedColor = replayMode ? theme.accent : live ? (delayed ? DELAYED_COLOR : theme.profit) : theme.muted;
-  const feedLabel = replayMode ? 'REPLAY' : live ? (delayed ? 'DELAYED' : 'LIVE') : 'SIM';
+  const feedLabel = replayMode ? 'REPLAY' : live ? (delayed ? 'DELAYED' : 'LIVE') : 'OFFLINE';
   const sourceLabel = source === 'ES' ? 'ES/SPX' : 'SPX';
   const expiryDate = formatExpiry(expiry, now);
 
@@ -47,7 +47,7 @@ export default function Header({ price, prevClose, theme, mood, earsUp, pulse, o
         <button
           className={`mascot-btn${totoroOn ? '' : ' off'}`}
           onClick={() => onToggleTotoro?.()}
-          title={totoroOn ? 'Totoro detector ON — click to let it nap' : 'Totoro detector napping — click to wake it'}
+          data-tip={totoroOn ? 'Totoro detector ON — click to let it nap' : 'Totoro detector napping — click to wake it'}
           aria-label="Toggle totoro pattern detector"
         >
           <Totoro mood={mood} earsUp={earsUp} pulse={pulse} theme={theme} />
@@ -67,7 +67,7 @@ export default function Header({ price, prevClose, theme, mood, earsUp, pulse, o
       </div>
 
       <div className="header-right">
-        <div className="acct-block" title={account ? `IBKR account ${account}` : 'no account connected'}>
+        <div className="acct-block" data-tip={account ? `IBKR account ${account}` : 'no account connected'}>
           <span className="acct-feed">
             <span
               className="feed-dot"

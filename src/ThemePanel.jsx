@@ -43,7 +43,7 @@ export default function ThemePanel({ open, current, onPick, onClose, neutralChro
         </button>
       </div>
       {onToggleAxisChain && (
-        <div className="theme-toggle-row" title="Paint live call/put premiums beside each strike on the price axis — the chain lives on the chart">
+        <div className="theme-toggle-row" data-tip="Paint live call/put premiums beside each strike on the price axis — the chain lives on the chart">
           <span>Axis premiums</span>
           <button
             className={`toggle-switch${axisChain ? ' on' : ''}`}
@@ -57,7 +57,7 @@ export default function ThemePanel({ open, current, onPick, onClose, neutralChro
         </div>
       )}
       {onToggleRungButton && (
-        <div className="theme-toggle-row" title="Show the RUNG button: one click buys the next further-OTM strike in your ladder's direction (limit at ask)">
+        <div className="theme-toggle-row" data-tip="Show the RUNG button: one click buys the next further-OTM strike in your ladder's direction (limit at ask)">
           <span>Rung button</span>
           <button
             className={`toggle-switch${rungButton ? ' on' : ''}`}

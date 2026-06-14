@@ -30,12 +30,12 @@ export default function QuoteStrip({ price, greeksMap, vix, theme, onReplay = nu
         <button
           className="qs-replay"
           onClick={onReplay}
-          title="Replay a past day (practice mode — simulated fills)"
+          data-tip="Replay a past day (practice mode — simulated fills)"
           style={replayOn
             ? { background: theme.accent, borderColor: theme.accent, color: '#0a0c12' }
             : { borderColor: theme.accent, color: theme.accent }}
         >
-          ⏪ REPLAY
+          REPLAY
         </button>
       )}
       <span className="qs-atm">ATM {atm ?? '—'}</span>

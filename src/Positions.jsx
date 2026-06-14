@@ -55,7 +55,7 @@ export default function Positions({ positions, theme, onClose, onReverse, onCanc
           </b>
         </div>
         {dayPL != null && (
-          <div className="pl-block" title="Blotter cash flow + marked value of open positions (today)">
+          <div className="pl-block" data-tip="Blotter cash flow + marked value of open positions (today)">
             <span>Day P/L</span>
             <b style={{ color: dayPL >= 0 ? theme.profit : theme.loss }}>
               {dayPL >= 0 ? '+' : '−'}${Math.abs(dayPL).toFixed(0)}
@@ -80,7 +80,7 @@ export default function Positions({ positions, theme, onClose, onReverse, onCanc
               <span className="cell-label">ORDER</span>{o.status}
             </span>
             <div className="pos-actions">
-              <button className="btn-close" onClick={() => onCancelWorkingOrder?.(o)} disabled={!executionEnabled} title="Cancel working order">CANCEL</button>
+              <button className="btn-close" onClick={() => onCancelWorkingOrder?.(o)} disabled={!executionEnabled} data-tip="Cancel working order">CANCEL</button>
             </div>
           </div>
         ))}
@@ -130,11 +130,11 @@ export default function Positions({ positions, theme, onClose, onReverse, onCanc
               <div className="pos-actions" onClick={(e) => e.stopPropagation()}>
                 {p.status === 'open' ? (
                   <>
-                    <button className="btn-rev" onClick={() => onReverse(p)} disabled={!executionEnabled} title="Reverse">↻</button>
+                    <button className="btn-rev" onClick={() => onReverse(p)} disabled={!executionEnabled} data-tip="Reverse">↻</button>
                     <button className="btn-close" onClick={() => onClose(p)} disabled={!executionEnabled}>CLOSE</button>
                   </>
                 ) : (
-                  <button className="btn-close" onClick={() => onCancelOrder?.(p)} disabled={!executionEnabled} title="Cancel working order">CANCEL</button>
+                  <button className="btn-close" onClick={() => onCancelOrder?.(p)} disabled={!executionEnabled} data-tip="Cancel working order">CANCEL</button>
                 )}
               </div>
             </div>
