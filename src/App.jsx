@@ -60,9 +60,35 @@ export default function App() {
   const replayLoading = replay != null && replay.candles.length === 0;
   const replayPrice = replayActive ? replay.candles[replay.idx].close : null;
   const replayNow = replayActive ? replay.candles[replay.idx].t : null;
+  const [tradesPeek, setTradesPeek] = useState(false); // slide-in drawer: today's fills over the chart
+  const [drawerMounted, setDrawerMounted] = useState(false); // kept true through the slide-out animation
+  const hoverOpenRef = useRef(null); // 2s left-edge hover-to-open timer
+  const openTrades = useCallback(() => { clearTimeout(hoverOpenRef.current); setDrawerMounted(true); setTradesPeek(true); }, []);
+  const closeTrades = useCallback(() => { clearTimeout(hoverOpenRef.current); setTradesPeek(false); }, []);
+  // Hover the chart's left edge for 1.5s to peek the drawer open.
+  const armHoverOpen = useCallback(() => {
+    if (tradesPeek) return;
+    clearTimeout(hoverOpenRef.current);
+    hoverOpenRef.current = setTimeout(openTrades, 1500);
+  }, [tradesPeek, openTrades]);
+  const disarmHoverOpen = useCallback(() => clearTimeout(hoverOpenRef.current), []);
   const [showTotoro, setShowTotoro] = useState(() => { // 🐾 pattern detector — toggled by clicking the mascot
     try { return localStorage.getItem('tt.totoro') !== '0'; } catch { return true; }
   });
+
+  // Esc closes the trades peek drawer.
+  useEffect(() => {
+    if (!tradesPeek) return;
+    const onKey = (e) => { if (e.key === 'Escape') closeTrades(); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [tradesPeek, closeTrades]);
+  // Unmount the drawer after its slide-out animation finishes (deterministic).
+  useEffect(() => {
+    if (tradesPeek || !drawerMounted) return;
+    const t = setTimeout(() => setDrawerMounted(false), 300);
+    return () => clearTimeout(t);
+  }, [tradesPeek, drawerMounted]);
   useEffect(() => {
     try { localStorage.setItem('tt.totoro', showTotoro ? '1' : '0'); } catch {}
   }, [showTotoro]);
@@ -792,6 +818,39 @@ export default function App() {
             {toast && (
               <div className={`fill-toast fill-${toast.kind}`} role="status">{toast.text}</div>
             )}
+
+            {/* Slide-in drawer: peek today's trades over the chart without scrolling. */}
+            {/* Left-edge hover zone: rest the cursor here for 2s to peek the drawer open. */}
+            {!tradesPeek && (
+              <div
+                className="trades-hotzone"
+                onMouseEnter={armHoverOpen}
+                onMouseLeave={disarmHoverOpen}
+                onClick={openTrades}
+              />
+            )}
+            <button
+              className={`trades-pull${tradesPeek ? ' open' : ''}`}
+              style={{ left: tradesPeek ? 'min(340px, 86%)' : 0, borderColor: theme.accent, color: theme.accent }}
+              onClick={() => (tradesPeek ? closeTrades() : openTrades())}
+              onMouseEnter={armHoverOpen}
+              onMouseLeave={disarmHoverOpen}
+              data-tip={tradesPeek ? 'Hide trades' : "Peek today's trades (or hover the edge 1.5s)"}
+              aria-label="Toggle today's trades"
+            >
+              {tradesPeek ? '‹' : '›'}
+            </button>
+            {drawerMounted && (
+              <div className="trades-peek-layer">
+                <div className={`trades-scrim${tradesPeek ? '' : ' closing'}`} onClick={closeTrades} />
+                <div
+                  className={`trades-drawer${tradesPeek ? '' : ' closing'}`}
+                  style={{ borderColor: theme.accent }}
+                >
+                  <TradeHistory trades={feed.trades} theme={theme} />
+                </div>
+              </div>
+            )}
           </div>
           <TimeframeBar
             value={timeframe}
@@ -815,8 +874,6 @@ export default function App() {
             funds={feed.funds}
             dayPL={dayPL}
           />
-
-          <TradeHistory trades={feed.trades} theme={theme} />
         </div>
       </main>
 
