@@ -10,12 +10,17 @@ export function aggregateCandles(candles, factorMinutes) {
     const bucket = Math.floor(c.t / span) * span;
     const last = out[out.length - 1];
     if (!last || last.t !== bucket) {
-      out.push({ t: bucket, open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume });
+      // Carry the seam tags through aggregation (src: 'ES' proxy vs 'SPX' cash,
+      // est: proxy-on-an-estimated-basis) so higher timeframes still dim the
+      // overnight stretch.
+      out.push({ t: bucket, open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume, src: c.src, est: c.est });
     } else {
       if (c.high > last.high) last.high = c.high;
       if (c.low < last.low) last.low = c.low;
       last.close = c.close;
       last.volume += c.volume;
+      if (c.src === 'SPX') last.src = 'SPX'; // once real cash prints in the bucket, it's real
+      last.est = last.est || c.est;
     }
   }
   return out;

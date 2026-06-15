@@ -7,9 +7,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 function defaultWsUrl() {
-  if (typeof window === 'undefined') return 'ws://localhost:8787/ws';
+  // The bridge gates the order path on a shared secret (TOTORO_TOKEN). When the
+  // build was given a VITE_TOTORO_TOKEN, pass it through so this client is allowed
+  // to place orders; without it the bridge rejects the socket (if its gate is on).
+  const token = (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_TOTORO_TOKEN) || '';
+  const qs = token ? `?token=${encodeURIComponent(token)}` : '';
+  if (typeof window === 'undefined') return `ws://localhost:8787/ws${qs}`;
   const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
-  return `${proto}://${window.location.host}/ws`;
+  return `${proto}://${window.location.host}/ws${qs}`;
 }
 
 function key(strike, type) {
