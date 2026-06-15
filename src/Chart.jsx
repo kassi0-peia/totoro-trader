@@ -1010,7 +1010,7 @@ export default function Chart({
       if (!drag.moved && (Math.abs(totalDx) > 4 || Math.abs(totalDy) > 4)) drag.moved = true;
       const now = performance.now();
       const dt = Math.max(1, now - drag.lastT);
-      const dOffset = -stepDx / layout.candleW; // drag right → offset decreases
+      const dOffset = stepDx / layout.candleW; // inverted pan: drag left → newer (offset decreases)
       const instantV = dOffset / dt;
       drag.vel = drag.vel * 0.7 + instantV * 0.3;
       drag.lastX = clientX;
@@ -1032,7 +1032,7 @@ export default function Chart({
       }
       // horizontal pan (candles)
       const candleDelta = totalDx / layout.candleW;
-      setViewOffset(clampOffset(drag.startOffset - candleDelta));
+      setViewOffset(clampOffset(drag.startOffset + candleDelta)); // inverted: drag left → newer
       // vertical pan (price window): drag down → reveal higher prices above.
       const range = view.hi - view.lo;
       const pricePerPx = range / (layout.priceBot - layout.priceTop);
