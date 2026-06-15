@@ -102,13 +102,17 @@ export default function App() {
   const [showOvn, setShowOvn] = useState(() => {
     try { const v = localStorage.getItem('tt.showOvn'); return v == null ? true : v === '1'; } catch { return true; }
   });
+  const [showPositions, setShowPositions] = useState(() => {
+    try { const v = localStorage.getItem('tt.showPositions'); return v == null ? true : v === '1'; } catch { return true; }
+  });
   useEffect(() => {
     try {
       localStorage.setItem('tt.axischain', axisChain ? '1' : '0');
       localStorage.setItem('tt.rung', rungButton ? '1' : '0');
       localStorage.setItem('tt.showOvn', showOvn ? '1' : '0');
+      localStorage.setItem('tt.showPositions', showPositions ? '1' : '0');
     } catch {}
-  }, [axisChain, rungButton, showOvn]);
+  }, [axisChain, rungButton, showOvn, showPositions]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [now, setNow] = useState(Date.now());
   const [pulse, setPulse] = useState(false);
@@ -759,6 +763,8 @@ export default function App() {
             onToggleRungButton={() => setRungButton((v) => !v)}
             showOvn={showOvn}
             onToggleShowOvn={() => setShowOvn((v) => !v)}
+            showPositions={showPositions}
+            onToggleShowPositions={() => setShowPositions((v) => !v)}
             totoroOn={showTotoro}
             onToggleTotoro={() => {
               setShowTotoro((v) => {
@@ -822,6 +828,7 @@ export default function App() {
               axisChain={axisChain}
               onRung={rungButton ? buyNextRung : null}
               showOvn={showOvn}
+              showPositions={showPositions}
               source={replayActive ? 'SPX' : feed.live ? feed.source : 'SPX'}
             />
             {toast && (
