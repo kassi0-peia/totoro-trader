@@ -13,6 +13,7 @@
 import net from 'node:net';
 import http from 'node:http';
 import https from 'node:https';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -39,6 +40,18 @@ const PORT_CANDIDATES = process.env.IBKR_PORT
 const IBKR_CLIENT_ID = parseInt(process.env.IBKR_CLIENT_ID || '17', 10);
 const WS_PORT = parseInt(process.env.WS_PORT || '8787', 10);
 
+// Optional shared-secret gate on the order path. When TOTORO_TOKEN is set, clients
+// must present it (`?token=`) to place orders; it's checked with a constant-time
+// compare at connect. Unset keeps the socket open (the localhost dev default).
+const AUTH_TOKEN = process.env.TOTORO_TOKEN || null;
+function tokenOk(provided) {
+  if (!AUTH_TOKEN) return true;                 // no gate configured
+  if (typeof provided !== 'string') return false;
+  const a = Buffer.from(provided);
+  const b = Buffer.from(AUTH_TOKEN);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
 // 1=live, 2=frozen, 3=delayed, 4=delayed-frozen.
 const MARKET_DATA_TYPE = parseInt(process.env.IBKR_MD_TYPE || '3', 10);
 
@@ -47,9 +60,12 @@ const MARKET_DATA_TYPE = parseInt(process.env.IBKR_MD_TYPE || '3', 10);
 
 // The authoritative basis is captured at 4:00 PM ET (BASIS_CAPTURE_MIN) as a
 // SIMULTANEOUS snapshot of live ES minus live SPX, then frozen and applied to all
-// overnight ES ticks. COLD_START_BASIS is only the fallback when the server starts
-// overnight without a captured/persisted basis (tonight: +20, ES≈7540 − SPX≈7520).
-const COLD_START_BASIS = process.env.COLD_START_BASIS != null ? parseFloat(process.env.COLD_START_BASIS) : 20;
+// overnight ES ticks. The cold-start fallback (see coldStartBasis) only matters
+// when the server starts overnight with no captured/persisted basis at all.
+// COLD_START_BASIS_ENV is an explicit operator override; COLD_START_BASIS_LITERAL
+// is the last-resort constant (ES≈7540 − SPX≈7520) used only when nothing is known.
+const COLD_START_BASIS_ENV = process.env.COLD_START_BASIS != null ? parseFloat(process.env.COLD_START_BASIS) : null;
+const COLD_START_BASIS_LITERAL = 20;
 const BASIS_CAPTURE_MIN = 16 * 60; // 4:00 PM ET — when SPX cash settles and both feeds are live
 
 const STRIKE_STEP = 5;
@@ -77,6 +93,7 @@ let basis = null;
 let basisFrozen = true;
 let basisEstimated = false; // true when from the cold-start fallback, not a real 4:00 capture
 let basisCaptureDate = null; // YYYYMMDD of the day we captured the 4:00 basis
+let basisEsExpiry = null;    // ES contract expiry the basis was measured against (persisted)
 let esClose = null;          // raw ES price at the 4:00 capture (persisted)
 let spxClose = null;         // raw SPX price at the 4:00 capture (persisted)
 
@@ -150,6 +167,11 @@ httpServer.listen(WS_PORT, () => {
   console.log(`[ibkr-server] serving build from ${DIST_DIR}${fs.existsSync(DIST_DIR) ? '' : '  (not built yet — run `npm run build`)'}`);
   console.log(`[ibkr-server] candidate IBKR ports = ${PORT_CANDIDATES.join(', ')} (clientId=${IBKR_CLIENT_ID})`);
   console.log(`[ibkr-server] session: source=${session.source} expiry=${session.expiry} rth=${session.rth}, md type=${MARKET_DATA_TYPE}`);
+  if (AUTH_TOKEN) {
+    console.log('[ibkr-server] order auth: TOTORO_TOKEN gate enabled');
+  } else {
+    console.log('[ibkr-server] order auth: open (set TOTORO_TOKEN to require a token when exposing the port beyond localhost)');
+  }
 });
 
 function createServer() {
@@ -166,7 +188,17 @@ function createServer() {
   return http.createServer(serveStatic);
 }
 
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
+  if (AUTH_TOKEN) {
+    let provided = null;
+    try { provided = new URL(req.url, 'http://localhost').searchParams.get('token'); } catch { /* malformed url */ }
+    if (!tokenOk(provided)) {
+      console.warn('[ibkr-server] rejected ws connection (bad/missing token)');
+      try { ws.close(1008, 'unauthorized'); } catch { /* already closing */ }
+      return;
+    }
+    ws.authed = true;
+  }
   ws.send(JSON.stringify(snapshotMsg()));
   ws.on('message', (data) => {
     let msg;
@@ -382,8 +414,11 @@ function wireHandlers(api) {
   // replayed via reqExecutions on (re)connect, so fills that happen while the
   // bridge is disconnected (e.g. the mobile app stole the Gateway login) are
   // still captured. Deduped by execId so the live orderStatus path never doubles.
-  api.on(EventName.execDetails, (_reqId, contract, execution) => {
-    recordExecution(contract, execution);
+  api.on(EventName.execDetails, (reqId, contract, execution) => {
+    // Live fills arrive with reqId -1; reqExecutions backfill rows carry the
+    // positive reqId we passed. The two channels stamp time in different zones
+    // (live ~UTC, backfill US/Central), so recordExecution treats them apart.
+    recordExecution(contract, execution, reqId < 0);
   });
 
   // IBKR-authoritative positions: initial snapshot then live updates on every change.
@@ -714,7 +749,12 @@ function feedSeries(series, price) {
   const bucket = Math.floor(now / CANDLE_MS) * CANDLE_MS;
   const last = series.candles[series.candles.length - 1];
   if (!last || last.t < bucket) {
-    const open = last ? last.close : price;
+    // Open each bar at its FIRST real tick, not the prior close. Within a
+    // continuous session the first tick ≈ the prior close (a realistic hair-gap),
+    // but across a session seam — the Sunday/holiday futures reopen, or the 9:30
+    // SPX-cash open after the overnight ES proxy — the first tick jumps, so the
+    // real gap renders instead of being papered into a continuous tape.
+    const open = price;
     series.candles.push({
       t: bucket,
       open,
@@ -739,7 +779,7 @@ function feedSpxTick(price) {
   watchdogState.lastSpxTick = Date.now();
   const candle = feedSeries(spx, price);
   if (session.source === 'SPX') {
-    broadcast({ type: 'tick', source: 'SPX', price: spxPrice, candle });
+    broadcast({ type: 'tick', source: 'SPX', price: spxPrice, candle: { ...candle, src: 'SPX' } });
   }
   maybeRecenterChain(displayPrice());
 }
@@ -833,23 +873,50 @@ function captureCloseBasis() {
     basisFrozen = true;
     basisEstimated = false;
     basisCaptureDate = today;
+    basisEsExpiry = esExpiry; // the front month this basis is valid for
     esClose = esPrice;
     spxClose = spxPrice;
     saveBasis();
-    console.log(`[ibkr] 4:00 PM basis captured = ${basis.toFixed(2)} (ES ${esPrice.toFixed(2)} − SPX ${spxPrice.toFixed(2)}, simultaneous)`);
+    console.log(`[ibkr] 4:00 PM basis captured = ${basis.toFixed(2)} (ES ${esPrice.toFixed(2)} − SPX ${spxPrice.toFixed(2)}, simultaneous, ${esExpiry})`);
   }
 }
 
-// Cold-start fallback: server started overnight with no 4:00 capture and no
-// persisted basis. Use the fixed COLD_START_BASIS (the ES−SPX premium at the
-// last close) and apply it to live ES. Replaced by tomorrow's 4:00 capture.
+// Resolve the cold-start basis, preferring real information over the literal:
+//   1. an explicit COLD_START_BASIS env override (operator knows best);
+//   2. the most recent persisted 4:00 capture — basis, or recomputed from the
+//      persisted ES/SPX closes. Even days-stale, the real premium tracks the
+//      price level far better than a fixed constant. (loadBasis already restores
+//      a trusted capture into `basis`, so this path is the belt-and-braces case
+//      where the file was rejected but still carries usable closes.)
+//   3. the literal constant — only when nothing at all is known.
+function coldStartBasis() {
+  if (COLD_START_BASIS_ENV != null && Number.isFinite(COLD_START_BASIS_ENV)) {
+    return { value: COLD_START_BASIS_ENV, from: 'env override' };
+  }
+  try {
+    const d = JSON.parse(fs.readFileSync(BASIS_FILE, 'utf8'));
+    // Only trust a real 4:00 capture (mirror loadBasis); ignore a persisted estimate.
+    if (typeof d.basis === 'number' && !d.basisEstimated) {
+      return { value: d.basis, from: 'persisted 4:00 capture' };
+    }
+    if (typeof d.esClose === 'number' && typeof d.spxClose === 'number') {
+      return { value: d.esClose - d.spxClose, from: 'persisted ES/SPX closes' };
+    }
+  } catch { /* no/old cache file */ }
+  return { value: COLD_START_BASIS_LITERAL, from: 'literal default' };
+}
+
+// Cold-start fallback: server started overnight with no trusted basis loaded.
+// Seed from coldStartBasis() and apply it to live ES. Replaced by the next 4:00
+// capture (or the backfill, which heals a stale value once SPX bars are available).
 function ensureOvernightBasis() {
   if (!session.rth && basis == null && esPrice != null) {
-    basis = COLD_START_BASIS;
+    const cs = coldStartBasis();
+    basis = cs.value;
     basisEstimated = true;
     basisFrozen = true;
     saveBasis();
-    console.log(`[ibkr] cold-start basis = +${basis} (no 4:00 capture / persisted basis yet). SPX-equiv = ES − ${basis}. Tomorrow's 4:00 capture replaces it.`);
+    console.log(`[ibkr] cold-start basis = ${basis.toFixed(2)} (${cs.from}). SPX-equiv = ES − ${basis.toFixed(2)}. The next 4:00 capture replaces it.`);
   }
 }
 
@@ -870,7 +937,19 @@ function maybeBackfillBasis() {
   if (basisFillInFlight || !ib || !connected) return;
   const target = lastCloseEt();
   if (!target) return;
-  if (basisCaptureDate === target.ymd && !basisEstimated) return; // snapshot is current
+  // A basis is stale if it's from an earlier day, an estimate, OR was measured
+  // against a different ES contract than the one we now stream. The last case is
+  // the front-month roll (e.g. ESM6 → ESU6): the calendar contract jumps ~60–80
+  // pts over the prior month, so a basis frozen on the old contract overstates
+  // SPX-equiv by the whole roll spread until re-derived. esExpiry==null (old
+  // cache, unknown contract) also re-derives, to be safe. Guard on esExpiry being
+  // resolved so we never invalidate before the front month is known.
+  const contractStale = !!esExpiry && basisEsExpiry !== esExpiry;
+  if (basisCaptureDate === target.ymd && !basisEstimated && !contractStale) return; // current
+  if (contractStale) {
+    basisEstimated = true; // honest header until the re-derivation below lands
+    console.log(`[ibkr] basis contract roll detected (was ${basisEsExpiry ?? 'unknown'}, now ${esExpiry}) — re-deriving against the current front month`);
+  }
   const barT = target.closeMs - 60_000; // 1-min bar covering 15:59–16:00 ET
   const spxBar = spx.candles.find((c) => c.t === barT);
   const esBar = es.candles.find((c) => c.t === barT);
@@ -944,15 +1023,19 @@ function applyBackfilledBasis(target, spxBarClose, esBarClose, how) {
   basisFrozen = true;
   basisEstimated = false;
   basisCaptureDate = target.ymd;
+  basisEsExpiry = esExpiry; // re-derived against the current front month
   esClose = esBarClose;
   spxClose = spxBarClose;
   saveBasis();
-  console.log(`[ibkr] 4:00 basis backfilled (${how} bars, ${target.ymd}) = ${basis.toFixed(2)} (ES ${esBarClose.toFixed(2)} − SPX ${spxBarClose.toFixed(2)})`);
+  console.log(`[ibkr] 4:00 basis backfilled (${how} bars, ${target.ymd}, ${esExpiry}) = ${basis.toFixed(2)} (ES ${esBarClose.toFixed(2)} − SPX ${spxBarClose.toFixed(2)})`);
   broadcast(snapshotMsg());
 }
 
+// Shift a raw ES bar into SPX-equivalent (minus the frozen basis) and tag it as
+// the ES proxy. `est` carries whether the applied basis is itself an estimate
+// (cold start / mid-roll) so the chart can mark it as a proxy-on-an-estimate.
 function shiftCandle(c, b) {
-  return { t: c.t, open: c.open - b, high: c.high - b, low: c.low - b, close: c.close - b, volume: c.volume };
+  return { t: c.t, open: c.open - b, high: c.high - b, low: c.low - b, close: c.close - b, volume: c.volume, src: 'ES', est: basisEstimated };
 }
 
 // SPX-equivalent price for the active source.
@@ -970,7 +1053,7 @@ function displayCandles() {
   // timestamp — SPX wins on collisions because cash is the truth during RTH.
   const byT = new Map();
   for (const c of es.candles) byT.set(c.t, shiftCandle(c, b));
-  for (const c of spx.candles) byT.set(c.t, c);
+  for (const c of spx.candles) byT.set(c.t, { ...c, src: 'SPX' }); // real cash wins
   return [...byT.values()].sort((a, b) => a.t - b.t);
 }
 
@@ -1218,6 +1301,9 @@ function handleOrderRequest(ws, msg) {
   const clientRef = msg.clientRef;
   const reject = (reason) => send({ type: 'orderAck', clientRef, accepted: false, reason });
 
+  // Belt-and-braces: even if a future code path reaches here, a socket without a
+  // valid token can never place an order while the gate is configured.
+  if (AUTH_TOKEN && !ws.authed) return reject('unauthorized');
   if (!executionEnabled) {
     const why = 'no executable account connected';
     return reject(`execution disabled (${why})`);
@@ -1421,7 +1507,7 @@ function handleQuoteRequest(_ws, msg) {
   try {
     ib.reqMktData(reqId, {
       symbol: 'SPX', secType: 'OPT', exchange: 'SMART', currency: 'USD', tradingClass: 'SPXW',
-      lastTradeDateOrContractMonth: expiry, strike, right, multiplier: 100
+      lastTradeDateOrContractMonth: expiry, strike, right, multiplier: '100'
     }, '', true, false, []);
   } catch (e) {
     console.log('[ibkr] quote snapshot failed:', e.message);
@@ -1533,7 +1619,7 @@ function snapshotMsg() {
 
 function saveBasis() {
   try {
-    fs.writeFileSync(BASIS_FILE, JSON.stringify({ basis, basisEstimated, esClose, spxClose, captureDate: basisCaptureDate, ts: Date.now() }));
+    fs.writeFileSync(BASIS_FILE, JSON.stringify({ basis, basisEstimated, esClose, spxClose, captureDate: basisCaptureDate, esExpiry: basisEsExpiry, ts: Date.now() }));
   } catch {}
 }
 
@@ -1568,18 +1654,42 @@ function recordTrade(orderId, o, filled, avgFillPrice) {
 }
 
 // reqExecutions backfill times arrive in the account's US/Central tz (the tz in
-// the 399 messages); May = CDT (UTC-5). Live execDetails times can instead come
-// in UTC, which parses into the future — recordExecution clamps with
-// Math.min(parse, Date.now()) so a live fill falls back to "now" (accurate).
+// the 399 messages). Live execDetails fills are stamped with Date.now() directly
+// (see recordExecution's `live` flag), so only backfill rows are tz-parsed here.
+// Epoch ms for a wall-clock time in America/Chicago — the zone IBKR stamps
+// reqExecutions backfill rows in. DST-proof the same way session.js handles ET:
+// Central is UTC-5 (CDT) or UTC-6 (CST); try both candidate offsets and keep the
+// one that round-trips back to the same wall clock. (The old code hardcoded +5h
+// = CDT, so winter/CST backfill rows read one hour early.)
+function chicagoWallToEpoch(y, mo, d, hh, mm, ss) {
+  for (const off of [5, 6]) {
+    const t = Date.UTC(y, mo - 1, d, hh + off, mm, ss);
+    const p = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+    }).formatToParts(new Date(t));
+    const g = {};
+    for (const x of p) g[x.type] = x.value;
+    let ghh = parseInt(g.hour, 10);
+    if (ghh === 24) ghh = 0;
+    if (+g.year === y && +g.month === mo && +g.day === d && ghh === hh && +g.minute === mm) return t;
+  }
+  return null;
+}
+
+// Parse a backfill (US/Central) execution time string to epoch ms.
 function parseExecTime(s) {
   const m = String(s || '').match(/(\d{4})(\d{2})(\d{2})\D+(\d{2}):(\d{2}):(\d{2})/);
   if (!m) return Date.now();
-  return Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) + 5 * 3600 * 1000;
+  const t = chicagoWallToEpoch(+m[1], +m[2], +m[3], +m[4], +m[5], +m[6]);
+  return t ?? Date.now();
 }
 
 // Record a fill from an execDetails event. Idempotent via execId, and skips a
 // fill the live orderStatus path already captured (those carry no execId).
-function recordExecution(contract, execution) {
+// `live` true = a real-time fill (use the wall clock, the fill is happening now);
+// false = a reqExecutions backfill row, whose time string is US/Central.
+function recordExecution(contract, execution, live = false) {
   if (!contract || contract.secType !== 'OPT') return;
   const execId = execution?.execId;
   if (!execId || seenExecIds.has(execId)) return;
@@ -1601,7 +1711,8 @@ function recordExecution(contract, execution) {
   if (today !== tradesDate) { tradesDate = today; trades = []; }
   const trade = {
     id: ++tradeSeq, orderId: execution.orderId, execId,
-    ts: Math.min(parseExecTime(execution.time), Date.now()),
+    // Live fill: stamp now. Backfill: parse the Central time, clamped to now.
+    ts: live ? Date.now() : Math.min(parseExecTime(execution.time), Date.now()),
     action, strike, right, expiry, qty, price
   };
   trades.push(trade);
@@ -1640,6 +1751,10 @@ function loadBasis() {
       basisFrozen = true;
       if (typeof d.esClose === 'number') esClose = d.esClose;
       if (typeof d.spxClose === 'number') spxClose = d.spxClose;
+      // The ES contract the basis was measured against. Older cache files lack
+      // it (null) — maybeBackfillBasis then re-derives against the resolved front
+      // month, which both heals a missing value and catches a roll.
+      if (typeof d.esExpiry === 'string') basisEsExpiry = d.esExpiry;
       // Capture date drives the staleness check for the backfill. Older cache
       // files lack the field — derive it from the save timestamp's ET date.
       if (typeof d.captureDate === 'string') basisCaptureDate = d.captureDate;
