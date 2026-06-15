@@ -1,7 +1,7 @@
 import React from 'react';
 import { THEMES, THEME_KEYS } from './themes.js';
 
-export default function ThemePanel({ open, current, onPick, onClose, neutralChrome = false, onToggleNeutral, axisChain = false, onToggleAxisChain = null, rungButton = false, onToggleRungButton = null, totoroOn = true, onToggleTotoro = null, showOvn = true, onToggleShowOvn = null }) {
+export default function ThemePanel({ open, current, onPick, onClose, neutralChrome = false, onToggleNeutral, axisChain = false, onToggleAxisChain = null, rungButton = false, onToggleRungButton = null, totoroOn = true, onToggleTotoro = null, showOvn = true, onToggleShowOvn = null, showPositions = true, onToggleShowPositions = null }) {
   if (!open) return null;
   return (
     <div className="theme-panel" onClick={(e) => e.stopPropagation()}>
@@ -65,6 +65,20 @@ export default function ThemePanel({ open, current, onPick, onClose, neutralChro
             aria-checked={showOvn}
             onClick={onToggleShowOvn}
             aria-label="Toggle showing the overnight ES-proxy candles"
+          >
+            <span className="toggle-knob" />
+          </button>
+        </div>
+      )}
+      {onToggleShowPositions && (
+        <div className="theme-toggle-row" data-tip="Show open positions on the chart (strike lines, P/L labels, ITM shading).">
+          <span>Show positions</span>
+          <button
+            className={`toggle-switch${showPositions ? ' on' : ''}`}
+            role="switch"
+            aria-checked={showPositions}
+            onClick={onToggleShowPositions}
+            aria-label="Toggle showing positions on the chart"
           >
             <span className="toggle-knob" />
           </button>

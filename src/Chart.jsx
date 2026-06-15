@@ -85,7 +85,8 @@ export default function Chart({
   axisChain = false,
   onRung = null,
   source = 'SPX',
-  showOvn = true
+  showOvn = true,
+  showPositions = true
 }) {
   const wrapRef = useRef(null);
   const canvasRef = useRef(null);
@@ -250,10 +251,12 @@ export default function Chart({
       }
     }
     if (!anyReal) return null;
-    for (const p of positions) {
-      if (p.status !== 'open') continue;
-      if (p.strike > hi) hi = p.strike;
-      if (p.strike < lo) lo = p.strike;
+    if (showPositions) {
+      for (const p of positions) {
+        if (p.status !== 'open') continue;
+        if (p.strike > hi) hi = p.strike;
+        if (p.strike < lo) lo = p.strike;
+      }
     }
     const pad = (hi - lo) * 0.12 + 1;
     // priceScale zooms the price axis around its centre; priceOffset pans it up/down.
@@ -438,7 +441,7 @@ export default function Chart({
     }
 
     // ITM shaded regions for open positions
-    for (const pos of positions) {
+    for (const pos of showPositions ? positions : []) {
       if (pos.status !== 'open') continue;
       const isITM =
         (pos.type === 'call' && price > pos.strike) ||
@@ -610,7 +613,7 @@ export default function Chart({
     // position dashed lines + labels
     ctx.font = '10px "JetBrains Mono", monospace';
     closeHitsRef.current = [];
-    for (const pos of positions) {
+    for (const pos of showPositions ? positions : []) {
       if (pos.status !== 'open') continue;
       const y = priceToY(pos.strike);
       // Line + label colored by the position's live P/L, not call/put.
@@ -822,7 +825,7 @@ export default function Chart({
         markerHitsRef.current.push({ x: exitXY.x, y: ay, half: MARKER_HALF + 3, position: pos, kind: 'exit' });
       }
     }
-  }, [candles, price, positions, theme, size, view, layout, priceToY, indexToX, timeframe, showMarkers, showVolume, expectedMove, showTotoro, axisChain, greeksMap, ivol, timeToExpiryYears, source]);
+  }, [candles, price, positions, theme, size, view, layout, priceToY, indexToX, timeframe, showMarkers, showVolume, expectedMove, showTotoro, axisChain, greeksMap, ivol, timeToExpiryYears, source, showPositions]);
 
   // wheel zoom — attach non-passive so we can preventDefault page scroll
   useEffect(() => {
