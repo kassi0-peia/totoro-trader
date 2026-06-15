@@ -316,7 +316,11 @@ async function pickPort() {
 const ORDER_REJECT_CODES = new Set([201, 202, 203, 321, 110, 161, 463]);
 
 function wireHandlers(api) {
-  const QUIET_CODES = new Set([10090, 10167]);
+  // Benign/transient codes that otherwise FLOOD the log (and grew it unbounded):
+  // 300 = "Can't find EId" (cancelling mkt-data for a tickerId already gone on
+  // resubscribe/reconnect); 162 = historical-data service error, incl. the
+  // "connected from a different IP" data-line conflict the watchdog retries through.
+  const QUIET_CODES = new Set([10090, 10167, 300, 162]);
   api.on(EventName.error, (err, code, reqId) => {
     if (code >= 2100 && code < 2200) return;
     if (QUIET_CODES.has(code)) return;
