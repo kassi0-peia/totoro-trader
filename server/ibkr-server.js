@@ -1047,10 +1047,12 @@ function displayPrice() {
 
 function displayCandles() {
   const b = basis ?? 0;
-  if (session.source === 'ES') return es.candles.map((c) => shiftCandle(c, b));
-  // SPX (RTH): show overnight ES (shifted to SPX-equiv) before today's RTH SPX
-  // bars so the previous session's flow stays visible past 9:30. Merge by
-  // timestamp — SPX wins on collisions because cash is the truth during RTH.
+  // ALWAYS merge the overnight ES proxy (shifted to SPX-equiv) with the RTH SPX
+  // cash bars, in every session — so the full continuous history stays visible
+  // even overnight (previously overnight returned ES-only and the day's RTH bars
+  // vanished after 16:15, so you couldn't scroll back to them). Merge by timestamp;
+  // real SPX cash wins on collisions. ES-proxy bars carry src:'ES' so the chart can
+  // dim them and the client can hide them via the Show-overnight toggle.
   const byT = new Map();
   for (const c of es.candles) byT.set(c.t, shiftCandle(c, b));
   for (const c of spx.candles) byT.set(c.t, { ...c, src: 'SPX' }); // real cash wins

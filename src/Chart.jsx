@@ -84,7 +84,8 @@ export default function Chart({
   showTotoro = true,
   axisChain = false,
   onRung = null,
-  source = 'SPX'
+  source = 'SPX',
+  showOvn = true
 }) {
   const wrapRef = useRef(null);
   const canvasRef = useRef(null);
@@ -93,6 +94,7 @@ export default function Chart({
   const [hover, setHover] = useState(null); // { x, y, strike, type, greeks }
   const [markerHover, setMarkerHover] = useState(null); // { x, y, position, kind }
   const [hoverIdx, setHoverIdx] = useState(null); // tfCandles index under cursor (for OHLC legend)
+  const [cursor, setCursor] = useState(null); // { x, y, price, t } — crosshair readout
   const [visibleCount, setVisibleCount] = useState(DEFAULT_VISIBLE);
   const [viewOffset, setViewOffset] = useState(0); // candles back from the live edge
   const [priceOffset, setPriceOffset] = useState(0); // vertical pan, in price units (drag up/down)
@@ -127,7 +129,9 @@ export default function Chart({
   // keep ascending order so candles + time labels never render doubled.
   const tfCandles = useMemo(() => {
     const byT = new Map();
-    for (const c of candles) byT.set(c.t, c);
+    // "Show overnight" off → drop the ES-proxy bars (src 'ES'), leaving only real
+    // SPX cash bars.
+    for (const c of candles) { if (!showOvn && c.src === 'ES') continue; byT.set(c.t, c); }
     const unique = [...byT.values()].sort((a, b) => a.t - b.t);
     const local = aggregateCandles(unique, timeframe);
     if (!histCandles?.length) return local;
@@ -136,7 +140,7 @@ export default function Chart({
     // overlapping periods would double-draw.
     const cutoff = local[0]?.t ?? Infinity;
     return [...histCandles.filter((c) => c.t < cutoff), ...local];
-  }, [candles, timeframe, histCandles]);
+  }, [candles, timeframe, histCandles, showOvn]);
 
   // refs that need fresh values inside RAF closures
   const tfLenRef = useRef(tfCandles.length);
@@ -943,11 +947,19 @@ export default function Chart({
         setHover(null);
         setMarkerHover(null);
         setHoverIdx(null);
+        setCursor(null);
         return;
       }
       // OHLC legend: candle (tfCandles index) under the cursor
       const di = view.baseIdx + Math.floor(x / layout.candleW);
       setHoverIdx(di >= 0 && di < tfCandles.length ? di : null);
+      // Crosshair readout: price at the cursor row, and the bar time at the cursor
+      // column (extrapolated into the empty right pad so the time keeps counting).
+      const lastT = tfCandles.length ? tfCandles[tfCandles.length - 1].t : null;
+      const tAtX = di >= 0 && di < tfCandles.length
+        ? tfCandles[di].t
+        : (lastT != null ? lastT + (di - (tfCandles.length - 1)) * timeframe * 60000 : null);
+      setCursor({ x, y, price: y <= layout.priceBot ? yToPrice(y) : null, t: tAtX });
       // marker hit-test first
       const hits = markerHitsRef.current;
       for (let i = hits.length - 1; i >= 0; i--) {
@@ -984,7 +996,7 @@ export default function Chart({
       }
       setHover({ x, y, strike, type, future, greeks: g, ask: q?.ask, bid: q?.bid });
     },
-    [layout, view, tfCandles, yToPrice, price, ivol, timeToExpiryYears, greeksMap, requestQuote]
+    [layout, view, tfCandles, yToPrice, price, ivol, timeToExpiryYears, greeksMap, requestQuote, timeframe]
   );
 
   // shared drag-move logic, used by mouse + single-finger touch
@@ -1103,6 +1115,7 @@ export default function Chart({
     setHover(null);
     setMarkerHover(null);
     setHoverIdx(null);
+    setCursor(null);
   };
 
   const handleClick = (clientX, clientY) => {
@@ -1239,22 +1252,26 @@ export default function Chart({
           </div>
         );
       })()}
-      {hover && !markerHover && layout && (
+      {cursor && !markerHover && layout && (
         <>
           <div
             className="crosshair-v"
-            style={{ left: hover.x, top: layout.priceTop, height: layout.volBot - layout.priceTop, borderColor: theme.muted }}
+            style={{ left: cursor.x, top: layout.priceTop, height: layout.volBot - layout.priceTop, borderColor: theme.muted }}
           />
-          <div
-            className="crosshair-h"
-            style={{ top: hover.y, width: layout.chartW, borderColor: theme.muted }}
-          />
-          <div className="crosshair-price" style={{ top: hover.y - 9, background: theme.muted, color: '#0a0c12' }}>
-            {yToPrice(hover.y).toFixed(2)}
-          </div>
-          {hoverIdx != null && tfCandles[hoverIdx] && (
-            <div className="crosshair-time" style={{ left: hover.x, top: size.h - BOTTOM_AXIS + 2, background: theme.muted, color: '#0a0c12' }}>
-              {fmtTimeTf(tfCandles[hoverIdx].t, timeframe)}
+          {cursor.price != null && (
+            <>
+              <div
+                className="crosshair-h"
+                style={{ top: cursor.y, width: layout.chartW, borderColor: theme.muted }}
+              />
+              <div className="crosshair-price" style={{ top: cursor.y - 9, background: theme.muted, color: '#0a0c12' }}>
+                {cursor.price.toFixed(2)}
+              </div>
+            </>
+          )}
+          {cursor.t != null && (
+            <div className="crosshair-time" style={{ left: cursor.x, top: size.h - BOTTOM_AXIS + 2, background: theme.muted, color: '#0a0c12' }}>
+              {fmtTimeTf(cursor.t, timeframe)}
             </div>
           )}
         </>

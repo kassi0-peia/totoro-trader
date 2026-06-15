@@ -1,7 +1,7 @@
 import React from 'react';
 import { THEMES, THEME_KEYS } from './themes.js';
 
-export default function ThemePanel({ open, current, onPick, onClose, neutralChrome = false, onToggleNeutral, axisChain = false, onToggleAxisChain = null, rungButton = false, onToggleRungButton = null, totoroOn = true, onToggleTotoro = null }) {
+export default function ThemePanel({ open, current, onPick, onClose, neutralChrome = false, onToggleNeutral, axisChain = false, onToggleAxisChain = null, rungButton = false, onToggleRungButton = null, totoroOn = true, onToggleTotoro = null, showOvn = true, onToggleShowOvn = null }) {
   if (!open) return null;
   return (
     <div className="theme-panel" onClick={(e) => e.stopPropagation()}>
@@ -51,6 +51,20 @@ export default function ThemePanel({ open, current, onPick, onClose, neutralChro
             aria-checked={axisChain}
             onClick={onToggleAxisChain}
             aria-label="Toggle premiums on the price axis"
+          >
+            <span className="toggle-knob" />
+          </button>
+        </div>
+      )}
+      {onToggleShowOvn && (
+        <div className="theme-toggle-row" data-tip="Show the overnight ES-proxy candles (ES − basis). Off = only real SPX cash bars.">
+          <span>Show overnight</span>
+          <button
+            className={`toggle-switch${showOvn ? ' on' : ''}`}
+            role="switch"
+            aria-checked={showOvn}
+            onClick={onToggleShowOvn}
+            aria-label="Toggle showing the overnight ES-proxy candles"
           >
             <span className="toggle-knob" />
           </button>
