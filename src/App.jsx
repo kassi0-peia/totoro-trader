@@ -734,12 +734,6 @@ export default function App() {
         delayed={feed.delayed}
         replayMode={replayActive}
         totoroOn={showTotoro}
-        onToggleTotoro={() => {
-          setShowTotoro((v) => {
-            showToast(v ? '🐾 totoro detector napping' : '🐾 totoro detector awake', 'ok');
-            return !v;
-          });
-        }}
         source={feed.live ? feed.source : 'SPX'}
         expiry={replayActive ? replay.date : feed.live ? feed.expiry : null}
         account={feed.account}
@@ -759,6 +753,13 @@ export default function App() {
             onToggleAxisChain={() => setAxisChain((v) => !v)}
             rungButton={rungButton}
             onToggleRungButton={() => setRungButton((v) => !v)}
+            totoroOn={showTotoro}
+            onToggleTotoro={() => {
+              setShowTotoro((v) => {
+                showToast(v ? '🐾 totoro detector napping' : '🐾 totoro detector awake', 'ok');
+                return !v;
+              });
+            }}
           />
         </div>
       )}
@@ -814,6 +815,7 @@ export default function App() {
               showTotoro={showTotoro}
               axisChain={axisChain}
               onRung={rungButton ? buyNextRung : null}
+              source={replayActive ? 'SPX' : feed.live ? feed.source : 'SPX'}
             />
             {toast && (
               <div className={`fill-toast fill-${toast.kind}`} role="status">{toast.text}</div>

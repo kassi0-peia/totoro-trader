@@ -8,16 +8,24 @@ const BOTTOM_AXIS = 22;
 const VOLUME_HEIGHT_FRAC = 0.22;
 const PADDING_TOP = 12;
 const CANDLE_GAP_FRAC = 0.2;
+const ES_PROXY_ALPHA = 0.5; // overnight ES-proxy candles render at this opacity (provisional, not real SPX)
 
 function fmtPrice(p) {
   return p.toFixed(2);
 }
 
-// Timeframe-aware axis label: dates for daily bars, dates+time for hourly+.
+// Timeframe-aware axis label. Daily bars: month + day. Hourly: a compact
+// intraday axis — the time within a day, the bare day NUMBER at a day boundary,
+// and the month name at a month boundary. Keeping these narrow is also what stops
+// the 1h labels from overlapping (the old "Jun 14 21:00" was far too wide).
 function fmtTimeTf(t, tf) {
   const d = new Date(t);
   if (tf >= 1440) return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
-  if (tf >= 60) return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}`;
+  if (tf >= 60) {
+    if (d.getDate() === 1 && d.getHours() === 0) return d.toLocaleDateString([], { month: 'short' });
+    if (d.getHours() === 0) return String(d.getDate());
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+  }
   return fmtTime(t);
 }
 
@@ -75,7 +83,8 @@ export default function Chart({
   histCandles = null,
   showTotoro = true,
   axisChain = false,
-  onRung = null
+  onRung = null,
+  source = 'SPX'
 }) {
   const wrapRef = useRef(null);
   const canvasRef = useRef(null);
@@ -330,11 +339,18 @@ export default function Chart({
     ctx.lineWidth = 1;
     ctx.font = '11px "JetBrains Mono", monospace';
 
-    // horizontal grid + axis labels on "nice" price increments
-    const pStep = niceStep((view.hi - view.lo) / 6);
+    // horizontal grid + price-axis labels. Normally the scale lives in the right
+    // gutter on "nice" 1-2.5-5 increments. But when the strike chain occupies the
+    // right gutter (axisChain), the price labels would collide with the call/put
+    // column — so move them to the LEFT and step on strike-friendly increments
+    // (10, then 25, 50, 100… as you zoom out) so they read as round strikes.
+    const STRIKE_STEPS = [10, 25, 50, 100, 250, 500, 1000];
+    const usableH = layout.priceBot - layout.priceTop;
+    const pStep = axisChain
+      ? (STRIKE_STEPS.find((s) => (s / Math.max(view.hi - view.lo, 0.001)) * usableH >= 34) ?? 2000)
+      : niceStep((view.hi - view.lo) / 6);
     const pDec = priceDecimals(pStep);
     ctx.textBaseline = 'middle';
-    ctx.textAlign = 'left';
     const firstK = Math.ceil(view.lo / pStep);
     const lastK = Math.floor(view.hi / pStep);
     for (let k = firstK; k <= lastK; k++) {
@@ -345,8 +361,26 @@ export default function Chart({
       ctx.moveTo(0, y + 0.5);
       ctx.lineTo(layout.chartW, y + 0.5);
       ctx.stroke();
+      const label = p.toFixed(pDec);
       ctx.fillStyle = theme.muted;
-      ctx.fillText(p.toFixed(pDec), layout.chartW + 6, y);
+      if (axisChain) {
+        // Tuck the price just inside the chart's right edge, directly left of the
+        // call/put premium columns (which live in the gutter past chartW). Right-
+        // aligned, with a faint chip so the number stays legible over candles.
+        ctx.textAlign = 'right';
+        const tw = ctx.measureText(label).width;
+        const rx = layout.chartW - 4;
+        ctx.save();
+        ctx.globalAlpha = 0.6;
+        ctx.fillStyle = theme.bg;
+        ctx.fillRect(rx - tw - 3, y - 7, tw + 6, 14);
+        ctx.restore();
+        ctx.fillStyle = theme.muted;
+        ctx.fillText(label, rx, y);
+      } else {
+        ctx.textAlign = 'left';
+        ctx.fillText(label, layout.chartW + 6, y);
+      }
     }
 
     // vertical grid on "nice" time increments (… 5, 10, 15, 30, 60 min …),
@@ -354,7 +388,10 @@ export default function Chart({
     // Size the step to the pixels available (labels live in the real-candle
     // region, ~left half), keeping them >= ~1.6 label-widths apart so the axis
     // stays readable when zoomed in on a narrow mobile screen.
-    const labelW = ctx.measureText('00:00').width;
+    // Measure the ACTUAL label width for this timeframe — hourly+ labels carry a
+    // date ("Sep 28 23:59") and are far wider than a bare "00:00", so measuring
+    // the real format is what keeps the 1h bottom labels from overlapping.
+    const labelW = ctx.measureText(fmtTimeTf(Date.UTC(2026, 8, 28, 23, 59), timeframe)).width;
     const realPx = view.want * layout.candleW;
     const maxLabels = Math.max(1, Math.floor(realPx / (labelW * 1.6)));
     const spanMin = view.want * timeframe;
@@ -425,6 +462,12 @@ export default function Chart({
       const yLow = priceToY(c.low);
       const yO = priceToY(c.open);
       const yC = priceToY(c.close);
+      // Overnight ES-proxy bars (SPX-equiv = ES − frozen basis) are an estimate,
+      // not real SPX. Only dim them once real SPX cash is the live source (after
+      // 9:30) — while ES IS the live feed overnight, dimming would fade the whole
+      // working chart; the distinction only matters once real bars exist to contrast.
+      const proxy = c.src === 'ES' && source === 'SPX';
+      if (proxy) { ctx.save(); ctx.globalAlpha = ES_PROXY_ALPHA; }
       // wick
       ctx.strokeStyle = color;
       ctx.lineWidth = 1;
@@ -442,6 +485,28 @@ export default function Chart({
         ctx.strokeStyle = color;
         ctx.lineWidth = 1.2;
         ctx.strokeRect(x - bodyW / 2 + 0.5, bodyTop + 0.5, bodyW - 1, bodyH - 1);
+      }
+      if (proxy) ctx.restore();
+    }
+
+    // "ES" / "ES est." marker over the overnight proxy stretch (est = the basis
+    // itself is a cold-start/mid-roll estimate, so it's a proxy on an estimate).
+    {
+      let firstProxy = -1, lastProxy = -1, anyEst = false;
+      for (let i = 0; i < view.slotCount; i++) {
+        const c = view.slots[i];
+        if (c && c.src === 'ES') { if (firstProxy < 0) firstProxy = i; lastProxy = i; if (c.est) anyEst = true; }
+      }
+      if (firstProxy >= 0 && source === 'SPX') {
+        const xMid = (indexToX(firstProxy) + indexToX(lastProxy)) / 2;
+        ctx.save();
+        ctx.globalAlpha = 0.6;
+        ctx.fillStyle = theme.muted;
+        ctx.font = '9px "JetBrains Mono", monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        ctx.fillText(anyEst ? 'ES est.' : 'ES', xMid, layout.priceTop + 4);
+        ctx.restore();
       }
     }
 
@@ -528,10 +593,12 @@ export default function Chart({
         ctx.globalAlpha = 0.75;
         const cTxt = fmt(c);
         ctx.fillStyle = theme.callLine;
-        ctx.fillText(cTxt, layout.chartW + 3, y + 8);
+        // Baseline is 'middle' — draw at the strike's own y so the premium lines
+        // up with its SPX gridline/label (was y+8, which sat a hair low).
+        ctx.fillText(cTxt, layout.chartW + 3, y);
         const cw = ctx.measureText(cTxt).width;
         ctx.fillStyle = theme.putLine;
-        ctx.fillText(fmt(p), layout.chartW + 5 + cw, y + 8);
+        ctx.fillText(fmt(p), layout.chartW + 5 + cw, y);
       }
       ctx.restore();
     }
@@ -751,7 +818,7 @@ export default function Chart({
         markerHitsRef.current.push({ x: exitXY.x, y: ay, half: MARKER_HALF + 3, position: pos, kind: 'exit' });
       }
     }
-  }, [candles, price, positions, theme, size, view, layout, priceToY, indexToX, timeframe, showMarkers, showVolume, expectedMove, showTotoro, axisChain, greeksMap, ivol, timeToExpiryYears]);
+  }, [candles, price, positions, theme, size, view, layout, priceToY, indexToX, timeframe, showMarkers, showVolume, expectedMove, showTotoro, axisChain, greeksMap, ivol, timeToExpiryYears, source]);
 
   // wheel zoom — attach non-passive so we can preventDefault page scroll
   useEffect(() => {
