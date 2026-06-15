@@ -49,6 +49,7 @@ and uses whichever is listening. Set `IBKR_PORT` to pin one explicitly.
 | `IBKR_CLIENT_ID`  | `17`                   | Must be unique per TWS connection                |
 | `IBKR_MD_TYPE`    | `3`                    | 1=live, 2=frozen, 3=delayed, 4=delayed-frozen    |
 | `WS_PORT`         | `8787`                 | Browser websocket port                           |
+| `TOTORO_TOKEN`    | (unset)                | Shared-secret gate on the order socket — see "Order-path auth" below |
 
 ## Architecture
 
@@ -110,8 +111,9 @@ unit-testable with an injected clock) and switches data source + option expiry:
 
 ## Order execution & account safety
 
-EXECUTE / CLOSE / REVERSE place **real market orders** through IBKR for the SPXW
-contract (same expiry/strike/right as the chain subscription). Positions are
+EXECUTE / CLOSE / REVERSE place **real marketable-limit orders** through IBKR for the
+SPXW contract (same expiry/strike/right as the chain subscription) — a limit that
+crosses ~1 tick, never a naked market order. Positions are
 tracked from IBKR's reported fills — the entry/exit prices shown are the actual
 `avgFillPrice`, not the model estimate. A fill confirmation toast appears over
 the chart.
@@ -128,6 +130,22 @@ enabled as soon as an account is identified:
 The account id (e.g. `DU1234567` / `U…`) is shown next to the badge. Execution
 fails safe — it stays disabled until an account is confirmed, and drops if the
 connection is lost.
+
+### Order-path auth (`TOTORO_TOKEN`)
+
+The order socket is open by default, which is fine on a trusted single-machine
+localhost setup. If you expose the port to other devices (e.g. to reach the PWA
+from a phone — see below), set a shared secret so only clients that know it can
+place orders:
+
+- **Bridge:** set `TOTORO_TOKEN=<long random string>` in the environment (e.g. the
+  systemd unit). It's validated with a constant-time compare at connect; a socket
+  that omits or mismatches it is closed.
+- **Client:** build with `VITE_TOTORO_TOKEN=<same string>` so the app appends it to
+  the `/ws` URL.
+
+It's opt-in: if `TOTORO_TOKEN` is unset the socket stays open and the bridge logs a
+startup reminder. Set it before exposing the port beyond localhost.
 
 **Prerequisites / behavior:**
 - IB Gateway must have **Read-Only API disabled** (Configure → Settings → API →

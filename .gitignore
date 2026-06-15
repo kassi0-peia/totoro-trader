@@ -26,3 +26,6 @@ Screenshot from *.png
 
 # session recaps stay local (our little secret)
 RECAP-*.md
+
+# Claude project instructions stay local (internal working doc)
+CLAUDE.md
