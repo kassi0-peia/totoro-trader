@@ -77,6 +77,8 @@ export default function Chart({
   onRequestTrade,
   onQuickTrade = null,
   onClosePosition = null,
+  onHoverPosition = null,
+  onInspectPosition = null,
   greeksMap,
   requestQuote = null,
   expectedMove = null,
@@ -112,6 +114,8 @@ export default function Chart({
       localStorage.setItem('tt.volume', showVolume ? '1' : '0');
     } catch {}
   }, [showVolume]);
+  // clear any pending hover-card dismiss timer on unmount
+  useEffect(() => () => { if (hoverHideTimerRef.current) clearTimeout(hoverHideTimerRef.current); }, []);
   const [recording, setRecording] = useState(false);    // screen-capture clip in progress
   const recRef = useRef(null);                          // active MediaRecorder
   const lastQuoteReqRef = useRef({ key: null, t: 0 });  // snapshot-quote throttle
@@ -121,6 +125,9 @@ export default function Chart({
   const suppressClickRef = useRef(false);
   const markerHitsRef = useRef([]); // [{ x, y, half, position, kind }]
   const closeHitsRef = useRef([]);  // ✕ boxes on position lines: [{ x0, y0, x1, y1, position }]
+  const posLabelHitsRef = useRef([]); // strike P/L label chips: [{ x0, y0, x1, y1, position }]
+  const hoverPosIdRef = useRef(null); // last position id emitted to onHoverPosition (de-dupe)
+  const hoverHideTimerRef = useRef(null); // pending 0.5s grace-period dismiss of the hover card
   const dprRef = useRef(window.devicePixelRatio || 1);
 
   // aggregate 1-minute candles into the selected timeframe. De-duplicate by
@@ -611,6 +618,7 @@ export default function Chart({
     // position dashed lines + labels
     ctx.font = '10px "JetBrains Mono", monospace';
     closeHitsRef.current = [];
+    posLabelHitsRef.current = [];
     for (const pos of showPositions ? positions : []) {
       if (pos.status !== 'open') continue;
       const y = priceToY(pos.strike);
@@ -653,6 +661,8 @@ export default function Chart({
       ctx.textAlign = 'left';
       // hit box padded a few px beyond the drawn ✕ — kinder to fingers
       closeHitsRef.current.push({ x0: lx + lw - 4, y0: y - 13, x1: lx + lw + xw + 4, y1: y + 13, position: pos });
+      // the label chip itself (not the ✕) → hover opens the premium popup
+      posLabelHitsRef.current.push({ x0: lx, y0: y - 11, x1: lx + lw, y1: y + 11, position: pos });
     }
 
     // trade markers (entry arrows, exit arrows, dotted connectors)
@@ -941,6 +951,24 @@ export default function Chart({
     (clientX, clientY) => {
       const canvas = canvasRef.current;
       if (!canvas || !layout || !view) return;
+      // de-duped emit so we don't fire setState on the App every mousemove.
+      // Show immediately; on leave, linger 0.5s before dismissing (anti-flicker).
+      const emitHoverPos = (pos) => {
+        const id = pos?.id ?? null;
+        if (id !== null) {
+          if (hoverHideTimerRef.current) { clearTimeout(hoverHideTimerRef.current); hoverHideTimerRef.current = null; }
+          if (id !== hoverPosIdRef.current) {
+            hoverPosIdRef.current = id;
+            onHoverPosition?.(pos, clientX, clientY);
+          }
+        } else if (hoverPosIdRef.current !== null && !hoverHideTimerRef.current) {
+          hoverHideTimerRef.current = setTimeout(() => {
+            hoverHideTimerRef.current = null;
+            hoverPosIdRef.current = null;
+            onHoverPosition?.(null);
+          }, 500);
+        }
+      };
       const rect = canvas.getBoundingClientRect();
       const x = clientX - rect.left;
       const y = clientY - rect.top;
@@ -949,6 +977,7 @@ export default function Chart({
         setMarkerHover(null);
         setHoverIdx(null);
         setCursor(null);
+        emitHoverPos(null);
         return;
       }
       // OHLC legend: candle (tfCandles index) under the cursor
@@ -972,6 +1001,18 @@ export default function Chart({
         }
       }
       setMarkerHover(null);
+      // strike P/L label chip → open the premium popup (same card as the list hover)
+      const plHits = posLabelHitsRef.current;
+      for (let i = plHits.length - 1; i >= 0; i--) {
+        const b = plHits[i];
+        if (x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1) {
+          emitHoverPos(b.position);
+          setHover(null);
+          setCursor(null);
+          return;
+        }
+      }
+      emitHoverPos(null);
       if (y < layout.priceTop || y > layout.priceBot) {
         setHover(null);
         return;
@@ -997,7 +1038,7 @@ export default function Chart({
       }
       setHover({ x, y, strike, type, future, greeks: g, ask: q?.ask, bid: q?.bid });
     },
-    [layout, view, tfCandles, yToPrice, price, ivol, timeToExpiryYears, greeksMap, requestQuote, timeframe]
+    [layout, view, tfCandles, yToPrice, price, ivol, timeToExpiryYears, greeksMap, requestQuote, timeframe, onHoverPosition]
   );
 
   // shared drag-move logic, used by mouse + single-finger touch
@@ -1117,6 +1158,13 @@ export default function Chart({
     setMarkerHover(null);
     setHoverIdx(null);
     setCursor(null);
+    if (hoverPosIdRef.current !== null && !hoverHideTimerRef.current) {
+      hoverHideTimerRef.current = setTimeout(() => {
+        hoverHideTimerRef.current = null;
+        hoverPosIdRef.current = null;
+        onHoverPosition?.(null);
+      }, 500);
+    }
   };
 
   const handleClick = (clientX, clientY) => {
@@ -1135,6 +1183,13 @@ export default function Chart({
     }
     for (const m of markerHitsRef.current) {
       if (Math.abs(x - m.x) <= m.half && Math.abs(y - m.y) <= m.half) return;
+    }
+    // strike P/L label chip → open the inspect/order window (TP·SL exit, close)
+    for (const b of posLabelHitsRef.current) {
+      if (x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1) {
+        onInspectPosition?.(b.position);
+        return;
+      }
     }
     // Trading clicks only at the live candle and rightward (history is read-only).
     const di = view.baseIdx + Math.floor(x / layout.candleW);

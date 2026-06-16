@@ -4,10 +4,11 @@ import React, { useEffect, useRef, useState } from 'react';
 // intraday premium graph (quote-mid line, including the overnight session).
 // With `anchor` it renders as a floating hover card (no backdrop, no buttons);
 // without, it's the pinned modal (click / touch path).
-export default function PositionModal({ pos, series, theme, quote, onClose, onRefresh, anchor = null, onAttachExit = null, executionEnabled = false }) {
+export default function PositionModal({ pos, series, theme, quote, onClose, onRefresh, anchor = null, onAttachExit = null, executionEnabled = false, onActivate = null, onHoverChange = null }) {
   const canvasRef = useRef(null);
   const [tpStr, setTpStr] = useState('');
   const [slStr, setSlStr] = useState('');
+  const [cursor, setCursor] = useState(null); // {x,y} over the premium graph
 
   useEffect(() => { setTpStr(''); setSlStr(''); }, [pos?.id]);
 
@@ -49,7 +50,27 @@ export default function PositionModal({ pos, series, theme, quote, onClose, onRe
     const t0 = candles[0].t;
     const t1 = candles[candles.length - 1].t;
     const X = (t) => ((t - t0) / Math.max(1, t1 - t0)) * (w - 46) + 4;
-    const Y = (v) => h - 16 - ((v - lo) / (hi - lo)) * (h - 28);
+    const Y = (v) => h - 16 - ((v - lo) / Math.max(1e-6, hi - lo)) * (h - 28);
+
+    // price axis: faint gridlines + premium labels in the right gutter
+    ctx.save();
+    ctx.font = '9px "JetBrains Mono", monospace';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    for (let i = 0; i <= 2; i++) {
+      const v = lo + (hi - lo) * (i / 2);
+      const gy = Y(v);
+      ctx.globalAlpha = 0.13;
+      ctx.strokeStyle = theme.muted;
+      ctx.beginPath();
+      ctx.moveTo(4, gy + 0.5);
+      ctx.lineTo(w - 42, gy + 0.5);
+      ctx.stroke();
+      ctx.globalAlpha = 0.5;
+      ctx.fillStyle = theme.muted;
+      ctx.fillText(v.toFixed(2), w - 40, gy);
+    }
+    ctx.restore();
 
     // entry line
     if (pos.entryPremium != null) {
@@ -115,7 +136,62 @@ export default function PositionModal({ pos, series, theme, quote, onClose, onRe
     ctx.fillText(new Date(t0).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }), 4, h - 5);
     ctx.textAlign = 'right';
     ctx.fillText(new Date(t1).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }), w - 46, h - 5);
-  }, [pos, series, theme]);
+
+    // hover crosshair: snap to the nearest candle, read off its premium + time
+    if (cursor && cursor.x >= 4 && cursor.x <= w - 42) {
+      let best = null, bestDx = Infinity;
+      for (const c of candles) {
+        if (c.close == null) continue;
+        const dx = Math.abs(X(c.t) - cursor.x);
+        if (dx < bestDx) { bestDx = dx; best = c; }
+      }
+      if (best) {
+        const cx = X(best.t);
+        const cy = Y(best.close);
+        // vertical guide
+        ctx.save();
+        ctx.strokeStyle = theme.text;
+        ctx.globalAlpha = 0.35;
+        ctx.setLineDash([2, 3]);
+        ctx.beginPath();
+        ctx.moveTo(cx + 0.5, 12);
+        ctx.lineTo(cx + 0.5, h - 16);
+        ctx.stroke();
+        ctx.restore();
+        // dot on the premium line
+        ctx.beginPath();
+        ctx.arc(cx, cy, 3, 0, Math.PI * 2);
+        ctx.fillStyle = theme.text;
+        ctx.fill();
+        ctx.lineWidth = 1.2;
+        ctx.strokeStyle = lineColor;
+        ctx.stroke();
+        // readout chip near the top, flipped left of the guide when it'd clip
+        const label = `${best.close.toFixed(2)}  ${new Date(best.t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}`;
+        ctx.font = '9px "JetBrains Mono", monospace';
+        const tw = ctx.measureText(label).width;
+        const padX = 5;
+        const boxW = tw + padX * 2;
+        let bx = cx + 6;
+        if (bx + boxW > w - 42) bx = cx - 6 - boxW;
+        const by = 4;
+        ctx.save();
+        ctx.globalAlpha = 0.92;
+        ctx.fillStyle = theme.surface;
+        ctx.strokeStyle = theme.muted;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.rect(bx, by, boxW, 14);
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+        ctx.fillStyle = theme.text;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(label, bx + padX, by + 7);
+      }
+    }
+  }, [pos, series, theme, cursor]);
 
   if (!pos) return null;
   const right = pos.type === 'call' ? 'C' : 'P';
@@ -135,14 +211,25 @@ export default function PositionModal({ pos, series, theme, quote, onClose, onRe
     : { borderColor: color };
 
   const card = (
-      <div className={`modal pos-inspect${anchor ? ' pos-hover-card' : ''}`} onClick={(e) => e.stopPropagation()} style={cardStyle}>
+      <div
+        className={`modal pos-inspect${anchor ? ' pos-hover-card' : ''}`}
+        onClick={anchor ? (e) => { e.stopPropagation(); onActivate?.(); } : (e) => e.stopPropagation()}
+        onMouseEnter={anchor ? () => onHoverChange?.(true) : undefined}
+        onMouseLeave={anchor ? () => onHoverChange?.(false) : undefined}
+        style={cardStyle}
+      >
         <div className="modal-head">
           <span className="modal-type" style={{ color }}>{pos.type === 'call' ? 'CALL' : 'PUT'}</span>
           <span className="modal-strike">{pos.strike}</span>
           <span className="modal-exp">{pos.expiry ? `${pos.expiry.slice(4, 6)}/${pos.expiry.slice(6, 8)}` : ''} ×{pos.qty}</span>
         </div>
 
-        <canvas ref={canvasRef} className="pos-inspect-graph" />
+        <canvas
+          ref={canvasRef}
+          className="pos-inspect-graph"
+          onMouseMove={(e) => setCursor({ x: e.nativeEvent.offsetX, y: e.nativeEvent.offsetY })}
+          onMouseLeave={() => setCursor(null)}
+        />
 
         <div className="greek-grid">
           <div><span>Entry</span><b>{pos.entryPremium != null ? `$${pos.entryPremium.toFixed(2)}` : '—'}</b></div>

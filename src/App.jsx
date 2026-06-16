@@ -50,6 +50,8 @@ export default function App() {
   const [pending, setPending] = useState(null);
   const [inspectId, setInspectId] = useState(null); // position id shown in the inspect modal (click/touch)
   const [hoverPos, setHoverPos] = useState(null);   // { id, x, y } — hover card over a position row
+  const cardHoveredRef = useRef(false);             // mouse is over the floating hover card itself
+  const cardHideRef = useRef(null);                 // pending 0.5s dismiss after leaving the card
 
   // ── Replay mode (desktop practice): play back a past day's 1-min session ──
   // and trade it with simulated fills at Black–Scholes prices. No real orders.
@@ -843,6 +845,15 @@ export default function App() {
               onRequestTrade={handleRequestTrade}
               onQuickTrade={handleQuickTrade}
               onClosePosition={closePosition}
+              onHoverPosition={(p, x, y) => {
+                if (p) {
+                  if (cardHideRef.current) { clearTimeout(cardHideRef.current); cardHideRef.current = null; }
+                  setHoverPos({ id: p.id, x, y });
+                } else if (!cardHoveredRef.current) {
+                  setHoverPos(null); // Chart already applied its 0.5s grace before emitting null
+                }
+              }}
+              onInspectPosition={(p) => { setHoverPos(null); setInspectId(p.id); }}
               greeksMap={replayActive ? EMPTY_GREEKS : feed.greeksMap}
               requestQuote={!replayActive && feed.live ? feed.requestQuote : null}
               expectedMove={expectedMove}
@@ -946,6 +957,21 @@ export default function App() {
             onRefresh={(p) => feed.requestOptHistory({ strike: p.strike, right: rightOf(p.type), expiry: p.expiry })}
             onAttachExit={attachExit}
             executionEnabled={feed.executionEnabled}
+            onActivate={() => {
+              if (cardHideRef.current) { clearTimeout(cardHideRef.current); cardHideRef.current = null; }
+              cardHoveredRef.current = false;
+              setHoverPos(null);
+              setInspectId(shown.id); // click the card → open the pinned order window (TP·SL, close)
+            }}
+            onHoverChange={(over) => {
+              cardHoveredRef.current = over;
+              if (over) {
+                if (cardHideRef.current) { clearTimeout(cardHideRef.current); cardHideRef.current = null; }
+              } else {
+                if (cardHideRef.current) clearTimeout(cardHideRef.current);
+                cardHideRef.current = setTimeout(() => { cardHideRef.current = null; setHoverPos(null); }, 500);
+              }
+            }}
           />
         );
       })()}
