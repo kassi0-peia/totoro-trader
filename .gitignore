@@ -29,3 +29,12 @@ RECAP-*.md
 
 # Claude project instructions stay local (internal working doc)
 CLAUDE.md
+
+# process scratch dropped in the repo folder — notes, shared images, zips
+attachments.zip
+*.webp
+*.jpeg
+signal-*
+totoro.png
+totoro-build-steps.txt
+totoro-review-tasks.md
