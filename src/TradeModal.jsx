@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 
 export default function TradeModal({ pending, theme, series, onRefresh, onCancel, onExecute, executionEnabled = false, accountType = null }) {
   const canvasRef = useRef(null);
+  const [cursor, setCursor] = useState(null); // {x,y} over the premium graph
   const [qty, setQty] = useState(1);
   const [orderKind, setOrderKind] = useState('MKT'); // market is always the default
   const [limitStr, setLimitStr] = useState('');
@@ -108,7 +109,58 @@ export default function TradeModal({ pending, theme, series, onRefresh, onCancel
     ctx.fillText(new Date(t0).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }), 4, h - 5);
     ctx.textAlign = 'right';
     ctx.fillText(new Date(t1).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }), w - 46, h - 5);
-  }, [pending, series, theme]);
+
+    // hover crosshair: snap to the nearest candle, read off its premium + time
+    if (cursor && cursor.x >= 4 && cursor.x <= w - 42) {
+      let best = null, bestDx = Infinity;
+      for (const c of candles) {
+        if (c.close == null) continue;
+        const dx = Math.abs(X(c.t) - cursor.x);
+        if (dx < bestDx) { bestDx = dx; best = c; }
+      }
+      if (best) {
+        const cx = X(best.t);
+        const cy = Y(best.close);
+        ctx.save();
+        ctx.strokeStyle = theme.text;
+        ctx.globalAlpha = 0.35;
+        ctx.setLineDash([2, 3]);
+        ctx.beginPath();
+        ctx.moveTo(cx + 0.5, 12);
+        ctx.lineTo(cx + 0.5, h - 16);
+        ctx.stroke();
+        ctx.restore();
+        ctx.beginPath();
+        ctx.arc(cx, cy, 3, 0, Math.PI * 2);
+        ctx.fillStyle = theme.text;
+        ctx.fill();
+        ctx.lineWidth = 1.2;
+        ctx.strokeStyle = color;
+        ctx.stroke();
+        const label = `${best.close.toFixed(2)}  ${new Date(best.t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}`;
+        ctx.font = '9px "JetBrains Mono", monospace';
+        const tw = ctx.measureText(label).width;
+        const padX = 5;
+        const boxW = tw + padX * 2;
+        let bx = cx + 6;
+        if (bx + boxW > w - 42) bx = cx - 6 - boxW;
+        ctx.save();
+        ctx.globalAlpha = 0.92;
+        ctx.fillStyle = theme.surface;
+        ctx.strokeStyle = theme.muted;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.rect(bx, 4, boxW, 14);
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+        ctx.fillStyle = theme.text;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(label, bx + padX, 11);
+      }
+    }
+  }, [pending, series, theme, cursor]);
 
   if (!pending) return null;
   const { strike, type, greeks, bid, ask } = pending;
@@ -133,7 +185,12 @@ export default function TradeModal({ pending, theme, series, onRefresh, onCancel
           <span className="modal-exp">0DTE</span>
         </div>
 
-        <canvas ref={canvasRef} className="pos-inspect-graph" />
+        <canvas
+          ref={canvasRef}
+          className="pos-inspect-graph"
+          onMouseMove={(e) => setCursor({ x: e.nativeEvent.offsetX, y: e.nativeEvent.offsetY })}
+          onMouseLeave={() => setCursor(null)}
+        />
 
         {hasQuote && (
           <div className="quote-row">
