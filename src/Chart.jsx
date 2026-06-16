@@ -86,7 +86,10 @@ export default function Chart({
   onRung = null,
   source = 'SPX',
   showOvn = true,
-  showPositions = true
+  showPositions = true,
+  showMarkers = true,
+  quickMode = false,
+  onToggleAxisChain = null
 }) {
   const wrapRef = useRef(null);
   const canvasRef = useRef(null);
@@ -101,22 +104,17 @@ export default function Chart({
   const [priceOffset, setPriceOffset] = useState(0); // vertical pan, in price units (drag up/down)
   const [priceScale, setPriceScale] = useState(1); // vertical zoom (drag the price axis)
   const [fullscreen, setFullscreen] = useState(false);
-  const [showMarkers, setShowMarkers] = useState(() => { // entry/exit trade arrows
-    try { return localStorage.getItem('tt.markers') !== '0'; } catch { return true; }
-  });
   const [showVolume, setShowVolume] = useState(() => {   // volume pane below candles
     try { return localStorage.getItem('tt.volume') !== '0'; } catch { return true; }
   });
   useEffect(() => {
     try {
-      localStorage.setItem('tt.markers', showMarkers ? '1' : '0');
       localStorage.setItem('tt.volume', showVolume ? '1' : '0');
     } catch {}
-  }, [showMarkers, showVolume]);
+  }, [showVolume]);
   const [recording, setRecording] = useState(false);    // screen-capture clip in progress
   const recRef = useRef(null);                          // active MediaRecorder
   const lastQuoteReqRef = useRef({ key: null, t: 0 });  // snapshot-quote throttle
-  const [quickMode, setQuickMode] = useState(false);    // ⚡ right-click = instant MKT order (opt-in, per session)
   const pinchRef = useRef(null); // { startDist, startVisible }
   const dragRef = useRef(null); // { startX, lastX, lastT, startOffset, moved, vel }
   const momentumRef = useRef(null); // { vel, lastT, raf }
@@ -1322,17 +1320,19 @@ export default function Chart({
           </svg>
         )}
       </button>
-      <button
-        className={`markers-btn${showMarkers ? ' active' : ''}`}
-        onClick={() => setShowMarkers((v) => !v)}
-        aria-label="Toggle trade markers"
-        data-tip={showMarkers ? 'Hide trade markers' : 'Show trade markers'}
-      >
-        <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor">
-          <path d="M12 3 L16 9 L8 9 Z" />
-          <path d="M12 21 L16 15 L8 15 Z" />
-        </svg>
-      </button>
+      {onToggleAxisChain && (
+        <button
+          className={`axis-prem-btn${axisChain ? ' active' : ''}`}
+          onClick={onToggleAxisChain}
+          aria-label="Toggle axis premiums"
+          data-tip={axisChain ? 'Hide axis premiums' : 'Axis premiums: live call/put prices beside each strike'}
+        >
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M20.5 13.4 11 3.9H4V11l9.5 9.5z" />
+            <circle cx="7.6" cy="7.6" r="1.1" />
+          </svg>
+        </button>
+      )}
       <button
         className={`vol-btn${showVolume ? ' active' : ''}`}
         onClick={() => setShowVolume((v) => !v)}
@@ -1369,16 +1369,6 @@ export default function Chart({
         aria-label="Skinnier candles"
         data-tip="Skinnier candles (show more)"
       >−</button>
-      <button
-        className={`quick-btn${quickMode ? ' active' : ''}`}
-        onClick={() => setQuickMode((v) => !v)}
-        aria-label="Toggle quick trade mode"
-        data-tip={quickMode ? 'Quick mode ARMED — right-click sends a 1-lot marketable limit (ask + 1 tick). Click to disarm.' : 'Quick mode: right-click a strike = instant 1-lot marketable limit at the ask'}
-      >
-        <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor">
-          <path d="M13 2 4 14h6l-1 8 9-12h-6z" />
-        </svg>
-      </button>
       <button
         className={`rec-btn${recording ? ' recording' : ''}`}
         onClick={toggleRecord}

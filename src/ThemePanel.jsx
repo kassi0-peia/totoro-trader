@@ -1,7 +1,7 @@
 import React from 'react';
 import { THEMES, THEME_KEYS } from './themes.js';
 
-export default function ThemePanel({ open, current, onPick, onClose, neutralChrome = false, onToggleNeutral, axisChain = false, onToggleAxisChain = null, rungButton = false, onToggleRungButton = null, totoroOn = true, onToggleTotoro = null, showOvn = true, onToggleShowOvn = null, showPositions = true, onToggleShowPositions = null }) {
+export default function ThemePanel({ open, current, onPick, onClose, neutralChrome = false, onToggleNeutral, axisChain = false, onToggleAxisChain = null, rungButton = false, onToggleRungButton = null, totoroOn = true, onToggleTotoro = null, showOvn = true, onToggleShowOvn = null, showPositions = true, onToggleShowPositions = null, showMarkers = true, onToggleShowMarkers = null }) {
   if (!open) return null;
   return (
     <div className="theme-panel" onClick={(e) => e.stopPropagation()}>
@@ -79,6 +79,20 @@ export default function ThemePanel({ open, current, onPick, onClose, neutralChro
             aria-checked={showPositions}
             onClick={onToggleShowPositions}
             aria-label="Toggle showing positions on the chart"
+          >
+            <span className="toggle-knob" />
+          </button>
+        </div>
+      )}
+      {onToggleShowMarkers && (
+        <div className="theme-toggle-row" data-tip="Entry/exit arrows on the chart marking where trades filled.">
+          <span>Trade markers</span>
+          <button
+            className={`toggle-switch${showMarkers ? ' on' : ''}`}
+            role="switch"
+            aria-checked={showMarkers}
+            onClick={onToggleShowMarkers}
+            aria-label="Toggle trade markers"
           >
             <span className="toggle-knob" />
           </button>
