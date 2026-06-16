@@ -95,17 +95,17 @@ button {
   transform: translateX(-50%) translateY(0);
 }
 /* The relative above must not reflow hosts that are intentionally absolute. */
-.snap-now-btn, .fs-btn, .markers-btn, .vol-btn, .rec-btn, .quick-btn, .cw-btn, .rung-btn,
+.snap-now-btn, .fs-btn, .axis-prem-btn, .vol-btn, .rec-btn, .quick-btn, .cw-btn, .rung-btn,
 .trades-pull, .chart-acct { position: absolute; }
 
 /* Edge-anchor tooltips on screen-edge controls so they never clip the viewport.
    The [data-tip] keeps specificity at/above the base rule so these win. */
-.fs-btn[data-tip]::after, .markers-btn[data-tip]::after, .vol-btn[data-tip]::after,
+.fs-btn[data-tip]::after, .axis-prem-btn[data-tip]::after, .vol-btn[data-tip]::after,
 .rec-btn[data-tip]::after, .quick-btn[data-tip]::after, .snap-now-btn[data-tip]::after,
 .rung-btn[data-tip]::after, .chart-acct[data-tip]::after {
   left: auto; right: -1px; transform: translateX(0) translateY(3px);
 }
-.fs-btn[data-tip]:hover::after, .markers-btn[data-tip]:hover::after, .vol-btn[data-tip]:hover::after,
+.fs-btn[data-tip]:hover::after, .axis-prem-btn[data-tip]:hover::after, .vol-btn[data-tip]:hover::after,
 .rec-btn[data-tip]:hover::after, .quick-btn[data-tip]:hover::after, .snap-now-btn[data-tip]:hover::after,
 .rung-btn[data-tip]:hover::after, .chart-acct[data-tip]:hover::after {
   transform: translateX(0) translateY(0);
@@ -530,7 +530,7 @@ button {
 
 .snap-now-btn,
 .fs-btn,
-.markers-btn,
+.axis-prem-btn,
 .vol-btn,
 .rec-btn,
 .quick-btn,
@@ -553,7 +553,7 @@ button {
   transition: color 160ms, border-color 160ms;
 }
 .fs-btn { right: 12px; }            /* far bottom-right corner */
-.markers-btn { right: 54px; }
+.axis-prem-btn { right: 54px; }
 .vol-btn { right: 96px; }
 .rec-btn { right: 138px; }
 .quick-btn { right: 180px; }
@@ -565,8 +565,8 @@ button {
 .rung-btn:hover { color: var(--c-accent); border-color: var(--c-accent); }
 .snap-now-btn:hover,
 .fs-btn:hover,
-.markers-btn:hover,
-.markers-btn.active,
+.axis-prem-btn:hover,
+.axis-prem-btn.active,
 .vol-btn:hover,
 .vol-btn.active,
 .rec-btn:hover {
@@ -1412,6 +1412,27 @@ button {
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.04em;
 }
+/* ⚡ quick-mode toggle, tucked after the account number on the chart. */
+.acct-quick-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: 50%;
+  color: var(--c-muted);
+  cursor: pointer;
+  transition: color 160ms, border-color 160ms, background 160ms;
+}
+.acct-quick-btn:hover { color: var(--c-accent); border-color: var(--c-accent); }
+.acct-quick-btn.active {
+  color: #0a0c12;
+  background: var(--c-accent);
+  border-color: var(--c-accent);
+}
 /* Feed status (● LIVE/SIM) stacked under the account badge — mobile only. */
 .acct-feed {
   display: none;
@@ -1689,6 +1710,7 @@ button {
   }
 
   .chart-acct { top: 36px; }   /* drop below the OHLC legend so they don't overlap */
+  .acct-quick-btn { display: none; }   /* quick mode is right-click → desktop only */
 
   /* Move Close-all / IBKR to a full-width row under the timeframe buttons. */
   .tf-bar { flex-wrap: wrap; }

@@ -44,12 +44,14 @@ export default function Header({ price, prevClose, theme, mood, earsUp, pulse, o
   return (
     <header className="header">
       <div className="header-left">
-        <div
-          className={`mascot-btn${totoroOn ? '' : ' off'}`}
-          data-tip={totoroOn ? 'Totoro detector ON — toggle in settings ⚙' : 'Totoro detector off — toggle in settings ⚙'}
+        <button
+          className="mascot-btn"
+          onClick={() => onToggleTotoro?.()}
+          data-tip={totoroOn ? 'Totoro detector ON — click to turn off' : 'Totoro detector off — click to wake it'}
+          aria-label="Toggle totoro pattern detector"
         >
           <Totoro mood={mood} earsUp={earsUp} pulse={pulse} theme={theme} />
-        </div>
+        </button>
         <div className="title-block">
           <div className="feed-status">
             <span

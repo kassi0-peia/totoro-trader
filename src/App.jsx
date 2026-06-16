@@ -105,14 +105,19 @@ export default function App() {
   const [showPositions, setShowPositions] = useState(() => {
     try { const v = localStorage.getItem('tt.showPositions'); return v == null ? true : v === '1'; } catch { return true; }
   });
+  const [showMarkers, setShowMarkers] = useState(() => {
+    try { const v = localStorage.getItem('tt.showMarkers'); return v == null ? true : v === '1'; } catch { return true; }
+  });
+  const [quickMode, setQuickMode] = useState(false); // ⚡ right-click quick trade — per session, not persisted
   useEffect(() => {
     try {
       localStorage.setItem('tt.axischain', axisChain ? '1' : '0');
       localStorage.setItem('tt.rung', rungButton ? '1' : '0');
       localStorage.setItem('tt.showOvn', showOvn ? '1' : '0');
       localStorage.setItem('tt.showPositions', showPositions ? '1' : '0');
+      localStorage.setItem('tt.showMarkers', showMarkers ? '1' : '0');
     } catch {}
-  }, [axisChain, rungButton, showOvn, showPositions]);
+  }, [axisChain, rungButton, showOvn, showPositions, showMarkers]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [now, setNow] = useState(Date.now());
   const [pulse, setPulse] = useState(false);
@@ -751,6 +756,12 @@ export default function App() {
         delayed={feed.delayed}
         replayMode={replayActive}
         totoroOn={showTotoro}
+        onToggleTotoro={() => {
+          setShowTotoro((v) => {
+            showToast(v ? '🐾 totoro detector napping' : '🐾 totoro detector awake', 'ok');
+            return !v;
+          });
+        }}
         source={feed.live ? feed.source : 'SPX'}
         expiry={replayActive ? replay.date : feed.live ? feed.expiry : null}
         account={feed.account}
@@ -766,21 +777,14 @@ export default function App() {
             onClose={() => setSettingsOpen(false)}
             neutralChrome={neutralChrome}
             onToggleNeutral={() => setNeutralChrome((v) => !v)}
-            axisChain={axisChain}
-            onToggleAxisChain={() => setAxisChain((v) => !v)}
             rungButton={rungButton}
             onToggleRungButton={() => setRungButton((v) => !v)}
             showOvn={showOvn}
             onToggleShowOvn={() => setShowOvn((v) => !v)}
             showPositions={showPositions}
             onToggleShowPositions={() => setShowPositions((v) => !v)}
-            totoroOn={showTotoro}
-            onToggleTotoro={() => {
-              setShowTotoro((v) => {
-                showToast(v ? '🐾 totoro detector napping' : '🐾 totoro detector awake', 'ok');
-                return !v;
-              });
-            }}
+            showMarkers={showMarkers}
+            onToggleShowMarkers={() => setShowMarkers((v) => !v)}
           />
         </div>
       )}
@@ -814,9 +818,19 @@ export default function App() {
             />
           )}
           <div className="chart-area">
-            <div className="chart-acct" data-tip={feed.account ? `IBKR account ${feed.account}` : 'no account connected'}>
-              <span className="acct-badge" style={{ color: '#0a0c12', background: acctColor }}>{acctLabel}</span>
-              <span className="chart-acct-id">{feed.account || (feed.live ? '…' : 'no acct')}</span>
+            <div className="chart-acct">
+              <span className="acct-badge" style={{ color: '#0a0c12', background: acctColor }} data-tip={feed.account ? `IBKR account ${feed.account}` : 'no account connected'}>{acctLabel}</span>
+              <span className="chart-acct-id" data-tip={feed.account ? `IBKR account ${feed.account}` : 'no account connected'}>{feed.account || (feed.live ? '…' : 'no acct')}</span>
+              {!replayActive && (
+                <button
+                  className={`acct-quick-btn${quickMode ? ' active' : ''}`}
+                  onClick={() => setQuickMode((v) => !v)}
+                  aria-label="Toggle quick trade mode"
+                  data-tip={quickMode ? 'Quick mode ARMED — right-click a strike = 1-lot marketable limit (ask + 1 tick). Click to disarm.' : 'Quick mode: right-click a strike = instant 1-lot marketable limit at the ask'}
+                >
+                  <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M13 2 4 14h6l-1 8 9-12h-6z" /></svg>
+                </button>
+              )}
             </div>
             <Chart
               candles={replayActive ? replay.candles.slice(0, replay.idx + 1) : feed.candles}
@@ -835,9 +849,12 @@ export default function App() {
               histCandles={replayActive ? null : feed.histSeries[timeframe] || null}
               showTotoro={showTotoro}
               axisChain={axisChain}
+              onToggleAxisChain={() => setAxisChain((v) => !v)}
               onRung={rungButton ? buyNextRung : null}
               showOvn={showOvn}
               showPositions={showPositions}
+              showMarkers={showMarkers}
+              quickMode={quickMode}
               source={replayActive ? 'SPX' : feed.live ? feed.source : 'SPX'}
             />
             {toast && (
