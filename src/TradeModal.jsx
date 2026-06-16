@@ -1,6 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 
-export default function TradeModal({ pending, theme, onCancel, onExecute, executionEnabled = false, accountType = null }) {
+export default function TradeModal({ pending, theme, series, onRefresh, onCancel, onExecute, executionEnabled = false, accountType = null }) {
+  const canvasRef = useRef(null);
   const [qty, setQty] = useState(1);
   const [orderKind, setOrderKind] = useState('MKT'); // market is always the default
   const [limitStr, setLimitStr] = useState('');
@@ -33,6 +34,82 @@ export default function TradeModal({ pending, theme, onCancel, onExecute, execut
     return () => window.removeEventListener('keydown', onKey);
   }, [onCancel, onExecute, qty, canExecute, orderKind, limitStr, tpStr, slStr]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Pull the option's intraday premium history while the ticket is open (server caches 60s).
+  useEffect(() => {
+    if (!pending || !onRefresh) return;
+    onRefresh(pending);
+    const id = setInterval(() => onRefresh(pending), 60_000);
+    return () => clearInterval(id);
+  }, [pending?.strike, pending?.type]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Draw the premium line, with the live ask as a dashed reference (what a market buy pays).
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !pending) return;
+    const dpr = window.devicePixelRatio || 1;
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    canvas.width = w * dpr; canvas.height = h * dpr;
+    const ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, w, h);
+    const candles = series?.candles || [];
+    if (candles.length < 2) {
+      ctx.fillStyle = theme.muted;
+      ctx.font = '11px "JetBrains Mono", monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(candles.length ? 'not enough data' : 'loading premium history…', w / 2, h / 2);
+      return;
+    }
+    const vals = candles.map((c) => c.close).filter((v) => v != null);
+    let lo = Math.min(...vals), hi = Math.max(...vals);
+    if (pending.ask != null) { lo = Math.min(lo, pending.ask); hi = Math.max(hi, pending.ask); }
+    const pad = (hi - lo) * 0.1 || 0.05;
+    hi += pad; lo = Math.max(0, lo - pad);
+    const t0 = candles[0].t, t1 = candles[candles.length - 1].t;
+    const X = (t) => ((t - t0) / Math.max(1, t1 - t0)) * (w - 46) + 4;
+    const Y = (v) => h - 16 - ((v - lo) / Math.max(1e-6, hi - lo)) * (h - 28);
+    const color = pending.type === 'call' ? theme.callLine : theme.putLine;
+    if (pending.ask != null) {
+      ctx.save();
+      ctx.setLineDash([4, 4]);
+      ctx.strokeStyle = theme.muted;
+      ctx.globalAlpha = 0.6;
+      ctx.beginPath();
+      ctx.moveTo(4, Y(pending.ask) + 0.5);
+      ctx.lineTo(w - 42, Y(pending.ask) + 0.5);
+      ctx.stroke();
+      ctx.restore();
+      ctx.fillStyle = theme.muted;
+      ctx.font = '9px "JetBrains Mono", monospace';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(`ask ${pending.ask.toFixed(2)}`, w - 40, Y(pending.ask));
+    }
+    const last = vals[vals.length - 1];
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.6;
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    let started = false;
+    for (const c of candles) {
+      if (c.close == null) continue;
+      const px = X(c.t), py = Y(c.close);
+      if (!started) { ctx.moveTo(px, py); started = true; } else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(X(t1), Y(last), 2.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.font = '9px "JetBrains Mono", monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText(last.toFixed(2), w - 40, Y(last) + 11);
+    ctx.fillStyle = theme.muted;
+    ctx.fillText(new Date(t0).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }), 4, h - 5);
+    ctx.textAlign = 'right';
+    ctx.fillText(new Date(t1).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }), w - 46, h - 5);
+  }, [pending, series, theme]);
+
   if (!pending) return null;
   const { strike, type, greeks, bid, ask } = pending;
   const color = type === 'call' ? theme.callLine : theme.putLine;
@@ -55,6 +132,8 @@ export default function TradeModal({ pending, theme, onCancel, onExecute, execut
           <span className="modal-strike">{strike}</span>
           <span className="modal-exp">0DTE</span>
         </div>
+
+        <canvas ref={canvasRef} className="pos-inspect-graph" />
 
         {hasQuote && (
           <div className="quote-row">
