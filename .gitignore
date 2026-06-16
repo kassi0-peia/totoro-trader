@@ -38,3 +38,6 @@ signal-*
 totoro.png
 totoro-build-steps.txt
 totoro-review-tasks.md
+
+# personal launch helper (hardcodes ~/ibc paths)
+start-all.sh
