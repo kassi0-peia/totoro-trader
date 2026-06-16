@@ -922,6 +922,8 @@ export default function App() {
       <TradeModal
         pending={pending}
         theme={theme}
+        series={pending && !replayActive ? feed.optHist[`${pending.strike}${rightOf(pending.type)}`] : null}
+        onRefresh={replayActive ? null : (p) => feed.requestOptHistory({ strike: p.strike, right: rightOf(p.type), expiry: feed.expiry })}
         onCancel={() => setPending(null)}
         onExecute={handleExecute}
         executionEnabled={replayActive ? true : feed.executionEnabled}
