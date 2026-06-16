@@ -603,14 +603,17 @@ export default function Chart({
         if (c == null) c = greeks({ S: price, K: k, T: timeToExpiryYears, sigma: ivol, type: 'call' }).premium;
         if (p == null) p = greeks({ S: price, K: k, T: timeToExpiryYears, sigma: ivol, type: 'put' }).premium;
         ctx.globalAlpha = 0.75;
-        const cTxt = fmt(c);
-        ctx.fillStyle = theme.callLine;
-        // Baseline is 'middle' — draw at the strike's own y so the premium lines
-        // up with its SPX gridline/label (was y+8, which sat a hair low).
-        ctx.fillText(cTxt, layout.chartW + 3, y);
-        const cw = ctx.measureText(cTxt).width;
-        ctx.fillStyle = theme.putLine;
-        ctx.fillText(fmt(p), layout.chartW + 5 + cw, y);
+        // Order pivots on the price line: below it (lower strikes) the OTM-downside
+        // put reads first; above it the OTM-upside call reads first. Baseline is
+        // 'middle' so each premium lines up with its strike's SPX gridline/label.
+        const callItem = { txt: fmt(c), color: theme.callLine };
+        const putItem = { txt: fmt(p), color: theme.putLine };
+        const [first, second] = k < price ? [putItem, callItem] : [callItem, putItem];
+        ctx.fillStyle = first.color;
+        ctx.fillText(first.txt, layout.chartW + 3, y);
+        const fw = ctx.measureText(first.txt).width;
+        ctx.fillStyle = second.color;
+        ctx.fillText(second.txt, layout.chartW + 5 + fw, y);
       }
       ctx.restore();
     }
