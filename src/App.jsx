@@ -828,7 +828,7 @@ export default function App() {
                   aria-label="Toggle quick trade mode"
                   data-tip={quickMode ? 'Quick mode ARMED — right-click a strike = 1-lot marketable limit (ask + 1 tick). Click to disarm.' : 'Quick mode: right-click a strike = instant 1-lot marketable limit at the ask'}
                 >
-                  <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M13 2 4 14h6l-1 8 9-12h-6z" /></svg>
+                  <svg viewBox="0 0 24 24" width="17" height="17" fill="currentColor"><path d="M13 2 4 14h6l-1 8 9-12h-6z" /></svg>
                 </button>
               )}
             </div>
