@@ -781,8 +781,13 @@ function feedSeries(series, price) {
 function feedSpxTick(price) {
   spxPrice = price;
   watchdogState.lastSpxTick = Date.now();
-  const candle = feedSeries(spx, price);
+  // Only build SPX cash candles during RTH, when cash actually trades. Overnight,
+  // IBKR occasionally emits a stray/frozen SPX print; before this guard it became
+  // a phantom 1-tick candle — a lone dash floating above the ES proxy once the
+  // overnight+RTH merge started showing SPX bars overnight. spxPrice still updates
+  // (the basis capture and displayPrice read it); we just don't make a bar.
   if (session.source === 'SPX') {
+    const candle = feedSeries(spx, price);
     broadcast({ type: 'tick', source: 'SPX', price: spxPrice, candle: { ...candle, src: 'SPX' } });
   }
   maybeRecenterChain(displayPrice());
