@@ -1436,6 +1436,20 @@ button {
   background: var(--c-accent);
   border-color: var(--c-accent);
 }
+/* MARKET mode — red, so a naked-MKT arm can never be mistaken for the safer
+   marketable-limit arm. Pulses to stay conspicuous while live. */
+.acct-quick-btn.market,
+.acct-quick-btn.market:hover {
+  color: #fff;
+  background: #e0473a;
+  border-color: #e0473a;
+  box-shadow: 0 0 0 2px rgba(224, 71, 58, 0.35);
+  animation: quick-market-pulse 1.4s ease-in-out infinite;
+}
+@keyframes quick-market-pulse {
+  0%, 100% { box-shadow: 0 0 0 2px rgba(224, 71, 58, 0.35); }
+  50% { box-shadow: 0 0 0 4px rgba(224, 71, 58, 0.15); }
+}
 /* Feed status (● LIVE/SIM) stacked under the account badge — mobile only. */
 .acct-feed {
   display: none;
