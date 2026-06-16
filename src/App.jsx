@@ -540,18 +540,22 @@ export default function App() {
       return;
     }
     if (!feed.executionEnabled) { showToast('Execution disabled', 'err'); return; }
+    // A live ask is still required even in MARKET mode — it's the guard against
+    // firing blind into a strike with no streaming quote (where MKT slippage is worst).
     if (ask == null || !(ask > 0)) { showToast(`No live ask for ${strike}${rightOf(type)} — hover until a quote loads`, 'err'); return; }
+    const market = quickMode === 'market';
     const tick = ask < 3 ? 0.05 : 0.10;
-    const limit = Math.round((ask + tick) * 100) / 100;
-    const ref = feed.sendOrder({ intent: 'open', action: 'BUY', strike, right: rightOf(type), qty: 1, expiry: feed.expiry, limit });
+    const limit = market ? null : Math.round((ask + tick) * 100) / 100;
+    // MARKET mode omits the limit → the bridge routes a real MKT (never naked elsewhere).
+    const ref = feed.sendOrder({ intent: 'open', action: 'BUY', strike, right: rightOf(type), qty: 1, expiry: feed.expiry, ...(market ? {} : { limit }) });
     if (!ref) { showToast('Order not sent — not connected', 'err'); return; }
     const g = resolveGreeks(strike, type);
     setPositions((prev) => [...prev, {
       id: posSeq++, type, side: 'long', strike, qty: 1, expiry: feed.expiry,
-      status: 'pending', openRef: ref, entryPremium: null, estPremium: limit,
+      status: 'pending', openRef: ref, entryPremium: null, estPremium: market ? ask : limit,
       entryPrice: feed.price, openedAt: Date.now(), greeksLive: g
     }]);
-    showToast(`⚡ BUY 1 ${strike}${rightOf(type)} LMT ${limit.toFixed(2)}`, 'ok');
+    showToast(market ? `⚡ BUY 1 ${strike}${rightOf(type)} MKT` : `⚡ BUY 1 ${strike}${rightOf(type)} LMT ${limit.toFixed(2)}`, 'ok');
     triggerPulse();
   };
 
@@ -825,10 +829,16 @@ export default function App() {
               <span className="chart-acct-id" data-tip={feed.account ? `IBKR account ${feed.account}` : 'no account connected'}>{feed.account || (feed.live ? '…' : 'no acct')}</span>
               {!replayActive && (
                 <button
-                  className={`acct-quick-btn${quickMode ? ' active' : ''}`}
-                  onClick={() => setQuickMode((v) => !v)}
+                  className={`acct-quick-btn${quickMode ? ' active' : ''}${quickMode === 'market' ? ' market' : ''}`}
+                  onClick={() => setQuickMode((v) => (v === 'limit' ? 'market' : v === 'market' ? false : 'limit'))}
                   aria-label="Toggle quick trade mode"
-                  data-tip={quickMode ? 'Quick mode ARMED — right-click a strike = 1-lot marketable limit (ask + 1 tick). Click to disarm.' : 'Quick mode: right-click a strike = instant 1-lot marketable limit at the ask'}
+                  data-tip={
+                    quickMode === 'market'
+                      ? '⚡ MARKET mode ARMED (red) — right-click a strike = 1-lot MKT. Instant fill but UNCAPPED slippage, and outside RTH it\'s held until ~00:10. Click to disarm.'
+                      : quickMode === 'limit'
+                      ? 'Quick mode ARMED — right-click a strike = 1-lot marketable limit (ask + 1 tick). Click again for MARKET (red) mode.'
+                      : 'Quick mode: right-click a strike = instant 1-lot buy. Click to arm (limit → red market → off).'
+                  }
                 >
                   <svg viewBox="0 0 24 24" width="17" height="17" fill="currentColor"><path d="M13 2 4 14h6l-1 8 9-12h-6z" /></svg>
                 </button>
