@@ -1417,8 +1417,8 @@ button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
-  height: 20px;
+  width: 26px;
+  height: 26px;
   padding: 0;
   background: var(--c-surface);
   border: 1px solid var(--c-border);
