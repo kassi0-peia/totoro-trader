@@ -1123,9 +1123,12 @@ button {
 /* Hover variant: floats near the cursor, never traps the mouse. */
 .pos-hover-card {
   width: 340px;
-  pointer-events: none;
+  pointer-events: auto; /* clickable: mouse onto it to open the order window */
+  cursor: pointer;
   z-index: 60;
   box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+  transform: scale(0.7); /* 30% smaller — uniform shrink keeps graph/text proportions */
+  transform-origin: top right; /* stay tucked near the cursor (card opens leftward) */
 }
 
 .pos-inspect-graph {
