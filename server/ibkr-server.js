@@ -84,6 +84,13 @@ let connected = false;
 const spx = { candles: [], edge: nextCandleEdge(Date.now()) };
 const es = { candles: [], edge: nextCandleEdge(Date.now()) };
 let spxPrice = null;
+
+// SPY volume proxy: SPX is a cash index with no traded volume, so we paint SPY's
+// (the ETF) per-minute share volume onto the SPX candles' `.volume` field — a
+// historical seed backfills it, real-time bars extend it forward. Keyed by 1-min
+// bucket (ms). Costs one extra market-data line for the real-time stream.
+const SPY_CONTRACT = { symbol: 'SPY', secType: 'STK', exchange: 'SMART', currency: 'USD' };
+const spyVol = new Map(); // minuteBucketMs -> share volume
 let esPrice = null;
 let vixLast = null;   // VIX index level
 let vixClose = null;  // prior close (for the day change + color)
@@ -496,6 +503,8 @@ function wireHandlers(api) {
     requestAccountSummary();                 // funds / buying power
     subscribeSpx();
     requestSpxHistory();
+    subscribeSpyVolume();    // SPY real-time bars → volume proxy for SPX
+    requestSpyVolHistory();  // backfill SPY per-minute volume
     subscribeVix();
     resolveEs();          // contractDetails -> subscribe ES + history
     evaluateSession();    // establish currentExpiry (chain subscribes once a price arrives)
@@ -621,7 +630,8 @@ function wireHandlers(api) {
         return;
       }
       const t = parseHistTime(time);
-      if (t != null) s.candles.push({ t, open, high, low, close, volume: Math.max(volume, 0) });
+      // SPX (tf-hist is SPX-only) has no volume of its own — roll up SPY's instead.
+      if (t != null) s.candles.push({ t, open, high, low, close, volume: spyVolForRange(t, (s.tf || 1) * 60_000) });
       return;
     }
     if (s.kind === 'basis-fill-spx' || s.kind === 'basis-fill-es') {
@@ -638,6 +648,18 @@ function wireHandlers(api) {
       }
       return;
     }
+    if (s.kind === 'spy-hist') {
+      if (typeof time === 'string' && time.startsWith('finished')) {
+        subs.delete(reqId);
+        applySpyVolumeToSpx();
+        broadcast(snapshotMsg());
+        console.log(`[ibkr] SPY volume seed complete (${spyVol.size} minutes)`);
+        return;
+      }
+      const t = parseHistTime(time);
+      if (t != null) spyVol.set(t, Math.max(volume, 0));
+      return;
+    }
     const series = s.kind === 'spx-hist' ? spx : s.kind === 'es-hist' ? es : null;
     if (!series) return;
     if (typeof time === 'string' && time.startsWith('finished')) {
@@ -647,6 +669,7 @@ function wireHandlers(api) {
       if (s.kind === 'es-hist' && esPrice == null) { esPrice = lastClose; ensureOvernightBasis(); }
       if (s.kind === 'spx-hist') watchdogState.spxHistSeededAt = Date.now();
       if (s.kind === 'es-hist') watchdogState.esHistSeededAt = Date.now();
+      if (s.kind === 'spx-hist') applySpyVolumeToSpx(); // SPY volume may already be seeded
       broadcast(snapshotMsg());
       console.log(`[ibkr] ${s.kind} seed complete (${series.candles.length} bars)`);
       maybeBackfillBasis(); // a missed 4:00 capture may now be reconstructable
@@ -656,6 +679,17 @@ function wireHandlers(api) {
     if (t == null) return;
     series.candles.push({ t, open, high, low, close, volume: Math.max(volume, 0) });
     if (series.candles.length > HISTORY_CANDLES) series.candles = series.candles.slice(-HISTORY_CANDLES);
+  });
+
+  // SPY real-time bars (5 s) → accumulate per-minute share volume for the SPX proxy.
+  api.on(EventName.realtimeBar, (reqId, time, open, high, low, close, volume) => {
+    const s = subs.get(reqId);
+    if (!s || s.kind !== 'spy-rtbar') return;
+    const bucket = Math.floor((time * 1000) / CANDLE_MS) * CANDLE_MS; // `time` is epoch seconds
+    spyVol.set(bucket, (spyVol.get(bucket) || 0) + Math.max(volume, 0));
+    // Reflect onto the current SPX candle so the live volume bar grows in real time.
+    const last = spx.candles[spx.candles.length - 1];
+    if (last && last.t === bucket) last.volume = spyVol.get(bucket);
   });
 }
 
@@ -669,6 +703,48 @@ function subscribeSpx() {
     ib.reqMktData(reqId, { symbol: 'SPX', secType: 'IND', exchange: 'CBOE', currency: 'USD' }, '', false, false, []);
   } catch (e) {
     console.log('[ibkr] SPX reqMktData failed:', e.message);
+  }
+}
+
+// Sum SPY volume across the 1-min buckets a candle spans, [t, t+spanMs). For the
+// 1-min series this is just the single bucket; for tf-hist it rolls them up.
+function spyVolForRange(t, spanMs = CANDLE_MS) {
+  let v = 0;
+  for (let b = Math.floor(t / CANDLE_MS) * CANDLE_MS; b < t + spanMs; b += CANDLE_MS) {
+    const m = spyVol.get(b);
+    if (m != null) v += m;
+  }
+  return v;
+}
+
+// Repaint SPY volume onto the SPX 1-min candles — called after either the SPX or
+// the SPY history seed lands, since they can arrive in either order.
+function applySpyVolumeToSpx() {
+  for (const c of spx.candles) {
+    const v = spyVol.get(c.t);
+    if (v != null) c.volume = v;
+  }
+}
+
+function subscribeSpyVolume() {
+  if (!ib) return;
+  const reqId = reqSeq++;
+  subs.set(reqId, { kind: 'spy-rtbar' });
+  try {
+    ib.reqRealTimeBars(reqId, SPY_CONTRACT, 5, 'TRADES', false, []);
+  } catch (e) {
+    console.log('[ibkr] SPY reqRealTimeBars failed:', e.message);
+  }
+}
+
+function requestSpyVolHistory() {
+  if (!ib) return;
+  const reqId = reqSeq++;
+  subs.set(reqId, { kind: 'spy-hist' });
+  try {
+    ib.reqHistoricalData(reqId, SPY_CONTRACT, '', '2 D', '1 min', 'TRADES', 1, 2, false);
+  } catch (e) {
+    console.log('[ibkr] SPY reqHistoricalData failed:', e.message);
   }
 }
 
@@ -788,6 +864,7 @@ function feedSpxTick(price) {
   // (the basis capture and displayPrice read it); we just don't make a bar.
   if (session.source === 'SPX') {
     const candle = feedSeries(spx, price);
+    candle.volume = spyVol.get(candle.t) || 0; // SPX has no volume of its own — show SPY's
     broadcast({ type: 'tick', source: 'SPX', price: spxPrice, candle: { ...candle, src: 'SPX' } });
   }
   maybeRecenterChain(displayPrice());
