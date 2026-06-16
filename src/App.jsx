@@ -415,6 +415,15 @@ export default function App() {
     .filter((p) => p.status === 'open')
     .map((p) => ({ strike: p.strike, right: rightOf(p.type) }));
 
+  // Chart shows only positions for the CURRENT session's expiry (these are 0DTE —
+  // a prior day's position has a past expiry and is already settled, so its lines
+  // and markers shouldn't keep sitting on today's chart).
+  const activeExpiry = replayActive ? replay?.date : feed.expiry;
+  const chartPositions = useMemo(
+    () => positionsLive.filter((p) => p.expiry === activeExpiry),
+    [positionsLive, activeExpiry]
+  );
+
   // Fetch deep history when a higher timeframe is selected (5m → 1 week …
   // 1D → 1 year). Cached server-side; cheap to re-request on reconnect.
   useEffect(() => {
@@ -812,7 +821,7 @@ export default function App() {
             <Chart
               candles={replayActive ? replay.candles.slice(0, replay.idx + 1) : feed.candles}
               price={dispPrice}
-              positions={positionsLive}
+              positions={chartPositions}
               theme={chartTheme}
               ivol={IVOL}
               timeToExpiryYears={T}
