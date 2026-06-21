@@ -614,6 +614,38 @@ export default function App() {
     triggerPulse();
   };
 
+  // + on a position line → add one contract to the same leg (same strike/type/
+  // side), a marketable limit like every other path. Mirrors closePosition's
+  // guards; the new lot reconciles into the leg via IBKR-authoritative fills.
+  const addToPosition = (pos) => {
+    if (!pos || pos.status !== 'open') return;
+    // Replay: simulated 1-lot add at the model premium.
+    if (replayActive) {
+      const g = resolveGreeks(pos.strike, pos.type);
+      setReplayPositions((prev) => [...prev, {
+        id: posSeq++, type: pos.type, side: pos.side, strike: pos.strike, qty: 1, expiry: pos.expiry,
+        status: 'open', entryPremium: g.premium, entryPrice: dispPrice, openedAt: replayNow
+      }]);
+      showToast(`REPLAY +1 ${pos.strike}${rightOf(pos.type)} @ $${g.premium.toFixed(2)}`, 'ok');
+      triggerPulse();
+      return;
+    }
+    if (!feed.executionEnabled) { showToast('Execution disabled', 'err'); return; }
+    const isLong = pos.side === 'long';
+    const limit = isLong ? buyLimitFor(pos.strike, pos.type) : sellLimitFor(pos.strike, pos.type);
+    if (limit == null) { showToast(`No live quote for ${pos.strike}${rightOf(pos.type)} — wait for a quote`, 'err'); return; }
+    const ref = feed.sendOrder({ intent: 'open', action: isLong ? 'BUY' : 'SELL', strike: pos.strike, right: rightOf(pos.type), qty: 1, expiry: pos.expiry, limit });
+    if (!ref) { showToast('Add not sent — not connected', 'err'); return; }
+    const g = resolveGreeks(pos.strike, pos.type);
+    setPositions((prev) => [...prev, {
+      id: posSeq++, type: pos.type, side: pos.side, strike: pos.strike, qty: 1, expiry: pos.expiry,
+      status: 'pending', openRef: ref, entryPremium: null, estPremium: limit,
+      entryPrice: feed.price, openedAt: Date.now(), greeksLive: g
+    }]);
+    showToast(`+1 ${pos.strike}${rightOf(pos.type)} LMT ${limit.toFixed(2)}`, 'ok');
+    triggerPulse();
+  };
+
   const closeAllPositions = () => {
     if (!feed.executionEnabled) { showToast('Execution disabled', 'err'); return; }
     const open = positionsLive.filter((p) => p.status === 'open');
@@ -855,6 +887,7 @@ export default function App() {
               onRequestTrade={handleRequestTrade}
               onQuickTrade={handleQuickTrade}
               onClosePosition={closePosition}
+              onAddPosition={addToPosition}
               onHoverPosition={(p, x, y) => {
                 if (p) {
                   if (cardHideRef.current) { clearTimeout(cardHideRef.current); cardHideRef.current = null; }
