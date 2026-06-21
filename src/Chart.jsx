@@ -77,6 +77,7 @@ export default function Chart({
   onRequestTrade,
   onQuickTrade = null,
   onClosePosition = null,
+  onAddPosition = null,
   onHoverPosition = null,
   onInspectPosition = null,
   greeksMap,
@@ -125,6 +126,7 @@ export default function Chart({
   const suppressClickRef = useRef(false);
   const markerHitsRef = useRef([]); // [{ x, y, half, position, kind }]
   const closeHitsRef = useRef([]);  // ✕ boxes on position lines: [{ x0, y0, x1, y1, position }]
+  const addHitsRef = useRef([]);    // + boxes on position lines: [{ x0, y0, x1, y1, position }]
   const posLabelHitsRef = useRef([]); // strike P/L label chips: [{ x0, y0, x1, y1, position }]
   const hoverPosIdRef = useRef(null); // last position id emitted to onHoverPosition (de-dupe)
   const hoverHideTimerRef = useRef(null); // pending 0.5s grace-period dismiss of the hover card
@@ -621,6 +623,7 @@ export default function Chart({
     // position dashed lines + labels
     ctx.font = '10px "JetBrains Mono", monospace';
     closeHitsRef.current = [];
+    addHitsRef.current = [];
     posLabelHitsRef.current = [];
     for (const pos of showPositions ? positions : []) {
       if (pos.status !== 'open') continue;
@@ -652,18 +655,31 @@ export default function Chart({
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillText(label, lx + 6, y);
+      // Two action boxes appended to the label (TradingView-style): ✕ closes the
+      // whole position, + adds one contract to the same leg. Both marketable limits.
+      const cxBox = lx + lw;       // ✕ box left edge
+      const adBox = lx + lw + xw;  // + box left edge (right after ✕)
       // ✕ box: click closes the position at a marketable limit
       ctx.fillStyle = '#0a0c12';
-      ctx.fillRect(lx + lw, y - 9, xw, 18);
+      ctx.fillRect(cxBox, y - 9, xw, 18);
       ctx.strokeStyle = color;
       ctx.lineWidth = 1;
-      ctx.strokeRect(lx + lw + 0.5, y - 8.5, xw - 1, 17);
+      ctx.strokeRect(cxBox + 0.5, y - 8.5, xw - 1, 17);
       ctx.fillStyle = color;
       ctx.textAlign = 'center';
-      ctx.fillText('✕', lx + lw + xw / 2, y);
+      ctx.fillText('✕', cxBox + xw / 2, y);
+      // + box: click adds one contract to the same leg (marketable limit)
+      ctx.fillStyle = '#0a0c12';
+      ctx.fillRect(adBox, y - 9, xw, 18);
+      ctx.strokeStyle = color;
+      ctx.strokeRect(adBox + 0.5, y - 8.5, xw - 1, 17);
+      ctx.fillStyle = color;
+      ctx.fillText('+', adBox + xw / 2, y);
       ctx.textAlign = 'left';
-      // hit box padded a few px beyond the drawn ✕ — kinder to fingers
-      closeHitsRef.current.push({ x0: lx + lw - 4, y0: y - 13, x1: lx + lw + xw + 4, y1: y + 13, position: pos });
+      // hit boxes pad the OUTER edges only (kinder to fingers); the two meet at
+      // their shared edge so a click never lands on both ✕ and +.
+      closeHitsRef.current.push({ x0: cxBox - 4, y0: y - 13, x1: cxBox + xw, y1: y + 13, position: pos });
+      addHitsRef.current.push({ x0: adBox, y0: y - 13, x1: adBox + xw + 4, y1: y + 13, position: pos });
       // the label chip itself (not the ✕) → hover opens the premium popup
       posLabelHitsRef.current.push({ x0: lx, y0: y - 11, x1: lx + lw, y1: y + 11, position: pos });
     }
@@ -1181,6 +1197,13 @@ export default function Chart({
     for (const c of closeHitsRef.current) {
       if (x >= c.x0 && x <= c.x1 && y >= c.y0 && y <= c.y1) {
         onClosePosition?.(c.position);
+        return;
+      }
+    }
+    // + on a position line → add one contract to that leg (marketable limit, via App)
+    for (const a of addHitsRef.current) {
+      if (x >= a.x0 && x <= a.x1 && y >= a.y0 && y <= a.y1) {
+        onAddPosition?.(a.position);
         return;
       }
     }
