@@ -74,10 +74,6 @@ export default function App() {
     hoverOpenRef.current = setTimeout(openTrades, 1500);
   }, [tradesPeek, openTrades]);
   const disarmHoverOpen = useCallback(() => clearTimeout(hoverOpenRef.current), []);
-  const [showTotoro, setShowTotoro] = useState(() => { // 🐾 pattern detector — toggled by clicking the mascot
-    try { return localStorage.getItem('tt.totoro') !== '0'; } catch { return true; }
-  });
-
   // Esc closes the trades peek drawer.
   useEffect(() => {
     if (!tradesPeek) return;
@@ -91,9 +87,6 @@ export default function App() {
     const t = setTimeout(() => setDrawerMounted(false), 300);
     return () => clearTimeout(t);
   }, [tradesPeek, drawerMounted]);
-  useEffect(() => {
-    try { localStorage.setItem('tt.totoro', showTotoro ? '1' : '0'); } catch {}
-  }, [showTotoro]);
   // Opt-in tools (kisa's rule: dormant until toggled, in the gear panel).
   const [axisChain, setAxisChain] = useState(() => {
     try { return localStorage.getItem('tt.axischain') === '1'; } catch { return false; }
@@ -793,13 +786,6 @@ export default function App() {
         live={feed.live}
         delayed={feed.delayed}
         replayMode={replayActive}
-        totoroOn={showTotoro}
-        onToggleTotoro={() => {
-          setShowTotoro((v) => {
-            showToast(v ? '🐾 totoro detector napping' : '🐾 totoro detector awake', 'ok');
-            return !v;
-          });
-        }}
         source={feed.live ? feed.source : 'SPX'}
         expiry={replayActive ? replay.date : feed.live ? feed.expiry : null}
         account={feed.account}
@@ -901,7 +887,6 @@ export default function App() {
               requestQuote={!replayActive && feed.live ? feed.requestQuote : null}
               expectedMove={expectedMove}
               histCandles={replayActive ? null : feed.histSeries[timeframe] || null}
-              showTotoro={showTotoro}
               axisChain={axisChain}
               onToggleAxisChain={() => setAxisChain((v) => !v)}
               onRung={rungButton ? buyNextRung : null}
