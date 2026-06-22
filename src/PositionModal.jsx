@@ -4,7 +4,7 @@ import React, { useEffect, useRef, useState } from 'react';
 // intraday premium graph (quote-mid line, including the overnight session).
 // With `anchor` it renders as a floating hover card (no backdrop, no buttons);
 // without, it's the pinned modal (click / touch path).
-export default function PositionModal({ pos, series, theme, quote, onClose, onRefresh, anchor = null, onAttachExit = null, executionEnabled = false, onActivate = null, onHoverChange = null }) {
+export default function PositionModal({ pos, series, theme, quote, onClose, onRefresh, anchor = null, onAttachExit = null, executionEnabled = false, onActivate = null, onHoverChange = null, fills = null }) {
   const canvasRef = useRef(null);
   const [tpStr, setTpStr] = useState('');
   const [slStr, setSlStr] = useState('');
@@ -93,10 +93,16 @@ export default function PositionModal({ pos, series, theme, quote, onClose, onRe
       }
     }
 
-    // entry marker: where (in time) and at what premium the fill happened
-    if (pos.openedAt && pos.entryPremium != null && pos.openedAt >= t0 && pos.openedAt <= t1) {
+    // entry markers: one dot per fill (each added lot is its own fill), at the
+    // time + premium it filled. Falls back to the single blended entry when the
+    // per-fill blotter isn't available (replay, or fills from before this session).
+    const fillMarks = (fills && fills.length)
+      ? fills.map((f) => ({ t: f.ts, prem: f.price }))
+      : (pos.openedAt && pos.entryPremium != null ? [{ t: pos.openedAt, prem: pos.entryPremium }] : []);
+    for (const fm of fillMarks) {
+      if (fm.prem == null || fm.t < t0 || fm.t > t1) continue;
       ctx.beginPath();
-      ctx.arc(X(pos.openedAt), Y(pos.entryPremium), 3.5, 0, Math.PI * 2);
+      ctx.arc(X(fm.t), Y(fm.prem), 3.5, 0, Math.PI * 2);
       ctx.fillStyle = '#fff';
       ctx.fill();
       ctx.lineWidth = 1.5;
@@ -191,7 +197,7 @@ export default function PositionModal({ pos, series, theme, quote, onClose, onRe
         ctx.fillText(label, bx + padX, by + 7);
       }
     }
-  }, [pos, series, theme, cursor]);
+  }, [pos, series, theme, cursor, fills]);
 
   if (!pos) return null;
   const right = pos.type === 'call' ? 'C' : 'P';
@@ -201,14 +207,23 @@ export default function PositionModal({ pos, series, theme, quote, onClose, onRe
     ? (mark - pos.entryPremium) * 100 * pos.qty * (pos.side === 'long' ? 1 : -1)
     : null;
 
-  const cardStyle = anchor
-    ? {
-        borderColor: color,
-        position: 'fixed',
-        left: Math.max(8, anchor.x - 372),
-        top: Math.min(Math.max(8, anchor.y - 130), (typeof window !== 'undefined' ? window.innerHeight : 800) - 330)
-      }
-    : { borderColor: color };
+  const cardStyle = (() => {
+    if (!anchor) return { borderColor: color };
+    const CARD_W = 360, CARD_H = 322;
+    const vw = typeof window !== 'undefined' ? window.innerWidth : 1280;
+    const vh = typeof window !== 'undefined' ? window.innerHeight : 800;
+    // Sit the card right next to the cursor, on whichever side has room. The
+    // chart's position labels live on the LEFT, so the old fixed −372 offset flung
+    // the card to the far corner — too far to reach before the 0.5s grace timer
+    // dismissed it (the "card disappears" bug). Adjacent placement keeps the
+    // chip→card hop tiny so the grace + the card's hover-keepalive hold it open.
+    const onLeftHalf = anchor.x < vw / 2;
+    const left = onLeftHalf
+      ? Math.min(anchor.x + 14, vw - CARD_W - 8)
+      : Math.max(8, anchor.x - CARD_W - 14);
+    const top = Math.min(Math.max(8, anchor.y - 130), vh - CARD_H - 8);
+    return { borderColor: color, position: 'fixed', left, top };
+  })();
 
   const card = (
       <div
