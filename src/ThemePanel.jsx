@@ -1,7 +1,7 @@
 import React from 'react';
 import { THEMES, THEME_KEYS } from './themes.js';
 
-export default function ThemePanel({ open, current, onPick, onClose, neutralChrome = false, onToggleNeutral, axisChain = false, onToggleAxisChain = null, rungButton = false, onToggleRungButton = null, totoroOn = true, onToggleTotoro = null, showOvn = true, onToggleShowOvn = null, showPositions = true, onToggleShowPositions = null, showMarkers = true, onToggleShowMarkers = null }) {
+export default function ThemePanel({ open, current, onPick, onClose, neutralChrome = false, onToggleNeutral, axisChain = false, onToggleAxisChain = null, rungButton = false, onToggleRungButton = null, showOvn = true, onToggleShowOvn = null, showPositions = true, onToggleShowPositions = null, showMarkers = true, onToggleShowMarkers = null }) {
   if (!open) return null;
   return (
     <div className="theme-panel" onClick={(e) => e.stopPropagation()}>
@@ -93,20 +93,6 @@ export default function ThemePanel({ open, current, onPick, onClose, neutralChro
             aria-checked={showMarkers}
             onClick={onToggleShowMarkers}
             aria-label="Toggle trade markers"
-          >
-            <span className="toggle-knob" />
-          </button>
-        </div>
-      )}
-      {onToggleTotoro && (
-        <div className="theme-toggle-row" data-tip="Mark double-top (totoro) / triple-top patterns on the chart as they form">
-          <span>Totoro detector</span>
-          <button
-            className={`toggle-switch${totoroOn ? ' on' : ''}`}
-            role="switch"
-            aria-checked={totoroOn}
-            onClick={onToggleTotoro}
-            aria-label="Toggle the totoro pattern detector"
           >
             <span className="toggle-knob" />
           </button>

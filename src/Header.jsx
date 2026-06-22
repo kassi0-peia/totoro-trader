@@ -29,7 +29,7 @@ function formatExpiry(expiry, now) {
 // Amber for the DELAYED state (theme-independent: it's a warning, not a mood).
 const DELAYED_COLOR = '#e6a23c';
 
-export default function Header({ price, prevClose, theme, mood, earsUp, pulse, onToggleSettings, now, live, delayed = false, replayMode = false, source = 'SPX', expiry = null, account = null, accountType = null, totoroOn = true, onToggleTotoro = null }) {
+export default function Header({ price, prevClose, theme, mood, earsUp, pulse, onToggleSettings, now, live, delayed = false, replayMode = false, source = 'SPX', expiry = null, account = null, accountType = null }) {
   // Daily change vs the previous 4:00 PM SPX cash close.
   const haveDaily = Number.isFinite(prevClose) && prevClose > 0 && Number.isFinite(price);
   const change = haveDaily ? price - prevClose : NaN;
@@ -44,14 +44,9 @@ export default function Header({ price, prevClose, theme, mood, earsUp, pulse, o
   return (
     <header className="header">
       <div className="header-left">
-        <button
-          className="mascot-btn"
-          onClick={() => onToggleTotoro?.()}
-          data-tip={totoroOn ? 'Totoro detector ON — click to turn off' : 'Totoro detector off — click to wake it'}
-          aria-label="Toggle totoro pattern detector"
-        >
+        <div className="mascot-btn" aria-hidden="true">
           <Totoro mood={mood} earsUp={earsUp} pulse={pulse} theme={theme} />
-        </button>
+        </div>
         <div className="title-block">
           <div className="feed-status">
             <span
