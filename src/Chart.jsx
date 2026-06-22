@@ -687,11 +687,23 @@ export default function Chart({
     // trade markers (entry arrows, exit arrows, dotted connectors)
     markerHitsRef.current = [];
     const bucketMs = timeframe * 60 * 1000;
-    const firstCandleT = tfCandles[0]?.t ?? 0;
+    // tfCandles is sorted by time but NOT contiguous — session seams, weekends,
+    // holidays, and prepended deep history (differently aligned) all leave gaps.
+    // Map a timestamp to its REAL array index by binary search; the old arithmetic
+    // `(bucket − firstCandleT)/bucketMs` assumed a gapless minute grid and silently
+    // returned -1 across any gap, so trade markers never drew on the overnight tape.
     const tToIdx = (t) => {
+      if (t == null || !tfCandles.length) return -1;
       const bucket = Math.floor(t / bucketMs) * bucketMs;
-      const di = Math.round((bucket - firstCandleT) / bucketMs);
-      if (di < 0 || di >= tfCandles.length) return -1;
+      let lo = 0, hi = tfCandles.length - 1, di = -1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        const ct = tfCandles[mid].t;
+        if (ct === bucket) { di = mid; break; }
+        if (ct < bucket) lo = mid + 1; else hi = mid - 1;
+      }
+      if (di < 0) di = lo - 1;   // no exact bucket → snap to the candle just before
+      if (di < 0) return -1;     // trade predates the first loaded candle
       const slot = di - view.baseIdx;
       if (slot < 0 || slot >= view.slotCount) return -1;
       return slot;
@@ -744,17 +756,25 @@ export default function Chart({
         ctx.restore();
       }
 
-      if (entryXY) {
-        // Small chevron hugging the execution candle: under its low for calls
-        // (ʌ, bullish), over its high for puts (v, bearish).
-        const half = MARKER_HALF * 0.7;
-        const ec = view.slots[entryIdx];
-        const isCall = pos.type === 'call';
+      // A small chevron hugging EACH fill's candle (every added lot, not just the
+      // first) — under the low for calls (ʌ, bullish), over the high for puts (v).
+      // Falls back to the single openedAt when no per-fill blotter is attached
+      // (replay / positions recovered before this session's blotter).
+      const isCall = pos.type === 'call';
+      const half = MARKER_HALF * 0.7;
+      const fillTimes = (pos.fills && pos.fills.length)
+        ? pos.fills.map((f) => f.ts)
+        : (pos.openedAt != null ? [pos.openedAt] : []);
+      for (const ts of fillTimes) {
+        const fi = tToIdx(ts);
+        if (fi < 0) continue;
+        const fx = indexToX(fi);
+        const ec = view.slots[fi];
         const ay = ec
           ? (isCall ? priceToY(ec.low) + half + 5 : priceToY(ec.high) - half - 5)
-          : entryXY.y + (isCall ? half + 12 : -half - 12);
-        drawChevron(entryXY.x, ay, half, isCall ? 'up' : 'down', '#fff');
-        markerHitsRef.current.push({ x: entryXY.x, y: ay, half: half + 5, position: pos, kind: 'entry' });
+          : priceToY(pos.entryPrice ?? pos.strike) + (isCall ? half + 12 : -half - 12);
+        drawChevron(fx, ay, half, isCall ? 'up' : 'down', '#fff');
+        markerHitsRef.current.push({ x: fx, y: ay, half: half + 5, position: pos, kind: 'entry' });
       }
       if (exitXY) {
         const ay = exitXY.y - MARKER_HALF - 16;

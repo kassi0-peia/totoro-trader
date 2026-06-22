@@ -394,19 +394,26 @@ export default function App() {
     return out;
   }, [positions, feed.positions, feed.trades]);
 
+  // Every individual fill for a leg (each added lot is its own blotter row), so
+  // chart markers + the hover card can show them all, not just the blended entry.
+  const legFills = (p) => (replayActive ? null : (feed.trades || []).filter((t) =>
+    t.strike === p.strike && t.right === rightOf(p.type) &&
+    t.expiry === p.expiry && t.action === (p.side === 'long' ? 'BUY' : 'SELL')));
+
   const positionsLive = useMemo(() => {
     const source = replayActive ? replayPositions : mergedPositions;
-    return source.map((p) =>
-      p.status === 'closed' || p.status === 'rejected'
-        ? p
-        : {
-            ...p,
-            greeksLive: resolveGreeks(p.strike, p.type, replayActive ? null : p.expiry),
-            dayQuote: replayActive ? null : liveQuote(feed.greeksMap, p.strike, p.type)
-          }
-    );
+    return source.map((p) => {
+      const fills = legFills(p);
+      if (p.status === 'closed' || p.status === 'rejected') return fills ? { ...p, fills } : p;
+      return {
+        ...p,
+        fills,
+        greeksLive: resolveGreeks(p.strike, p.type, replayActive ? null : p.expiry),
+        dayQuote: replayActive ? null : liveQuote(feed.greeksMap, p.strike, p.type)
+      };
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mergedPositions, replayActive, replayPositions, dispPrice, feed.greeksMap, T]);
+  }, [mergedPositions, replayActive, replayPositions, dispPrice, feed.greeksMap, feed.trades, T]);
 
   // Strikes the snapshot poller keeps fresh (open positions only; replay
   // positions are imaginary and get no real quotes).
@@ -972,13 +979,7 @@ export default function App() {
         const hp = ip == null && hoverPos != null ? positionsLive.find((p) => p.id === hoverPos.id) ?? null : null;
         const shown = ip ?? hp;
         if (!shown) return null;
-        // Every individual fill for this leg (each added lot is its own fill), so
-        // the card can mark them all — not just the blended avg entry.
-        const fills = shown && !replayActive
-          ? (feed.trades || []).filter((t) =>
-              t.strike === shown.strike && t.right === rightOf(shown.type) &&
-              t.expiry === shown.expiry && t.action === (shown.side === 'long' ? 'BUY' : 'SELL'))
-          : null;
+        const fills = shown.fills ?? null; // blotter rows for this leg, attached in positionsLive
         return (
           <PositionModal
             pos={shown}
