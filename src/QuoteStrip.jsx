@@ -11,8 +11,12 @@ export default function QuoteStrip({ price, greeksMap, vix, theme, onReplay = nu
   const call = atm != null ? liveQuote(greeksMap, atm, 'call') : null;
   const put = atm != null ? liveQuote(greeksMap, atm, 'put') : null;
 
-  const vixLast = vix?.last ?? null;
-  const vixChg = vixLast != null && vix?.close != null ? vixLast - vix.close : null;
+  // VIX cash only computes during RTH, so `last` is null overnight. Fall back to
+  // the prior close so the level still shows (flat, muted) until it starts
+  // updating at the open — no day-change arrow until a live tick exists.
+  const vixLive = vix?.last ?? null;
+  const vixVal = vixLive ?? vix?.close ?? null;
+  const vixChg = vixLive != null && vix?.close != null ? vixLive - vix.close : null;
   // VIX up = risk-off ("red day"); down = "green day".
   const vixColor = vixChg == null ? theme.muted : vixChg > 0 ? theme.loss : vixChg < 0 ? theme.profit : theme.muted;
 
@@ -43,7 +47,7 @@ export default function QuoteStrip({ price, greeksMap, vix, theme, onReplay = nu
       {leg('P', put, theme.putLine)}
       <span className="qs-vix">
         <span className="qs-tag" style={{ color: theme.muted }}>VIX</span>
-        <b style={{ color: vixColor }}>{fmt(vixLast)}</b>
+        <b style={{ color: vixColor }}>{fmt(vixVal)}</b>
         {vixChg != null && (
           <span style={{ color: vixColor }}>
             {vixChg >= 0 ? '▲' : '▼'}{fmt(Math.abs(vixChg))}

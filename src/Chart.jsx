@@ -647,41 +647,43 @@ export default function Chart({
       const sign = pl >= 0 ? '+' : '−';
       const label = `${pos.strike}${pos.type === 'call' ? 'C' : 'P'} ×${pos.qty}  ${sign}$${Math.abs(pl).toFixed(0)}`;
       const lw = ctx.measureText(label).width + 12;
-      const xw = 18; // ✕ close box appended to the label (TradingView-style)
+      const xw = 18; // action-box width (✕ / +)
       const lx = 8;  // left-aligned (kisa's call: keep the right edge for prices)
+      // Layout left→right: [+ add][label chip][✕ close]. + sits on the OPPOSITE
+      // side of the label from ✕ so add and close are never adjacent.
+      const adBox = lx;            // + box left edge (leftmost)
+      const labelX = lx + xw;      // label chip left edge
+      const cxBox = labelX + lw;   // ✕ box left edge (right of the label)
+      // label chip
       ctx.fillStyle = color;
-      ctx.fillRect(lx, y - 9, lw, 18);
+      ctx.fillRect(labelX, y - 9, lw, 18);
       ctx.fillStyle = '#0a0c12';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
-      ctx.fillText(label, lx + 6, y);
-      // Two action boxes appended to the label (TradingView-style): ✕ closes the
-      // whole position, + adds one contract to the same leg. Both marketable limits.
-      const cxBox = lx + lw;       // ✕ box left edge
-      const adBox = lx + lw + xw;  // + box left edge (right after ✕)
-      // ✕ box: click closes the position at a marketable limit
-      ctx.fillStyle = '#0a0c12';
-      ctx.fillRect(cxBox, y - 9, xw, 18);
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 1;
-      ctx.strokeRect(cxBox + 0.5, y - 8.5, xw - 1, 17);
-      ctx.fillStyle = color;
-      ctx.textAlign = 'center';
-      ctx.fillText('✕', cxBox + xw / 2, y);
-      // + box: click adds one contract to the same leg (marketable limit)
+      ctx.fillText(label, labelX + 6, y);
+      // + box (left of label): adds one contract to the same leg (marketable limit)
       ctx.fillStyle = '#0a0c12';
       ctx.fillRect(adBox, y - 9, xw, 18);
       ctx.strokeStyle = color;
+      ctx.lineWidth = 1;
       ctx.strokeRect(adBox + 0.5, y - 8.5, xw - 1, 17);
       ctx.fillStyle = color;
+      ctx.textAlign = 'center';
       ctx.fillText('+', adBox + xw / 2, y);
+      // ✕ box (right of label): closes the position at a marketable limit
+      ctx.fillStyle = '#0a0c12';
+      ctx.fillRect(cxBox, y - 9, xw, 18);
+      ctx.strokeStyle = color;
+      ctx.strokeRect(cxBox + 0.5, y - 8.5, xw - 1, 17);
+      ctx.fillStyle = color;
+      ctx.fillText('✕', cxBox + xw / 2, y);
       ctx.textAlign = 'left';
-      // hit boxes pad the OUTER edges only (kinder to fingers); the two meet at
-      // their shared edge so a click never lands on both ✕ and +.
-      closeHitsRef.current.push({ x0: cxBox - 4, y0: y - 13, x1: cxBox + xw, y1: y + 13, position: pos });
-      addHitsRef.current.push({ x0: adBox, y0: y - 13, x1: adBox + xw + 4, y1: y + 13, position: pos });
-      // the label chip itself (not the ✕) → hover opens the premium popup
-      posLabelHitsRef.current.push({ x0: lx, y0: y - 11, x1: lx + lw, y1: y + 11, position: pos });
+      // hit boxes pad the OUTER edges only (kinder to fingers); + is leftmost, ✕
+      // rightmost, label between — so a click never lands on both.
+      addHitsRef.current.push({ x0: adBox - 4, y0: y - 13, x1: adBox + xw, y1: y + 13, position: pos });
+      closeHitsRef.current.push({ x0: cxBox, y0: y - 13, x1: cxBox + xw + 4, y1: y + 13, position: pos });
+      // the label chip itself (not the ✕/+) → hover opens the premium popup
+      posLabelHitsRef.current.push({ x0: labelX, y0: y - 11, x1: labelX + lw, y1: y + 11, position: pos });
     }
 
     // trade markers (entry arrows, exit arrows, dotted connectors)

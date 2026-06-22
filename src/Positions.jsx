@@ -114,9 +114,9 @@ export default function Positions({ positions, theme, onClose, onReverse, onCanc
                 <>
                   <span className="pos-cell"><span className="cell-label">MARK</span>${live.toFixed(2)}</span>
                   <span className="pos-cell">
-                    <span className="cell-label">H/L</span>
+                    <span className="cell-label">L/H</span>
                     <span style={{ whiteSpace: 'nowrap' }}>
-                      {p.dayQuote?.dayHigh != null ? p.dayQuote.dayHigh.toFixed(2) : '—'}<span style={{ color: theme.muted }}> – </span>{p.dayQuote?.dayLow != null ? p.dayQuote.dayLow.toFixed(2) : '—'}
+                      {p.dayQuote?.dayLow != null ? p.dayQuote.dayLow.toFixed(2) : '—'}<span style={{ color: theme.muted }}> – </span>{p.dayQuote?.dayHigh != null ? p.dayQuote.dayHigh.toFixed(2) : '—'}
                     </span>
                   </span>
                   <span className="pos-cell pos-pl" style={{ color: dollars >= 0 ? theme.profit : theme.loss }}>

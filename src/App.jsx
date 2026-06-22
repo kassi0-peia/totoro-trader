@@ -856,7 +856,7 @@ export default function App() {
             />
           )}
           <div className="chart-area">
-            <div className="chart-acct">
+            <div className={`chart-acct${axisChain ? ' chart-acct--axis' : ''}`}>
               <span className="acct-badge" style={{ color: '#0a0c12', background: acctColor }} data-tip={feed.account ? `IBKR account ${feed.account}` : 'no account connected'}>{acctLabel}</span>
               <span className="chart-acct-id" data-tip={feed.account ? `IBKR account ${feed.account}` : 'no account connected'}>{feed.account || (feed.live ? '…' : 'no acct')}</span>
               {!replayActive && (
@@ -989,9 +989,17 @@ export default function App() {
         const hp = ip == null && hoverPos != null ? positionsLive.find((p) => p.id === hoverPos.id) ?? null : null;
         const shown = ip ?? hp;
         if (!shown) return null;
+        // Every individual fill for this leg (each added lot is its own fill), so
+        // the card can mark them all — not just the blended avg entry.
+        const fills = shown && !replayActive
+          ? (feed.trades || []).filter((t) =>
+              t.strike === shown.strike && t.right === rightOf(shown.type) &&
+              t.expiry === shown.expiry && t.action === (shown.side === 'long' ? 'BUY' : 'SELL'))
+          : null;
         return (
           <PositionModal
             pos={shown}
+            fills={fills}
             theme={theme}
             anchor={ip ? null : { x: hoverPos.x, y: hoverPos.y }}
             series={feed.optHist[`${shown.strike}${rightOf(shown.type)}`]}

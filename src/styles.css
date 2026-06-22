@@ -1552,6 +1552,7 @@ button {
   top: 8px;
   right: 72px;            /* clear the price-axis label gutter (~64px) */
   z-index: 7;
+  transition: right 160ms;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1562,6 +1563,9 @@ button {
   color: var(--c-muted);
   font-variant-numeric: tabular-nums;
 }
+/* Axis premiums add a second number column in the right gutter; slide the
+   account cluster further left so PAPER/LIVE never sits on top of them. */
+.chart-acct--axis { right: 110px; }
 
 .quote-strip {
   display: flex;
