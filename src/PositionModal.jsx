@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { plDollars } from './pl.js';
 
 // Inspect panel for one position: IBKR-style contract info plus the option's
 // intraday premium graph (quote-mid line, including the overnight session).
@@ -203,9 +204,7 @@ export default function PositionModal({ pos, series, theme, quote, onClose, onRe
   const right = pos.type === 'call' ? 'C' : 'P';
   const color = pos.type === 'call' ? theme.callLine : theme.putLine;
   const mark = pos.greeksLive?.premium;
-  const pl = pos.entryPremium != null && mark != null
-    ? (mark - pos.entryPremium) * 100 * pos.qty * (pos.side === 'long' ? 1 : -1)
-    : null;
+  const pl = pos.entryPremium != null && mark != null ? plDollars(pos, mark) : null;
 
   const cardStyle = (() => {
     if (!anchor) return { borderColor: color };

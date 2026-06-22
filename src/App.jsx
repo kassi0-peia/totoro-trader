@@ -12,6 +12,7 @@ import QuoteStrip from './QuoteStrip.jsx';
 import { useIbkrFeed, liveGreeks, liveQuote } from './feed.js';
 import { greeks as bsGreeks, nearestOtmStrike } from './options.js';
 import { THEMES } from './themes.js';
+import { plDollars } from './pl.js';
 
 const IVOL = 0.18;
 
@@ -184,8 +185,7 @@ export default function App() {
         const px = priceRef.current;
         setPositions((prev) => prev.map((p) => {
           if (p.openRef === base && p.status === 'open') {
-            const sign = p.side === 'long' ? 1 : -1;
-            const dollars = (msg.avgFillPrice - (p.entryPremium ?? 0)) * 100 * p.qty * sign;
+            const dollars = plDollars(p, msg.avgFillPrice, p.entryPremium ?? 0);
             return { ...p, status: 'closed', exitPremium: msg.avgFillPrice, exitPrice: px, closedPL: dollars, closedAt: Date.now() };
           }
           return p;
@@ -213,8 +213,7 @@ export default function App() {
         // 'closing' = active close in flight; 'open' with a closeRef = a resting
         // attached exit (TP/SL) that just filled.
         if (p.closeRef === msg.clientRef && (p.status === 'closing' || p.status === 'open')) {
-          const sign = p.side === 'long' ? 1 : -1;
-          const dollars = (msg.avgFillPrice - (p.entryPremium ?? 0)) * 100 * p.qty * sign;
+          const dollars = plDollars(p, msg.avgFillPrice, p.entryPremium ?? 0);
           return { ...p, status: 'closed', exitPremium: msg.avgFillPrice, exitPrice: px, closedPL: dollars, closedAt: Date.now() };
         }
         return p;
@@ -464,8 +463,7 @@ export default function App() {
     .filter((p) => p.status === 'open' && p.entryPremium != null)
     .reduce((s, p) => {
       const live = p.greeksLive?.premium ?? p.entryPremium;
-      const sign = p.side === 'long' ? 1 : -1;
-      return s + (live - p.entryPremium) * 100 * p.qty * sign;
+      return s + plDollars(p, live);
     }, 0);
 
   const mood = openPL > 200 ? 'happy' : openPL < -200 ? 'sad' : 'calm';
