@@ -2,6 +2,7 @@ import React, { useEffect, useLayoutEffect, useRef, useState, useCallback, useMe
 import { greeks, snapStrike } from './options.js';
 import { aggregateCandles } from './candles.js';
 import { liveQuote } from './feed.js';
+import { plDollars, plSign } from './pl.js';
 
 const RIGHT_AXIS = 64;
 const BOTTOM_AXIS = 22;
@@ -629,9 +630,7 @@ export default function Chart({
       const y = priceToY(pos.strike);
       // Line + label colored by the position's live P/L, not call/put.
       const live = pos.greeksLive?.premium ?? pos.entryPremium;
-      const pl = pos.entryPremium != null
-        ? (live - pos.entryPremium) * 100 * pos.qty * (pos.side === 'long' ? 1 : -1)
-        : 0;
+      const pl = pos.entryPremium != null ? plDollars(pos, live) : 0;
       const color = pl >= 0 ? theme.profit : theme.loss;
       ctx.save();
       ctx.setLineDash([6, 5]);
@@ -1209,9 +1208,8 @@ export default function Chart({
         const filled = p.entryPremium != null; // false while the open order is still working
         const live = p.greeksLive?.premium ?? p.entryPremium ?? 0;
         const exitPrem = p.exitPremium ?? live;
-        const sign = p.side === 'long' ? 1 : -1;
-        const pl = filled ? (exitPrem - p.entryPremium) * 100 * p.qty * sign : 0;
-        const pct = filled && p.entryPremium ? ((exitPrem - p.entryPremium) / p.entryPremium) * 100 * sign : 0;
+        const pl = filled ? plDollars(p, exitPrem) : 0;
+        const pct = filled && p.entryPremium ? ((exitPrem - p.entryPremium) / p.entryPremium) * 100 * plSign(p) : 0;
         const kind = isClosed ? 'CLOSED' : p.status === 'open' ? 'OPEN' : (p.status || '').toUpperCase();
         const c = p.type === 'call' ? theme.up : theme.down;
         return (

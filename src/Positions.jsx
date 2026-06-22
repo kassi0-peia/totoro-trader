@@ -1,11 +1,11 @@
 import React from 'react';
+import { plDollars, plSign } from './pl.js';
 
 function plOf(pos) {
   const live = pos.greeksLive?.premium ?? pos.entryPremium ?? 0;
   const entry = pos.entryPremium ?? 0;
-  const sign = pos.side === 'long' ? 1 : -1;
-  const dollars = (live - entry) * 100 * pos.qty * sign;
-  const pct = entry ? ((live - entry) / entry) * 100 * sign : 0;
+  const dollars = plDollars(pos, live, entry);
+  const pct = entry ? ((live - entry) / entry) * 100 * plSign(pos) : 0;
   return { live, dollars, pct };
 }
 
