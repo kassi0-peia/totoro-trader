@@ -10,8 +10,9 @@ export default function PositionModal({ pos, series, theme, quote, onClose, onRe
   const [tpStr, setTpStr] = useState('');
   const [slStr, setSlStr] = useState('');
   const [cursor, setCursor] = useState(null); // {x,y} over the premium graph
+  const [view, setView] = useState(null);     // {lo,hi} times for the scroll-zoom window; null = full
 
-  useEffect(() => { setTpStr(''); setSlStr(''); }, [pos?.id]);
+  useEffect(() => { setTpStr(''); setSlStr(''); setView(null); }, [pos?.id]);
 
   // (Re)request the premium history while open — server caches for 60 s.
   useEffect(() => {
@@ -42,15 +43,20 @@ export default function PositionModal({ pos, series, theme, quote, onClose, onRe
       return;
     }
 
-    const vals = candles.map((c) => c.close).filter((v) => v != null);
+    const t0 = candles[0].t;
+    const t1 = candles[candles.length - 1].t;
+    const vLo = view ? Math.max(t0, view.lo) : t0;
+    const vHi = view ? Math.min(t1, view.hi) : t1;
+    // Price axis auto-scales to the VISIBLE slice, so zooming into a flat stretch
+    // still shows its detail.
+    const inView = candles.filter((c) => c.close != null && c.t >= vLo && c.t <= vHi);
+    const vals = (inView.length ? inView : candles).map((c) => c.close).filter((v) => v != null);
     let lo = Math.min(...vals);
     let hi = Math.max(...vals);
     if (pos.entryPremium != null) { lo = Math.min(lo, pos.entryPremium); hi = Math.max(hi, pos.entryPremium); }
     const pad = (hi - lo) * 0.1 || 0.05;
     hi += pad; lo = Math.max(0, lo - pad);
-    const t0 = candles[0].t;
-    const t1 = candles[candles.length - 1].t;
-    const X = (t) => ((t - t0) / Math.max(1, t1 - t0)) * (w - 46) + 4;
+    const X = (t) => ((t - vLo) / Math.max(1, vHi - vLo)) * (w - 46) + 4;
     const Y = (v) => h - 16 - ((v - lo) / Math.max(1e-6, hi - lo)) * (h - 28);
 
     // price axis: faint gridlines + premium labels in the right gutter
@@ -140,9 +146,9 @@ export default function PositionModal({ pos, series, theme, quote, onClose, onRe
     // time extents
     ctx.fillStyle = theme.muted;
     ctx.textAlign = 'left';
-    ctx.fillText(new Date(t0).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }), 4, h - 5);
+    ctx.fillText(new Date(vLo).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }), 4, h - 5);
     ctx.textAlign = 'right';
-    ctx.fillText(new Date(t1).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }), w - 46, h - 5);
+    ctx.fillText(new Date(vHi).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }), w - 46, h - 5);
 
     // hover crosshair: snap to the nearest candle, read off its premium + time
     if (cursor && cursor.x >= 4 && cursor.x <= w - 42) {
@@ -198,7 +204,37 @@ export default function PositionModal({ pos, series, theme, quote, onClose, onRe
         ctx.fillText(label, bx + padX, by + 7);
       }
     }
-  }, [pos, series, theme, cursor, fills]);
+  }, [pos, series, theme, cursor, fills, view]);
+
+  // Scroll-wheel time zoom on the premium graph: minute detail ↔ whole-session
+  // overview, anchored at the cursor. Uses React's onWheel — the same event path
+  // the crosshair's onMouseMove already proves reaches this canvas. Resets to the
+  // full range when the position changes.
+  const handleWheel = (e) => {
+    const cs = series?.candles || [];
+    const canvas = canvasRef.current;
+    if (cs.length < 2 || !canvas) return;
+    const plotW = canvas.clientWidth - 46;
+    const t0 = cs[0].t, t1 = cs[cs.length - 1].t;
+    const full = t1 - t0;
+    const minSpan = Math.min(full, 5 * 60_000); // never tighter than ~5 min
+    const offX = e.nativeEvent.offsetX;
+    const dir = e.deltaY;
+    setView((prev) => {
+      const lo = prev ? prev.lo : t0;
+      const hi = prev ? prev.hi : t1;
+      const frac = Math.min(1, Math.max(0, (offX - 4) / plotW));
+      const tAt = lo + frac * (hi - lo);
+      let span = (hi - lo) * (dir > 0 ? 1.2 : 1 / 1.2);
+      span = Math.max(minSpan, Math.min(full, span));
+      if (span >= full) return null; // fully zoomed out → whole session
+      let nLo = tAt - frac * span;
+      let nHi = nLo + span;
+      if (nLo < t0) { nLo = t0; nHi = t0 + span; }
+      if (nHi > t1) { nHi = t1; nLo = t1 - span; }
+      return { lo: nLo, hi: nHi };
+    });
+  };
 
   if (!pos) return null;
   const right = pos.type === 'call' ? 'C' : 'P';
@@ -243,6 +279,7 @@ export default function PositionModal({ pos, series, theme, quote, onClose, onRe
           className="pos-inspect-graph"
           onMouseMove={(e) => setCursor({ x: e.nativeEvent.offsetX, y: e.nativeEvent.offsetY })}
           onMouseLeave={() => setCursor(null)}
+          onWheel={handleWheel}
         />
 
         <div className="greek-grid">
