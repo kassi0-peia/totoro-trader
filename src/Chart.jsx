@@ -65,7 +65,7 @@ const MAX_VISIBLE = 240;
 const zoomInStep = (v) => Math.round(v / 1.3);
 const DEFAULT_VISIBLE = zoomInStep(zoomInStep(MAX_VISIBLE));
 
-const MARKER_HALF = 5;
+const MARKER_HALF = 4;
 
 export default function Chart({
   candles,
@@ -709,26 +709,29 @@ export default function Chart({
       return slot;
     };
 
-    // Outlined chevron (ʌ / v) — lighter on the eye than a filled triangle.
+    // Tapered chevron (ʌ / v): a filled shape — full thickness at the apex,
+    // narrowing to fine points at the two tips. (A plain stroke is uniform-width
+    // and can't taper, so we fill a 4-point kite instead.)
     const drawChevron = (cx, cy, half, dir, color) => {
-      ctx.save();
-      ctx.globalAlpha = 0.85;
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 1.8;
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
       const v = half * 0.7;
+      const w = Math.max(1, half * 0.42); // apex half-thickness; arms taper to 0 at the tips
+      ctx.save();
+      ctx.globalAlpha = 0.9;
+      ctx.fillStyle = color;
       ctx.beginPath();
       if (dir === 'up') {
-        ctx.moveTo(cx - half, cy + v);
-        ctx.lineTo(cx, cy - v);
-        ctx.lineTo(cx + half, cy + v);
+        ctx.moveTo(cx - half, cy + v);   // left tip (point)
+        ctx.lineTo(cx, cy - v - w);      // apex, outer edge
+        ctx.lineTo(cx + half, cy + v);   // right tip (point)
+        ctx.lineTo(cx, cy - v + w);      // apex, inner edge
       } else {
-        ctx.moveTo(cx - half, cy - v);
-        ctx.lineTo(cx, cy + v);
-        ctx.lineTo(cx + half, cy - v);
+        ctx.moveTo(cx - half, cy - v);   // left tip (point)
+        ctx.lineTo(cx, cy + v + w);      // apex, outer edge
+        ctx.lineTo(cx + half, cy - v);   // right tip (point)
+        ctx.lineTo(cx, cy + v - w);      // apex, inner edge
       }
-      ctx.stroke();
+      ctx.closePath();
+      ctx.fill();
       ctx.restore();
     };
 
@@ -1232,6 +1235,20 @@ export default function Chart({
         const pct = filled && p.entryPremium ? ((exitPrem - p.entryPremium) / p.entryPremium) * 100 * plSign(p) : 0;
         const kind = isClosed ? 'CLOSED' : p.status === 'open' ? 'OPEN' : (p.status || '').toUpperCase();
         const c = p.type === 'call' ? theme.up : theme.down;
+        // Underlying price at entry: recorded for in-session opens, but null for
+        // positions rebuilt from server truth (the blotter keeps only premiums).
+        // Fall back to the candle covering the fill minute (≈ the SPX-equiv then),
+        // shown with a ~ to flag it as the bar price, not the exact tick.
+        const entryAt = p.entryPrice != null ? p.entryPrice : (() => {
+          if (p.openedAt == null || !tfCandles.length) return null;
+          const bMs = timeframe * 60 * 1000;
+          const bucket = Math.floor(p.openedAt / bMs) * bMs;
+          let lo = 0, hi = tfCandles.length - 1, di = -1;
+          while (lo <= hi) { const mid = (lo + hi) >> 1; const ct = tfCandles[mid].t; if (ct === bucket) { di = mid; break; } if (ct < bucket) lo = mid + 1; else hi = mid - 1; }
+          if (di < 0) di = lo - 1;
+          return di >= 0 ? tfCandles[di].close : null;
+        })();
+        const entryApprox = p.entryPrice == null && entryAt != null;
         return (
           <div
             className="chart-tooltip marker-tooltip"
@@ -1247,7 +1264,7 @@ export default function Chart({
               </span>
               <span className="tt-kind">{kind}</span>
             </div>
-            <div className="tt-row"><span>Entry @</span><b>{(p.entryPrice ?? 0).toFixed(2)}</b></div>
+            <div className="tt-row"><span>Entry @</span><b>{entryAt != null ? `${entryApprox ? '~' : ''}${entryAt.toFixed(2)}` : '—'}</b></div>
             <div className="tt-row"><span>{isClosed ? 'Exit @' : 'Mark @'}</span><b>{(p.exitPrice ?? price).toFixed(2)}</b></div>
             <div className="tt-row"><span>Entry Prem</span><b>{filled ? `$${p.entryPremium.toFixed(2)}` : 'filling…'}</b></div>
             <div className="tt-row"><span>{isClosed ? 'Exit Prem' : 'Mark Prem'}</span><b>${exitPrem.toFixed(2)}</b></div>
