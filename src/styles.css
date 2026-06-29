@@ -8,6 +8,7 @@
   --c-accent: #9b7dd4;
   --c-profit: #7dd4a0;
   --c-loss: #e07d8a;
+  --c-warn: #e8b46a;                              /* amber — caution toasts (e.g. overnight MKT hold) */
 }
 
 * {
@@ -1644,6 +1645,7 @@ button {
 }
 .fill-ok { background: var(--c-profit); }
 .fill-err { background: var(--c-loss); }
+.fill-warn { background: var(--c-warn); }
 @keyframes fill-pop {
   from { opacity: 0; transform: translate(-50%, -6px); }
   to { opacity: 1; transform: translate(-50%, 0); }

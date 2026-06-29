@@ -1,0 +1,17 @@
+# Normalize line endings: store LF in the repo, auto on checkout. Prevents the
+# whole-file CRLF churn that happens when this repo is cloned/edited on Windows
+# (kisa's port) and then synced back to the Linux box.
+* text=auto eol=lf
+
+# Binary assets — never munge line endings or try to diff them.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.webm binary
+*.mp4  binary
+*.woff  binary
+*.woff2 binary
+*.ttf  binary
+*.otf  binary

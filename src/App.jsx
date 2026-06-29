@@ -553,7 +553,17 @@ export default function App() {
       status: 'pending', openRef: ref, entryPremium: null, estPremium: market ? ask : limit,
       entryPrice: feed.price, openedAt: Date.now(), greeksLive: g
     }]);
-    showToast(market ? `⚡ BUY 1 ${strike}${rightOf(type)} MKT` : `⚡ BUY 1 ${strike}${rightOf(type)} LMT ${limit.toFixed(2)}`, 'ok');
+    // Routing is unchanged — red MKT still routes a real MKT. But IBKR holds an
+    // option MKT placed outside RTH until the overnight session opens (~00:10 ET),
+    // so the position will sit pending for a while. Say so, so the long pending
+    // reads as expected and doesn't invite a cancel-and-refire snowball.
+    const heldOvernight = market && feed.source === 'ES';
+    showToast(
+      market
+        ? `⚡ BUY 1 ${strike}${rightOf(type)} MKT${heldOvernight ? ' — held until ~00:10 overnight' : ''}`
+        : `⚡ BUY 1 ${strike}${rightOf(type)} LMT ${limit.toFixed(2)}`,
+      heldOvernight ? 'warn' : 'ok'
+    );
     triggerPulse();
   };
 
@@ -675,15 +685,23 @@ export default function App() {
     const action = pos.side === 'long' ? 'SELL' : 'BUY';
     const base = { intent: 'close', action, strike: pos.strike, right: rightOf(pos.type), qty: pos.qty, expiry: pos.expiry };
     const oca = tp != null && sl != null ? `exit-${pos.strike}${rightOf(pos.type)}-${Date.now().toString(36)}` : null;
-    let ref = null;
-    if (tp != null) ref = feed.sendOrder({ ...base, limit: tp, ...(oca ? { ocaGroup: oca } : {}) });
-    if (sl != null) {
-      const sref = feed.sendOrder({ ...base, stop: sl, ...(oca ? { ocaGroup: oca } : {}) });
-      ref = ref ?? sref;
-    }
+    // Send each leg separately and track each ref. A truthy ref from ONE leg must
+    // not be read as "both attached" — if the socket drops between sends, the TP
+    // can fire while the SL silently fails, leaving you thinking you have a stop
+    // you don't. Report exactly what reached the bridge.
+    const tpRef = tp != null ? feed.sendOrder({ ...base, limit: tp, ...(oca ? { ocaGroup: oca } : {}) }) : null;
+    const slRef = sl != null ? feed.sendOrder({ ...base, stop: sl, ...(oca ? { ocaGroup: oca } : {}) }) : null;
+    const ref = tpRef ?? slRef;
     if (!ref) { showToast('Exit not sent — not connected', 'err'); return; }
+    // Partial attach: one leg wanted-and-sent, the other wanted-but-failed.
+    const tpMissed = tp != null && !tpRef;
+    const slMissed = sl != null && !slRef;
+    if (tpMissed || slMissed) {
+      showToast(`Exit half-attached — ${slMissed ? 'STOP did not send' : 'TP did not send'}, connection dropped`, 'err');
+    } else {
+      showToast(`Exit attached ${tp != null ? `TP $${tp.toFixed(2)} ` : ''}${sl != null ? `SL $${sl.toFixed(2)}` : ''}`, 'ok');
+    }
     setPositions((prev) => prev.map((p) => (p.id === pos.id ? { ...p, closeRef: ref } : p)));
-    showToast(`Exit attached ${tp != null ? `TP $${tp.toFixed(2)} ` : ''}${sl != null ? `SL $${sl.toFixed(2)}` : ''}`, 'ok');
     setInspectId(null);
   };
 
@@ -751,6 +769,15 @@ export default function App() {
     const closeRef = feed.sendOrder({ intent: 'close', action: pos.side === 'long' ? 'SELL' : 'BUY', strike: pos.strike, right: rightOf(pos.type), qty: pos.qty, expiry: pos.expiry, limit: closeLimit });
     if (!closeRef) { showToast('Reverse not sent — not connected', 'err'); return; }
     const openRef = feed.sendOrder({ intent: 'open', action: 'BUY', strike: newStrike, right: rightOf(oppositeType), qty: pos.qty, expiry: feed.expiry, limit: openLimit });
+    // The close leg already went out. If the socket dropped between the two sends
+    // the open leg never reached the bridge — mark the close as closing but DON'T
+    // append a phantom pending the bridge has no record of. Surface the half-send
+    // so the user knows the close fired and the reopen didn't.
+    if (!openRef) {
+      setPositions((prev) => markClosing(prev, pos, closeRef));
+      showToast('Reverse half-sent — close fired, reopen failed (not connected)', 'err');
+      return;
+    }
     const g = resolveGreeks(newStrike, oppositeType);
     setPositions((prev) => [
       ...markClosing(prev, pos, closeRef),

@@ -6,7 +6,12 @@
 //                            next trading day once past 16:15.
 
 export const RTH_OPEN_MIN = 9 * 60 + 30;   // 09:30 ET
-export const RTH_ROLL_MIN = 16 * 60 + 15;  // 16:15 ET
+export const RTH_ROLL_MIN = 16 * 60 + 15;  // 16:15 ET  (SPXW roll on a full day)
+// Early-close (half) days: SPX cash closes 13:00, SPXW settles 13:15. The roll
+// boundary is the 13:15 analog of 16:15 — source flips to ES and the SPXW expiry
+// rolls 15 min after the early cash close, exactly as on a full day.
+export const EARLY_CLOSE_MIN = 13 * 60;       // 13:00 ET — half-day cash close / close bar
+export const EARLY_ROLL_MIN  = 13 * 60 + 15;  // 13:15 ET — half-day SPXW roll
 
 export function etParts(date = new Date()) {
   const p = new Intl.DateTimeFormat('en-US', {
@@ -111,21 +116,68 @@ export function isTradingDay(y, mo, d) {
   return isWeekday(y, mo, d) && !isMarketHoliday(y, mo, d);
 }
 
+// ── Early-close (1:00 PM ET) half-day calendar ──────────────────────────────
+// Three recurring NYSE/Cboe half-days, each a 13:00 ET cash close (SPXW settles
+// 13:15). On these days SPX stops printing at 13:00, so RTH ends early and the
+// daily-change reference + basis backfill must target the 13:00 close bar, not
+// 16:00 (otherwise the % measures against a bar that never prints).
+//
+// The two "eve" half-days only land when the eve is an ordinary Mon–Thu trading
+// session. When the holiday shifts onto a weekend, the eve becomes either the
+// holiday itself or a full Friday, and the half-day disappears — e.g. 2026:
+// July 4 is Saturday, so July 3 is the *closure*, there is NO July half-day, and
+// the year's only half-days are Fri Nov 27 and Thu Dec 24. (Verified against the
+// 2026 NYSE Group calendar.) Day-after-Thanksgiving is the one Friday half-day
+// and is always observed.
+const earlyCloseCache = new Map();
+function earlyClosesFor(y) {
+  if (earlyCloseCache.has(y)) return earlyCloseCache.get(y);
+  const set = new Set();
+  // Holiday eve: a half-day only if it's a Mon–Thu trading session. A Friday eve
+  // (the holiday fell on a weekend) is a full day; a weekend/holiday eve is moot.
+  const eveHalfDay = (mo, d) => {
+    const w = dowOf(y, mo, d);
+    if (w >= 1 && w <= 4 && isTradingDay(y, mo, d)) set.add(ymd(y, mo, d));
+  };
+  eveHalfDay(7, 3);                                          // Independence Day eve
+  set.add(ymd(y, 11, nthWeekdayOfMonth(y, 11, 4, 4) + 1));  // day after Thanksgiving (Fri)
+  eveHalfDay(12, 24);                                        // Christmas Eve
+  earlyCloseCache.set(y, set);
+  return set;
+}
+
+export function isEarlyClose(y, mo, d) {
+  return earlyClosesFor(y).has(ymd(y, mo, d));
+}
+
+// Minute-of-day the SPXW expiry rolls / source flips to ES: 13:15 on a half-day,
+// else 16:15. Centralises the one place the two boundaries differ.
+export function sessionRollMin(y, mo, d) {
+  return isEarlyClose(y, mo, d) ? EARLY_ROLL_MIN : RTH_ROLL_MIN;
+}
+
 export function thisOrNextTradingDay(y, mo, d) {
   let c = { y, mo, d };
   while (!isTradingDay(c.y, c.mo, c.d)) c = addDays(c.y, c.mo, c.d, 1);
   return c;
 }
 
-// Epoch ms of 16:00 ET on the given ET calendar date. DST-proof: 16:00 ET is
-// 20:00 UTC under EDT and 21:00 UTC under EST — try both and verify.
-export function etCloseEpoch(y, mo, d) {
-  for (const utcHour of [20, 21]) {
-    const t = Date.UTC(y, mo - 1, d, utcHour, 0, 0);
+// Epoch ms of a given whole ET hour:00 on the date. DST-proof: ET is UTC-4 (EDT)
+// or UTC-5 (EST) — try both candidate UTC hours and verify the wall clock lands.
+export function etHourEpoch(y, mo, d, etHour) {
+  for (const off of [4, 5]) {
+    const t = Date.UTC(y, mo - 1, d, etHour + off, 0, 0);
     const e = etParts(new Date(t));
-    if (e.y === y && e.mo === mo && e.d === d && e.hh === 16 && e.mm === 0) return t;
+    if (e.y === y && e.mo === mo && e.d === d && e.hh === etHour && e.mm === 0) return t;
   }
   return null;
+}
+
+// Epoch ms of the day's cash close: 13:00 ET on a half-day, else 16:00 ET. This
+// is the bar the daily-change reference and the basis backfill heal against, so
+// on a half-day they target the 13:00 close that actually prints.
+export function etCloseEpoch(y, mo, d) {
+  return etHourEpoch(y, mo, d, isEarlyClose(y, mo, d) ? 13 : 16);
 }
 
 // Most recent trading-day 16:00 ET that has already passed. Skips weekends AND
@@ -147,10 +199,12 @@ export function computeSession(date = new Date()) {
   const e = etParts(date);
   const mins = e.hh * 60 + e.mm;
   const tradingToday = isTradingDay(e.y, e.mo, e.d);
-  const rth = tradingToday && mins >= RTH_OPEN_MIN && mins < RTH_ROLL_MIN;
+  // On a half-day RTH ends (and the SPXW expiry rolls) at 13:15, not 16:15.
+  const rollMin = sessionRollMin(e.y, e.mo, e.d);
+  const rth = tradingToday && mins >= RTH_OPEN_MIN && mins < rollMin;
 
   let base = { y: e.y, mo: e.mo, d: e.d };
-  if (mins >= RTH_ROLL_MIN) base = addDays(base.y, base.mo, base.d, 1);
+  if (mins >= rollMin) base = addDays(base.y, base.mo, base.d, 1);
   const exp = thisOrNextTradingDay(base.y, base.mo, base.d);
 
   return { rth, source: rth ? 'SPX' : 'ES', expiry: ymd(exp.y, exp.mo, exp.d) };
