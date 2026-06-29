@@ -646,7 +646,11 @@ export default function Chart({
       const label = `${pos.strike}${pos.type === 'call' ? 'C' : 'P'} ×${pos.qty}  ${sign}$${Math.abs(pl).toFixed(0)}`;
       const lw = ctx.measureText(label).width + 12;
       const xw = 18; // action-box width (✕ / +)
-      const lx = 8;  // left-aligned (kisa's call: keep the right edge for prices)
+      // Left-aligned (keep the right edge for prices), but start past the trades
+      // drawer's left-edge controls (.trades-hotzone is 22px wide, the ›pull 15px,
+      // both above the canvas) — otherwise the leftmost + box hides under them and
+      // a "+ add" click opens the drawer instead of adding to the position.
+      const lx = 30;
       // Layout left→right: [+ add][label chip][✕ close]. + sits on the OPPOSITE
       // side of the label from ✕ so add and close are never adjacent.
       const adBox = lx;            // + box left edge (leftmost)
@@ -780,9 +784,9 @@ export default function Chart({
         markerHitsRef.current.push({ x: fx, y: ay, half: half + 5, position: pos, kind: 'entry' });
       }
       if (exitXY) {
-        const ay = exitXY.y - MARKER_HALF - 16;
-        drawChevron(exitXY.x, ay, MARKER_HALF, 'down', color); // exit: colored v above
-        markerHitsRef.current.push({ x: exitXY.x, y: ay, half: MARKER_HALF + 3, position: pos, kind: 'exit' });
+        const ay = exitXY.y - half - 16;
+        drawChevron(exitXY.x, ay, half, 'down', color); // exit: colored v above, same size as entries
+        markerHitsRef.current.push({ x: exitXY.x, y: ay, half: half + 3, position: pos, kind: 'exit' });
       }
     }
   }, [candles, price, positions, theme, size, view, layout, priceToY, indexToX, timeframe, showMarkers, showVolume, expectedMove, axisChain, greeksMap, ivol, timeToExpiryYears, source, showPositions]);

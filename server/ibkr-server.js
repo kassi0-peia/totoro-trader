@@ -16,6 +16,7 @@ import https from 'node:https';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { IBApi, EventName } from '@stoqey/ib';
 import { WebSocketServer } from 'ws';
@@ -51,6 +52,11 @@ function tokenOk(provided) {
   const b = Buffer.from(AUTH_TOKEN);
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
+// Defense-in-depth: the connect-time gate already drops unauthorized sockets
+// before any message handler is registered, so this is unreachable today — but
+// re-checking inside every side-effecting handler means a future refactor of the
+// connect path can't silently open an order/cancel hole.
+function wsAuthed(ws) { return !AUTH_TOKEN || ws.authed === true; }
 
 // 1=live, 2=frozen, 3=delayed, 4=delayed-frozen.
 const MARKET_DATA_TYPE = parseInt(process.env.IBKR_MD_TYPE || '3', 10);
@@ -217,9 +223,7 @@ wss.on('connection', (ws, req) => {
     else if (msg.type === 'replayDay') handleReplayDayRequest(ws, msg);
     else if (msg.type === 'quote') handleQuoteRequest(ws, msg);
     else if (msg.type === 'cancel') handleCancel(ws, msg);
-    else if (msg.type === 'cancelAll') {
-      if (ib && connected) { try { ib.reqGlobalCancel(); console.log('[ibkr] global cancel requested'); } catch (e) { console.log('cancelAll failed', e.message); } }
-    }
+    else if (msg.type === 'cancelAll') handleCancelAll(ws, msg);
   });
 });
 
@@ -237,7 +241,15 @@ const MIME = {
   '.map': 'application/json; charset=utf-8'
 };
 
-const CAROOT = process.env.CAROOT || path.join(process.env.HOME || '', '.local/share/mkcert');
+// mkcert's CA root dir, per platform (Linux ~/.local/share/mkcert, macOS
+// ~/Library/Application Support/mkcert, Windows %LOCALAPPDATA%\mkcert). Only used
+// for the optional HTTPS/PWA path; CAROOT env overrides. (Was POSIX-only $HOME.)
+const CAROOT = process.env.CAROOT || (() => {
+  const home = os.homedir();
+  if (process.platform === 'win32') return path.join(process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'), 'mkcert');
+  if (process.platform === 'darwin') return path.join(home, 'Library', 'Application Support', 'mkcert');
+  return path.join(home, '.local', 'share', 'mkcert');
+})();
 
 function serveStatic(req, res) {
   const reqPathRaw = decodeURIComponent((req.url || '/').split('?')[0]);
@@ -1391,7 +1403,7 @@ function handleOrderRequest(ws, msg) {
 
   // Belt-and-braces: even if a future code path reaches here, a socket without a
   // valid token can never place an order while the gate is configured.
-  if (AUTH_TOKEN && !ws.authed) return reject('unauthorized');
+  if (!wsAuthed(ws)) return reject('unauthorized');
   if (!executionEnabled) {
     const why = 'no executable account connected';
     return reject(`execution disabled (${why})`);
@@ -1442,8 +1454,14 @@ function handleOrderRequest(ws, msg) {
     outsideRth: true
   };
   orders.set(orderId, { clientRef, action, strike, right, expiry, qty, orderType: order.orderType, limit: isLimit ? limit : isStop ? stop : null, status: 'submitted', filled: 0, avgFillPrice: 0 });
+  // Track every id we hand to IBKR so a mid-bracket throw can unwind cleanly.
+  // The parent goes out transmit:false when children exist; if a child placeOrder
+  // throws, the parent is sitting HELD in TWS and must be cancelled, not just
+  // dropped from the map — otherwise it squats an order-id slot forever.
+  const placedIds = [];
   try {
     ib.placeOrder(orderId, spxwContract(strike, right, expiry), order);
+    placedIds.push(orderId);
     if (wantTp || wantSl) {
       const contract = spxwContract(strike, right, expiry);
       if (wantTp) {
@@ -1453,6 +1471,7 @@ function handleOrderRequest(ws, msg) {
           action: 'SELL', orderType: 'LMT', lmtPrice: takeProfit, totalQuantity: qty,
           tif: 'DAY', parentId: orderId, transmit: !wantSl, account, outsideRth: true
         });
+        placedIds.push(tpId);
         console.log(`[ibkr] bracket TP SELL LMT@${takeProfit} (order ${tpId}, parent ${orderId})`);
       }
       if (wantSl) {
@@ -1462,6 +1481,7 @@ function handleOrderRequest(ws, msg) {
           action: 'SELL', orderType: 'STP', auxPrice: stopLoss, totalQuantity: qty,
           tif: 'DAY', parentId: orderId, transmit: true, account, outsideRth: true
         });
+        placedIds.push(slId);
         console.log(`[ibkr] bracket SL SELL STP@${stopLoss} (order ${slId}, parent ${orderId})`);
       }
     }
@@ -1469,7 +1489,16 @@ function handleOrderRequest(ws, msg) {
     broadcastOrders();
     send({ type: 'orderAck', clientRef, orderId, accepted: true });
   } catch (e) {
+    // Unwind anything that made it onto the wire (children first, then the held
+    // parent) so a partial bracket doesn't leave orphans in TWS.
+    for (let i = placedIds.length - 1; i >= 0; i--) {
+      try { ib.cancelOrder(placedIds[i], ''); } catch { /* never reached TWS */ }
+    }
     orders.delete(orderId);
+    // A child whose orders.set() ran but whose placeOrder() threw won't be in
+    // placedIds; sweep it by its derived clientRef so no submitted-ghost lingers.
+    orders.forEach((v, id) => { if (v.clientRef === `${clientRef}:tp` || v.clientRef === `${clientRef}:sl`) orders.delete(id); });
+    broadcastOrders();
     reject(`placeOrder failed: ${e.message}`);
   }
 }
@@ -1620,6 +1649,7 @@ function finishQuoteSnap(reqId) {
 
 function handleCancel(ws, msg) {
   const send = (m) => { if (ws.readyState === 1) ws.send(JSON.stringify(m)); };
+  if (!wsAuthed(ws)) return send({ type: 'cancelAck', ok: false, reason: 'unauthorized' });
   if (!ib || !connected) return send({ type: 'cancelAck', ok: false, reason: 'not connected' });
   let orderId = parseInt(msg.orderId, 10) || null;
   // Resolve by clientRef, then by contract — clientRefs don't survive a bridge
@@ -1644,6 +1674,24 @@ function handleCancel(ws, msg) {
   } catch (e) {
     send({ type: 'cancelAck', orderId, ok: false, reason: e.message });
   }
+}
+
+// Cancel only the orders THIS bridge tracks — never ib.reqGlobalCancel(), which
+// would also kill resting orders placed from TWS mobile/desktop or any other
+// client sharing the IBKR account. The UI doesn't currently send cancelAll, so
+// this is reachable only by a hand-crafted message; scoping keeps it honest if
+// the UI ever wires a "cancel all working orders" button.
+function handleCancelAll(ws, msg) {
+  const send = (m) => { if (ws.readyState === 1) ws.send(JSON.stringify(m)); };
+  if (!wsAuthed(ws)) return send({ type: 'cancelAllAck', ok: false, reason: 'unauthorized' });
+  if (!ib || !connected) return send({ type: 'cancelAllAck', ok: false, reason: 'not connected' });
+  let n = 0;
+  for (const [id, o] of orders) {
+    if (o.status === 'Filled' || o.status === 'Cancelled' || o.status === 'error') continue;
+    try { ib.cancelOrder(id, ''); n++; } catch (e) { console.log(`[ibkr] cancelAll: order ${id} failed`, e.message); }
+  }
+  console.log(`[ibkr] cancelAll: cancelled ${n} totoro-tracked order(s)`);
+  send({ type: 'cancelAllAck', ok: true, count: n });
 }
 
 function broadcast(msg) {
