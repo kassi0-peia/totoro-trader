@@ -183,6 +183,8 @@ function applyMessage(s, msg) {
       basis: msg.basis ?? null,
       basisFrozen: !!msg.basisFrozen,
       basisEstimated: !!msg.basisEstimated,
+      basisLive: msg.basisLive ?? null,
+      basisSource: msg.basisSource ?? null,
       vix: msg.vix || s.vix,
       account: msg.account ?? null,
       accountType: msg.accountType ?? null,
