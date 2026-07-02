@@ -81,6 +81,7 @@ export default function Chart({
   onAddPosition = null,
   onHoverPosition = null,
   onInspectPosition = null,
+  ghostFills = [],
   greeksMap,
   requestQuote = null,
   expectedMove = null,
@@ -125,6 +126,7 @@ export default function Chart({
   const momentumRef = useRef(null); // { vel, lastT, raf }
   const suppressClickRef = useRef(false);
   const markerHitsRef = useRef([]); // [{ x, y, half, position, kind }]
+  const ghostHitsRef = useRef([]);  // decision-replay ghost fills: [{ x, y, half, fill }]
   const closeHitsRef = useRef([]);  // ✕ boxes on position lines: [{ x0, y0, x1, y1, position }]
   const addHitsRef = useRef([]);    // + boxes on position lines: [{ x0, y0, x1, y1, position }]
   const posLabelHitsRef = useRef([]); // strike P/L label chips: [{ x0, y0, x1, y1, position }]
@@ -792,7 +794,40 @@ export default function Chart({
         markerHitsRef.current.push({ x: exitXY.x, y: ay, half: half + 3, position: pos, kind: 'exit' });
       }
     }
-  }, [candles, price, positions, theme, size, view, layout, priceToY, indexToX, timeframe, showMarkers, showVolume, expectedMove, axisChain, greeksMap, ivol, timeToExpiryYears, source, showPositions]);
+
+    // Decision-replay ghosts: the fills she ACTUALLY took on the replayed day,
+    // revealed by the replay clock (App gates which ones arrive). Accent-colored
+    // so they can't be confused with the white sim chevrons, offset further from
+    // the bar so both stay readable when she re-trades the same candle: BUY is a
+    // filled kite, SELL a hollow stroke.
+    ghostHitsRef.current = [];
+    const gHalf = Math.max(2.2, Math.min(9, (layout?.candleW ?? 8) * 0.5));
+    for (const f of ghostFills) {
+      const gi = tToIdx(f.ts);
+      if (gi < 0) continue;
+      const gx = indexToX(gi);
+      const gc = view.slots[gi];
+      if (!gc) continue;
+      const isCall = f.right === 'C';
+      const gy = isCall ? priceToY(gc.low) + gHalf + 16 : priceToY(gc.high) - gHalf - 16;
+      const dir = isCall ? 'up' : 'down';
+      if (f.action === 'BUY') {
+        drawChevron(gx, gy, gHalf, dir, theme.accent);
+      } else {
+        const v = gHalf * 0.7;
+        ctx.save();
+        ctx.strokeStyle = theme.accent;
+        ctx.globalAlpha = 0.9;
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        if (dir === 'up') { ctx.moveTo(gx - gHalf, gy + v); ctx.lineTo(gx, gy - v); ctx.lineTo(gx + gHalf, gy + v); }
+        else { ctx.moveTo(gx - gHalf, gy - v); ctx.lineTo(gx, gy + v); ctx.lineTo(gx + gHalf, gy - v); }
+        ctx.stroke();
+        ctx.restore();
+      }
+      ghostHitsRef.current.push({ x: gx, y: gy, half: gHalf + 5, fill: f });
+    }
+  }, [candles, price, positions, theme, size, view, layout, priceToY, indexToX, timeframe, showMarkers, showVolume, expectedMove, axisChain, greeksMap, ivol, timeToExpiryYears, source, showPositions, ghostFills]);
 
   // wheel zoom — attach non-passive so we can preventDefault page scroll
   useEffect(() => {
@@ -955,6 +990,14 @@ export default function Chart({
         const m = hits[i];
         if (Math.abs(x - m.x) <= m.half && Math.abs(y - m.y) <= m.half) {
           setMarkerHover({ x: m.x, y: m.y, position: m.position, kind: m.kind });
+          setHover(null);
+          return;
+        }
+      }
+      // decision-replay ghost fills
+      for (const g of ghostHitsRef.current) {
+        if (Math.abs(x - g.x) <= g.half && Math.abs(y - g.y) <= g.half) {
+          setMarkerHover({ x: g.x, y: g.y, ghost: g.fill, kind: 'ghost' });
           setHover(null);
           return;
         }
@@ -1156,6 +1199,10 @@ export default function Chart({
         return;
       }
     }
+    // Ghost fills are annotations — swallow the click so it can't trade through.
+    for (const g of ghostHitsRef.current) {
+      if (Math.abs(x - g.x) <= g.half && Math.abs(y - g.y) <= g.half) return;
+    }
     // strike P/L label chip → open the inspect/order window (TP·SL exit, close)
     for (const b of posLabelHitsRef.current) {
       if (x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1) {
@@ -1238,7 +1285,31 @@ export default function Chart({
         onTouchEnd={handleTouchEnd}
         onTouchCancel={handleTouchEnd}
       />
-      {markerHover && (() => {
+      {markerHover && markerHover.kind === 'ghost' && (() => {
+        const g = markerHover.ghost;
+        const c = g.right === 'C' ? theme.up : theme.down;
+        return (
+          <div
+            className="chart-tooltip marker-tooltip"
+            style={{
+              left: Math.min(markerHover.x + 14, size.w - 220),
+              top: Math.max(8, markerHover.y - 90),
+              borderColor: theme.accent
+            }}
+          >
+            <div className="tt-head">
+              <span className="tt-type" style={{ color: c }}>
+                {g.right === 'C' ? 'CALL' : 'PUT'} {g.strike}
+              </span>
+              <span className="tt-kind">👣 YOUR FILL</span>
+            </div>
+            <div className="tt-row"><span>Time</span><b>{new Date(g.ts).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour12: false })}</b></div>
+            <div className="tt-row"><span>Side</span><b style={{ color: g.action === 'BUY' ? theme.profit : theme.loss }}>{g.action} ×{g.qty}</b></div>
+            <div className="tt-row"><span>Premium</span><b>${Number(g.price).toFixed(2)}</b></div>
+          </div>
+        );
+      })()}
+      {markerHover && markerHover.kind !== 'ghost' && (() => {
         const p = markerHover.position;
         const isClosed = p.status === 'closed';
         const filled = p.entryPremium != null; // false while the open order is still working
