@@ -1056,7 +1056,7 @@ const basisFill = { target: null, spxBarClose: null, esBarClose: null };
 // arbitrates: agree within tolerance → keep the capture; disagree → adopt the
 // better witness. Once per day (barring restarts, which harmlessly re-audit).
 let basisAuditDate = null;
-let basisAuditDeferred = false; // one-shot: audit waited once for the options arbiter
+let basisAuditWaitUntil = null; // grace window while waiting for the options arbiter
 const BASIS_AUDIT_TOLERANCE = 2.0; // pts — normal capture-vs-bar jitter is well under 0.5
 
 function maybeBackfillBasis() {
@@ -1073,15 +1073,38 @@ function maybeBackfillBasis() {
   const contractStale = !!esExpiry && basisEsExpiry !== esExpiry;
   const current = basisCaptureDate === target.ymd && !basisEstimated && !contractStale;
   if (current && basisAuditDate === target.ymd) return; // captured AND bar-audited
-  // Audit mode with a live overnight chain expected: parity is the stronger
-  // arbiter than the 15:59 bars, but right after a restart the seed finishes
-  // before the chain's quotes qualify. Give it one 45 s beat to come alive
-  // before settling for the bar witness (a dead chain — pre-8:15 GTH, weekend —
-  // just means the retry lands on bars, which is the correct fallback).
-  if (current && !session.rth && !basisLiveFresh() && !basisAuditDeferred) {
-    basisAuditDeferred = true;
-    setTimeout(maybeBackfillBasis, 45_000);
+  // Audit mode, strongest witness first: with a fresh options-implied basis in
+  // hand, arbitrate against parity directly — no bar fetch at all (HMDS goes
+  // quiet overnight and a silently dead request used to strand the audit).
+  if (current && !session.rth && basisLiveFresh()) {
+    basisAuditDate = target.ymd;
+    if (Math.abs(basisLive - basis) <= BASIS_AUDIT_TOLERANCE) {
+      console.log(`[ibkr] 4:00 basis audit ok: capture ${basis.toFixed(2)} vs options parity ${basisLive.toFixed(2)} — keeping the capture`);
+      return;
+    }
+    console.log(`[ibkr] 4:00 basis audit OVERRIDE: capture ${basis.toFixed(2)} vs options parity ${basisLive.toFixed(2)} (Δ ${(basis - basisLive).toFixed(2)}) — the live grab likely froze a lagging print; adopting the options value`);
+    basis = basisLive;
+    basisFrozen = true;
+    basisEstimated = false;
+    basisCaptureDate = target.ymd;
+    if (esExpiry) basisEsExpiry = esExpiry;
+    saveBasis();
+    broadcast(snapshotMsg());
     return;
+  }
+  // No qualifying chain yet: hold a 45 s grace WINDOW (not a one-shot flag —
+  // both the SPX and ES seed completions call in here seconds apart, and a flag
+  // lets the second caller barge through to the bar witness while the chain is
+  // still warming). A dead chain — pre-8:15 GTH, weekend — just means the timed
+  // retry lands on the 15:59 bars, which is the correct fallback.
+  if (current && !session.rth) {
+    if (basisAuditWaitUntil == null) {
+      basisAuditWaitUntil = Date.now() + 45_000;
+      setTimeout(maybeBackfillBasis, 46_000);
+      return;
+    }
+    if (Date.now() < basisAuditWaitUntil) return; // inside the grace window — the timer retries
+    // window expired with no qualifying chain → fall through to the bar witness
   }
   if (contractStale) {
     basisEstimated = true; // honest header until the re-derivation below lands
