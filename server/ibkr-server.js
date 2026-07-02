@@ -1032,6 +1032,17 @@ let basisFillInFlight = false;
 let basisFillTimer = null;
 const basisFill = { target: null, spxBarClose: null, esBarClose: null };
 
+// Same-day audit of the live 16:00 capture. The capture is one tick-pair from
+// the most violent minute of the day; on a fast close the SPX print lags the
+// market and the frozen basis lands points wrong (24 pts on 2026-06-26). The
+// old guard below returned early whenever a same-day capture existed — so a bad
+// grab stamped the day and shielded itself from the corrective bar backfill.
+// Now the first backfill pass of the day runs even with a capture in hand and
+// arbitrates: agree within tolerance → keep the capture; disagree → adopt the
+// better witness. Once per day (barring restarts, which harmlessly re-audit).
+let basisAuditDate = null;
+const BASIS_AUDIT_TOLERANCE = 2.0; // pts — normal capture-vs-bar jitter is well under 0.5
+
 function maybeBackfillBasis() {
   if (basisFillInFlight || !ib || !connected) return;
   const target = lastCloseEt();
@@ -1044,7 +1055,8 @@ function maybeBackfillBasis() {
   // cache, unknown contract) also re-derives, to be safe. Guard on esExpiry being
   // resolved so we never invalidate before the front month is known.
   const contractStale = !!esExpiry && basisEsExpiry !== esExpiry;
-  if (basisCaptureDate === target.ymd && !basisEstimated && !contractStale) return; // current
+  const current = basisCaptureDate === target.ymd && !basisEstimated && !contractStale;
+  if (current && basisAuditDate === target.ymd) return; // captured AND bar-audited
   if (contractStale) {
     basisEstimated = true; // honest header until the re-derivation below lands
     console.log(`[ibkr] basis contract roll detected (was ${basisEsExpiry ?? 'unknown'}, now ${esExpiry}) — re-deriving against the current front month`);
@@ -1118,7 +1130,26 @@ function resetBasisFill() {
 }
 
 function applyBackfilledBasis(target, spxBarClose, esBarClose, how) {
-  basis = esBarClose - spxBarClose;
+  const barBasis = esBarClose - spxBarClose;
+  const haveCapture = basisCaptureDate === target.ymd && !basisEstimated &&
+    (!esExpiry || basisEsExpiry === esExpiry);
+  if (haveCapture) {
+    basisAuditDate = target.ymd;
+    // Arbiter: a fresh options-implied basis is the strongest witness (parity is
+    // arbitrage-enforced and lag-immune); the 15:59 close bars are next-best.
+    const optionsFresh = !session.rth && basisLiveFresh();
+    const arbiter = optionsFresh ? basisLive : barBasis;
+    const witness = optionsFresh ? 'options parity' : `15:59 bars (ES ${esBarClose.toFixed(2)} − SPX ${spxBarClose.toFixed(2)})`;
+    if (Math.abs(arbiter - basis) <= BASIS_AUDIT_TOLERANCE) {
+      console.log(`[ibkr] 4:00 basis audit ok: capture ${basis.toFixed(2)} vs ${witness} ${arbiter.toFixed(2)} — keeping the capture`);
+      return;
+    }
+    console.log(`[ibkr] 4:00 basis audit OVERRIDE: capture ${basis.toFixed(2)} vs ${witness} ${arbiter.toFixed(2)} (Δ ${(basis - arbiter).toFixed(2)}) — the live grab likely froze a lagging print; adopting the ${optionsFresh ? 'options' : 'bar'} value`);
+    basis = arbiter;
+  } else {
+    basis = barBasis;
+    basisAuditDate = target.ymd; // freshly bar-derived — no separate audit needed
+  }
   basisFrozen = true;
   basisEstimated = false;
   basisCaptureDate = target.ymd;
@@ -1299,6 +1330,11 @@ function evaluateSession() {
     console.log(`[ibkr] session: source=${next.source} expiry=${next.expiry} rth=${next.rth}`);
     broadcast(snapshotMsg());
   }
+
+  // Overnight just began (16:15/13:15 flip): both series hold today's close bars,
+  // so audit the 16:00 live capture against them now — otherwise a bad grab sits
+  // unchecked until the next reconnect's history seed.
+  if (prevSource === 'SPX' && next.source === 'ES') maybeBackfillBasis();
 }
 
 setInterval(evaluateSession, 5000);
