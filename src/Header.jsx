@@ -29,7 +29,7 @@ function formatExpiry(expiry, now) {
 // Amber for the DELAYED state (theme-independent: it's a warning, not a mood).
 const DELAYED_COLOR = '#e6a23c';
 
-export default function Header({ price, prevClose, theme, mood, earsUp, pulse, onToggleSettings, now, live, delayed = false, replayMode = false, source = 'SPX', expiry = null, account = null, accountType = null }) {
+export default function Header({ price, prevClose, theme, mood, earsUp, pulse, onToggleSettings, now, live, delayed = false, replayMode = false, source = 'SPX', expiry = null, account = null, accountType = null, basisSource = null }) {
   // Daily change vs the previous 4:00 PM SPX cash close.
   const haveDaily = Number.isFinite(prevClose) && prevClose > 0 && Number.isFinite(price);
   const change = haveDaily ? price - prevClose : NaN;
@@ -79,7 +79,21 @@ export default function Header({ price, prevClose, theme, mood, earsUp, pulse, o
           </div>
         </div>
         <div className="price-block">
-          <div className="symbol">{sourceLabel}</div>
+          <div className="symbol">
+            {sourceLabel}
+            {source === 'ES' && basisSource && (
+              <span
+                className={`basis-dot basis-${basisSource}`}
+                data-tip={
+                  basisSource === 'options'
+                    ? 'Basis: options-anchored — the SPX-equiv level is set live by SPXW put-call parity'
+                    : basisSource === 'frozen'
+                      ? 'Basis: frozen 4 PM capture — chain quotes not qualifying right now'
+                      : 'Basis: cold-start estimate — no 4 PM capture yet, treat the level as approximate'
+                }
+              />
+            )}
+          </div>
           <div className="price">{Number.isFinite(price) ? price.toFixed(2) : '—'}</div>
           <div className="change" style={{ color: changeColor }}>
             {haveDaily
