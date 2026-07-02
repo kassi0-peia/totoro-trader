@@ -6,7 +6,7 @@ function fmtTime(ts) {
 
 // Day blotter of IBKR fills (newest first). Server-recorded, so it survives
 // reloads and shows every fill regardless of which device placed it.
-export default function TradeHistory({ trades = [], theme }) {
+export default function TradeHistory({ trades = [], theme, onOpenJournal = null }) {
   const rows = [...trades].reverse();
   const realized = trades.reduce((s, t) => s + (t.action === 'SELL' ? 1 : -1) * t.price * 100 * t.qty, 0);
 
@@ -19,6 +19,11 @@ export default function TradeHistory({ trades = [], theme }) {
           <span className="th-net" style={{ color: realized >= 0 ? theme.profit : theme.loss }}>
             net cash {realized >= 0 ? '+' : '−'}${Math.abs(realized).toFixed(2)}
           </span>
+        )}
+        {onOpenJournal && (
+          <button className="kind-btn th-journal-btn" data-tip="Multi-day journal — equity curve + daily P/L" onClick={onOpenJournal}>
+            📓
+          </button>
         )}
       </div>
       <div className="th-list">

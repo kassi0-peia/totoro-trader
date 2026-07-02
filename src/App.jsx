@@ -13,6 +13,7 @@ import { useIbkrFeed, liveGreeks, liveQuote } from './feed.js';
 import { greeks as bsGreeks, nearestOtmStrike } from './options.js';
 import { THEMES } from './themes.js';
 import { plDollars } from './pl.js';
+import Journal from './Journal.jsx';
 
 // Blind-replay day picker: a random weekday 3–60 days back (LOCAL date parts —
 // the UTC fence eats days after 8 PM ET). Holidays aren't modeled here; they
@@ -71,6 +72,7 @@ export default function App() {
   // ── Replay mode (desktop practice): play back a past day's 1-min session ──
   // and trade it with simulated fills at Black–Scholes prices. No real orders.
   const [replayBarOpen, setReplayBarOpen] = useState(false);
+  const [journalOpen, setJournalOpen] = useState(false);
   const [replay, setReplay] = useState(null); // { date, candles, idx, speed, playing }
   const [replayPositions, setReplayPositions] = useState([]);
   const replayActive = replay != null && replay.candles.length > 0;
@@ -996,7 +998,11 @@ export default function App() {
                   className={`trades-drawer${tradesPeek ? '' : ' closing'}`}
                   style={{ borderColor: theme.accent }}
                 >
-                  <TradeHistory trades={feed.trades} theme={theme} />
+                  <TradeHistory
+                    trades={feed.trades}
+                    theme={theme}
+                    onOpenJournal={() => { feed.requestJournal(); setJournalOpen(true); }}
+                  />
                 </div>
               </div>
             )}
@@ -1073,6 +1079,10 @@ export default function App() {
           />
         );
       })()}
+
+      {journalOpen && (
+        <Journal days={feed.journal} theme={theme} onClose={() => setJournalOpen(false)} />
+      )}
 
       <footer className="footer">
         <span>{feed.live ? 'IBKR LIVE DATA' : 'OFFLINE — NO CONNECTION'}</span>

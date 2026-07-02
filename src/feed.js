@@ -51,6 +51,7 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent } = {}) {
       histSeries: {},        // per-timeframe historical candles (5m → 1W … 1D → 1Y)
       optHist: {},           // per-contract intraday premium series ("7500C" -> candles)
       replayDays: {},        // replay mode: "YYYYMMDD" -> full 1-min RTH session
+      journal: null,         // multi-day fill archive: "YYYYMMDD" -> [fill, ...] (null until requested)
       funds: null,           // { availableFunds, buyingPower, netLiquidation }
       spxClose: null         // previous trading day's 4:00 PM SPX cash close
     };
@@ -163,7 +164,15 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent } = {}) {
     return true;
   }, []);
 
-  return { ...snapshot, sendOrder, sendCancel, requestQuote, requestHistory, requestOptHistory, requestReplayDay };
+  // Multi-day journal: every recorded fill, keyed by trade date.
+  const requestJournal = useCallback(() => {
+    const ws = socketRef.current;
+    if (!ws || ws.readyState !== 1) return false;
+    ws.send(JSON.stringify({ type: 'journal' }));
+    return true;
+  }, []);
+
+  return { ...snapshot, sendOrder, sendCancel, requestQuote, requestHistory, requestOptHistory, requestReplayDay, requestJournal };
 }
 
 function applyMessage(s, msg) {
@@ -212,6 +221,10 @@ function applyMessage(s, msg) {
 
   if (msg.type === 'historyResult') {
     return { ...s, histSeries: { ...s.histSeries, [msg.tf]: msg.candles || [] } };
+  }
+
+  if (msg.type === 'journalResult') {
+    return { ...s, journal: msg.days || {} };
   }
 
   if (msg.type === 'funds') {

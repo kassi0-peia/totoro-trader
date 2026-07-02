@@ -8,6 +8,7 @@ server/certs/
 # runtime state
 server/.basis-cache.json
 server/.trades.json
+server/.journal.json
 
 # machine-local Claude Code settings
 .claude/settings.local.json

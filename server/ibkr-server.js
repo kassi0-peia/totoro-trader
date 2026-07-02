@@ -27,6 +27,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_DIR = path.resolve(__dirname, '..', 'dist');
 const BASIS_FILE = path.join(__dirname, '.basis-cache.json');
 const TRADES_FILE = path.join(__dirname, '.trades.json');
+const JOURNAL_FILE = path.join(__dirname, '.journal.json');
 
 // HTTPS is opt-in (TLS=1 or explicit TLS_CERT/TLS_KEY) so the default HTTP mode
 // keeps the dev /ws proxy and the Chrome-flag install path working unchanged.
@@ -151,6 +152,7 @@ const orders = new Map();        // orderId -> { clientRef, action, strike, righ
 
 let trades = [];                 // today's fills (blotter): { id, orderId, ts, action, strike, right, expiry, qty, price }
 let tradesDate = null;           // ET YYYYMMDD the trades array belongs to
+let journal = {};                // multi-day fill archive: 'YYYYMMDD' -> [trade, ...] (see the journal section)
 let tradeSeq = 0;                // monotonic blotter id, seeded above persisted ids so reused IBKR order ids never collide
 const seenExecIds = new Set();   // IBKR execId dedupe for the reqExecutions backfill
 
@@ -166,6 +168,7 @@ let mktDataTypeSent = false;
 let dataDelayed = false;         // true after 10197: a competing live session holds the market-data line
 
 loadBasis();
+loadJournal(); // before loadTrades — it may sweep a stale blotter into the journal
 loadTrades();
 
 // ── HTTP(S) + WebSocket server ────────────────────────────────────────────────
@@ -222,6 +225,7 @@ wss.on('connection', (ws, req) => {
     else if (msg.type === 'history') handleHistoryRequest(ws, msg);
     else if (msg.type === 'optHistory') handleOptHistoryRequest(ws, msg);
     else if (msg.type === 'replayDay') handleReplayDayRequest(ws, msg);
+    else if (msg.type === 'journal') { if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'journalResult', days: journalDays() })); }
     else if (msg.type === 'quote') handleQuoteRequest(ws, msg);
     else if (msg.type === 'cancel') handleCancel(ws, msg);
     else if (msg.type === 'cancelAll') handleCancelAll(ws, msg);
@@ -1052,6 +1056,7 @@ const basisFill = { target: null, spxBarClose: null, esBarClose: null };
 // arbitrates: agree within tolerance → keep the capture; disagree → adopt the
 // better witness. Once per day (barring restarts, which harmlessly re-audit).
 let basisAuditDate = null;
+let basisAuditDeferred = false; // one-shot: audit waited once for the options arbiter
 const BASIS_AUDIT_TOLERANCE = 2.0; // pts — normal capture-vs-bar jitter is well under 0.5
 
 function maybeBackfillBasis() {
@@ -1068,6 +1073,16 @@ function maybeBackfillBasis() {
   const contractStale = !!esExpiry && basisEsExpiry !== esExpiry;
   const current = basisCaptureDate === target.ymd && !basisEstimated && !contractStale;
   if (current && basisAuditDate === target.ymd) return; // captured AND bar-audited
+  // Audit mode with a live overnight chain expected: parity is the stronger
+  // arbiter than the 15:59 bars, but right after a restart the seed finishes
+  // before the chain's quotes qualify. Give it one 45 s beat to come alive
+  // before settling for the bar witness (a dead chain — pre-8:15 GTH, weekend —
+  // just means the retry lands on bars, which is the correct fallback).
+  if (current && !session.rth && !basisLiveFresh() && !basisAuditDeferred) {
+    basisAuditDeferred = true;
+    setTimeout(maybeBackfillBasis, 45_000);
+    return;
+  }
   if (contractStale) {
     basisEstimated = true; // honest header until the re-derivation below lands
     console.log(`[ibkr] basis contract roll detected (was ${basisEsExpiry ?? 'unknown'}, now ${esExpiry}) — re-deriving against the current front month`);
@@ -1974,6 +1989,12 @@ function recordExecution(contract, execution, live = false) {
 
 function saveTrades() {
   try { fs.writeFileSync(TRADES_FILE, JSON.stringify({ date: tradesDate, trades })); } catch {}
+  // Mirror the day into the journal as fills land, so history accrues live —
+  // before the journal existed, the daily roll simply discarded yesterday.
+  if (tradesDate && trades.length) {
+    journal[tradesDate] = trades;
+    saveJournal();
+  }
 }
 
 function loadTrades() {
@@ -1985,8 +2006,41 @@ function loadTrades() {
       tradeSeq = trades.reduce((m, t) => Math.max(m, t.id || 0), 0);
       for (const t of trades) if (t.execId) seenExecIds.add(t.execId);
       console.log(`[ibkr] loaded ${trades.length} trade(s) for ${tradesDate}`);
+    } else if (d.date && Array.isArray(d.trades) && d.trades.length && !journal[d.date]) {
+      // A previous day's blotter survived a bridge outage over the roll —
+      // sweep it into the journal instead of silently dropping it.
+      journal[d.date] = d.trades;
+      saveJournal();
+      console.log(`[ibkr] swept ${d.trades.length} trade(s) from ${d.date} into the journal`);
     }
   } catch {}
+}
+
+// ── Multi-day journal ────────────────────────────────────────────────────────
+// Every fill ever recorded, keyed by trade date (rolls 16:15 ET like the
+// blotter). The client's Journal drawer computes daily P/L and the equity
+// curve from these raw fills; the decision-replay feature reads them too.
+// (State `journal` is declared with the blotter vars up top — it's touched by
+// loadJournal() during startup, before this section is reached.)
+
+function loadJournal() {
+  try {
+    const d = JSON.parse(fs.readFileSync(JOURNAL_FILE, 'utf8'));
+    if (d && d.days && typeof d.days === 'object') {
+      journal = d.days;
+      console.log(`[ibkr] journal: ${Object.keys(journal).length} day(s) loaded`);
+    }
+  } catch {}
+}
+
+function saveJournal() {
+  try { fs.writeFileSync(JOURNAL_FILE, JSON.stringify({ days: journal })); } catch {}
+}
+
+function journalDays() {
+  const days = { ...journal };
+  if (tradesDate && trades.length) days[tradesDate] = trades; // today, live
+  return days;
 }
 
 // ── Basis persistence ──────────────────────────────────────────────────────
