@@ -21,6 +21,7 @@ import { fileURLToPath } from 'node:url';
 import { IBApi, EventName } from '@stoqey/ib';
 import { WebSocketServer } from 'ws';
 import { computeSession, etParts, ymd, lastCloseEt, etCloseEpoch } from './session.js';
+import { computeOptionsForward } from './options-forward.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_DIR = path.resolve(__dirname, '..', 'dist');
@@ -555,8 +556,8 @@ function wireHandlers(api) {
     } else if (s.kind === 'option') {
       const entry = chain.get(s.key);
       if (!entry || entry.expiry !== currentExpiry || value < 0) return; // -1 = no quote
-      if (field === 1 || field === 66) { entry.bid = value; broadcast(chainPayload(entry)); }
-      else if (field === 2 || field === 67) { entry.ask = value; broadcast(chainPayload(entry)); }
+      if (field === 1 || field === 66) { entry.bid = value; entry.tickTs = Date.now(); broadcast(chainPayload(entry)); }
+      else if (field === 2 || field === 67) { entry.ask = value; entry.tickTs = Date.now(); broadcast(chainPayload(entry)); }
       else if (field === 6 || field === 72) { entry.dayHigh = value; broadcast(chainPayload(entry)); }
       else if (field === 7 || field === 73) { entry.dayLow = value; broadcast(chainPayload(entry)); }
     } else if (s.kind === 'vix') {
@@ -888,7 +889,7 @@ function feedEsTick(price) {
   const candle = feedSeries(es, price);
   ensureOvernightBasis();
   if (session.source === 'ES') {
-    const b = basis ?? 0;
+    const b = effectiveBasis();
     broadcast({ type: 'tick', source: 'ES', price: esPrice - b, candle: shiftCandle(candle, b) });
   }
   maybeRecenterChain(displayPrice());
@@ -1129,22 +1130,83 @@ function applyBackfilledBasis(target, spxBarClose, esBarClose, how) {
   broadcast(snapshotMsg());
 }
 
-// Shift a raw ES bar into SPX-equivalent (minus the frozen basis) and tag it as
+// ── Options-implied live basis (overnight) ──────────────────────────────────
+// The frozen 4 PM basis is one tick-pair grabbed in the most violent minute of
+// the day — twice in five days (2026-06-26 recon, 2026-07-01 quarter turn) a
+// lagging close print froze it points wrong and the whole overnight chart read
+// off by that much. Overnight the SPXW chain trades live, and put-call parity
+// gives the true forward model-free — so keep a chain-anchored basis fresh and
+// prefer it; the frozen snapshot stays as the fallback, the daily-change
+// reference, and the cold-start seed. See spec-options-implied-basis.md.
+let basisLive = null;   // esPrice − optionsForward; never persisted
+let basisLiveTs = 0;    // Date.now() of the last good recompute
+const BASIS_LIVE_FRESH_MS = 30_000;    // trust window after a good recompute
+const BASIS_LIVE_THROTTLE_MS = 2_000;  // recompute cadence
+
+function basisLiveFresh() {
+  return basisLive != null && Date.now() - basisLiveTs < BASIS_LIVE_FRESH_MS;
+}
+
+// The number every overnight conversion uses: fresh options-implied when the
+// chain qualifies, else the frozen 4 PM capture (which coldStartBasis already
+// seeds when nothing better is known). RTH never reaches here for the price
+// (source is SPX cash), and the !rth guard keeps a lingering basisLive from
+// touching an RTH-built bar.
+function effectiveBasis() {
+  if (!session.rth && basisLiveFresh()) return basisLive;
+  return basis ?? 0;
+}
+
+function recomputeOptionsBasis() {
+  if (session.rth || esPrice == null || currentExpiry == null) return;
+  const frozenEstimate = esPrice - (basis ?? 0);
+  const f = computeOptionsForward(
+    [...chain.values()].filter((e) => e.expiry === currentExpiry),
+    // Anchor the strike band on the best current estimate so it survives a bad
+    // frozen basis; sanity-check against the frozen estimate so a corrupt or
+    // wrong-expiry chain can't drag the price somewhere wild.
+    { anchor: esPrice - effectiveBasis(), sanityAnchor: frozenEstimate }
+  );
+  if (!f) return; // fallback: effectiveBasis() degrades to frozen after the fresh window
+  if (!basisLiveFresh()) {
+    console.log(`[ibkr] options-implied basis live = ${(esPrice - f.forward).toFixed(2)} (fwd ${f.forward.toFixed(2)}, ${f.n} strikes; frozen ${basis == null ? 'none' : basis.toFixed(2)})`);
+  }
+  basisLive = esPrice - f.forward;
+  basisLiveTs = Date.now();
+}
+
+// Drive the recompute and re-level the chart the moment the applied basis flips
+// options↔frozen in either direction (a good chain appearing, or quotes going
+// quiet/stale) — otherwise old candles keep the previous level until the next
+// incidental snapshot broadcast.
+let basisLiveWasFresh = false;
+setInterval(() => {
+  recomputeOptionsBasis();
+  const fresh = !session.rth && basisLiveFresh();
+  if (fresh !== basisLiveWasFresh) {
+    basisLiveWasFresh = fresh;
+    if (!fresh) console.log('[ibkr] options-implied basis stale/unavailable — falling back to frozen');
+    broadcast(snapshotMsg());
+  }
+}, BASIS_LIVE_THROTTLE_MS);
+
+// Shift a raw ES bar into SPX-equivalent (minus the applied basis) and tag it as
 // the ES proxy. `est` carries whether the applied basis is itself an estimate
-// (cold start / mid-roll) so the chart can mark it as a proxy-on-an-estimate.
+// (cold start / mid-roll) so the chart can mark it as a proxy-on-an-estimate —
+// a fresh options-implied basis is chain-anchored, not an estimate.
 function shiftCandle(c, b) {
-  return { t: c.t, open: c.open - b, high: c.high - b, low: c.low - b, close: c.close - b, volume: c.volume, src: 'ES', est: basisEstimated };
+  return { t: c.t, open: c.open - b, high: c.high - b, low: c.low - b, close: c.close - b, volume: c.volume, src: 'ES', est: basisEstimated && !basisLiveFresh() };
 }
 
 // SPX-equivalent price for the active source.
 function displayPrice() {
   if (session.source === 'SPX') return spxPrice;
   if (esPrice == null) return null;
-  return esPrice - (basis ?? 0);
+  return esPrice - effectiveBasis();
 }
 
 function displayCandles() {
-  const b = basis ?? 0;
+  const b = effectiveBasis();
   // ALWAYS merge the overnight ES proxy (shifted to SPX-equiv) with the RTH SPX
   // cash bars, in every session — so the full continuous history stays visible
   // even overnight (previously overnight returned ES-only and the day's RTH bars
@@ -1738,6 +1800,12 @@ function snapshotMsg() {
     basis,
     basisFrozen,
     basisEstimated,
+    // Honesty about which basis the overnight conversion is applying right now:
+    // 'options' = live chain-anchored, 'frozen' = the 4 PM capture, 'estimated'
+    // = cold-start fallback. RTH shows SPX cash directly, so it reports 'frozen'
+    // vacuously there.
+    basisLive: basisLiveFresh() ? basisLive : null,
+    basisSource: !session.rth && basisLiveFresh() ? 'options' : basisEstimated ? 'estimated' : 'frozen',
     rth: session.rth,
     vix: { last: vixLast, close: vixClose },
     account,
