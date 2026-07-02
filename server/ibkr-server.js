@@ -612,9 +612,20 @@ function wireHandlers(api) {
       if (typeof time === 'string' && time.startsWith('finished')) {
         subs.delete(reqId);
         replayInFlight.delete(s.date);
-        replayCache.set(s.date, { candles: s.candles, ts: Date.now() });
-        broadcast({ type: 'replayDayResult', date: s.date, candles: s.candles });
-        console.log(`[ibkr] replay-day ${s.date} ready (${s.candles.length} bars)`);
+        // IBKR answers a request ending on a holiday/weekend with the PRIOR
+        // session's bars — keep only bars whose ET date is the requested day,
+        // so a no-session day honestly returns empty (client can say so or,
+        // in mystery mode, quietly re-roll) instead of a mislabeled tape.
+        const dayBars = s.candles.filter((c) => {
+          const e = etParts(new Date(c.t));
+          return ymd(e.y, e.mo, e.d) === s.date;
+        });
+        if (dayBars.length !== s.candles.length) {
+          console.log(`[ibkr] replay-day ${s.date}: trimmed ${s.candles.length - dayBars.length} bars from other sessions`);
+        }
+        replayCache.set(s.date, { candles: dayBars, ts: Date.now() });
+        broadcast({ type: 'replayDayResult', date: s.date, candles: dayBars });
+        console.log(`[ibkr] replay-day ${s.date} ready (${dayBars.length} bars)`);
         return;
       }
       const t = parseHistTime(time);

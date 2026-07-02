@@ -14,7 +14,7 @@ function localYmd(d) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-export default function ReplayBar({ theme, replay, loading, onLoad, onSet, onExit, onChangeDay }) {
+export default function ReplayBar({ theme, replay, loading, onLoad, onMystery, onSet, onExit, onChangeDay }) {
   const [dateStr, setDateStr] = useState(() => {
     const d = new Date(Date.now() - 24 * 3600 * 1000);
     while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() - 1);
@@ -41,6 +41,15 @@ export default function ReplayBar({ theme, replay, loading, onLoad, onSet, onExi
         >
           {loading ? 'LOADING…' : 'LOAD DAY'}
         </button>
+        <button
+          className="kind-btn"
+          style={{ color: theme.accent, borderColor: theme.accent }}
+          disabled={loading}
+          data-tip="Blind replay: a random past day, date hidden — no hindsight riding along. Revealed at the last bar (or click the ??? to peek)."
+          onClick={onMystery}
+        >
+          🎲 MYSTERY
+        </button>
         <span className="replay-hint">practice mode — simulated fills, no real orders</span>
         <button className="kind-btn replay-exit" onClick={onExit}>✕</button>
       </div>
@@ -49,16 +58,18 @@ export default function ReplayBar({ theme, replay, loading, onLoad, onSet, onExi
 
   const { candles, idx, playing, speed, leadIn } = replay;
   const cur = candles[idx];
+  // Blind (mystery) day: mask the date until the tape runs out or she peeks.
+  const revealed = !replay.blind || replay.revealed || idx >= candles.length - 1;
 
   return (
     <div className="replay-bar replay-active" style={{ borderColor: theme.accent }}>
       <button
         className="kind-btn replay-daybtn"
         style={{ color: theme.accent, borderColor: theme.accent }}
-        data-tip="Pick a different day"
-        onClick={onChangeDay}
+        data-tip={revealed ? 'Pick a different day' : 'Mystery day — click to reveal the date (ends the blind run)'}
+        onClick={revealed ? onChangeDay : () => onSet({ revealed: true })}
       >
-        ⏪ {replay.date.slice(0, 4)}-{replay.date.slice(4, 6)}-{replay.date.slice(6, 8)} ▾
+        ⏪ {revealed ? `${replay.date.slice(0, 4)}-${replay.date.slice(4, 6)}-${replay.date.slice(6, 8)}` : '????-??-??'} ▾
       </button>
       <button className="kind-btn" onClick={() => onSet({ idx: Math.max(0, idx - 1), playing: false })}>⏮</button>
       <button
