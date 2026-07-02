@@ -277,6 +277,22 @@ button {
   letter-spacing: 0.2em;
 }
 
+/* Overnight basis honesty light next to the ES/SPX label: which witness sets
+   the SPX-equiv level right now. Green = live options parity, amber = frozen
+   4 PM capture, red = cold-start estimate. */
+.basis-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  margin-left: 6px;
+  vertical-align: 1px;
+  cursor: help;
+}
+.basis-options   { background: #4caf7d; box-shadow: 0 0 5px #4caf7d88; }
+.basis-frozen    { background: #e8b46a; }
+.basis-estimated { background: #e06c6c; box-shadow: 0 0 5px #e06c6c88; }
+
 .price {
   font-size: 28px;
   font-weight: 600;

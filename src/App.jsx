@@ -808,6 +808,7 @@ export default function App() {
 
       <Header
         price={dispPrice}
+        basisSource={replayActive ? null : feed.basisSource}
         prevClose={replayActive ? null : feed.spxClose}
         theme={theme}
         mood={mood}
