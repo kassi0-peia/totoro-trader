@@ -14,6 +14,19 @@ import { greeks as bsGreeks, nearestOtmStrike } from './options.js';
 import { THEMES } from './themes.js';
 import { plDollars } from './pl.js';
 
+// Blind-replay day picker: a random weekday 3–60 days back (LOCAL date parts —
+// the UTC fence eats days after 8 PM ET). Holidays aren't modeled here; they
+// come back from the bridge with zero bars and the load effect re-rolls.
+function randomPastWeekday(exclude) {
+  for (let tries = 0; tries < 40; tries++) {
+    const d = new Date(Date.now() - (3 + Math.floor(Math.random() * 57)) * 86400000);
+    if (d.getDay() === 0 || d.getDay() === 6) continue;
+    const date = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+    if (!exclude?.has(date)) return date;
+  }
+  return null;
+}
+
 const IVOL = 0.18;
 
 function timeToExpiryYearsAt(now) {
@@ -53,6 +66,7 @@ export default function App() {
   const [hoverPos, setHoverPos] = useState(null);   // { id, x, y } — hover card over a position row
   const cardHoveredRef = useRef(false);             // mouse is over the floating hover card itself
   const cardHideRef = useRef(null);                 // pending 0.5s dismiss after leaving the card
+  const mysteryTriedRef = useRef(new Set());        // blind-replay dates already rolled (incl. empty/holiday)
 
   // ── Replay mode (desktop practice): play back a past day's 1-min session ──
   // and trade it with simulated fills at Black–Scholes prices. No real orders.
@@ -243,14 +257,27 @@ export default function App() {
   const dispPrice = replayActive ? replayPrice : feed.price;
 
   // Replay: adopt the day's bars when the bridge delivers them, starting at the
-  // very first bar of the session.
+  // very first bar of the session. A zero-bar day (holiday / missing data) exits
+  // cleanly — or, on a blind mystery day, quietly re-rolls another date.
   useEffect(() => {
     if (!replay || replay.candles.length > 0) return;
     const bars = feed.replayDays[replay.date];
-    if (bars && bars.length > 0) {
+    if (!bars) return; // still loading
+    if (bars.length > 0) {
       setReplay((r) => (r && r.date === replay.date ? { ...r, candles: bars, idx: 0, playing: false } : r));
+      return;
     }
-  }, [feed.replayDays, replay]);
+    mysteryTriedRef.current.add(replay.date);
+    if (replay.blind) {
+      const next = randomPastWeekday(mysteryTriedRef.current);
+      if (next && feed.requestReplayDay(next)) {
+        setReplay({ date: next, candles: [], idx: 0, speed: replay.speed, playing: false, blind: true });
+        return;
+      }
+    }
+    showToast(`No session data for ${replay.date} (holiday?)`, 'err');
+    setReplay(null);
+  }, [feed.replayDays, replay]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Replay: the playback clock (speed = bars per second). Pressing play from the
   // very first bar gets a 5s breather to get your bearings before the tape rolls;
@@ -867,6 +894,14 @@ export default function App() {
               onLoad={(date) => {
                 setReplayPositions([]);
                 setReplay({ date, candles: [], idx: 0, speed: 2, playing: false });
+                if (!feed.requestReplayDay(date)) showToast('Replay needs the bridge connection', 'err');
+              }}
+              onMystery={() => {
+                mysteryTriedRef.current = new Set();
+                const date = randomPastWeekday(mysteryTriedRef.current);
+                if (!date) return;
+                setReplayPositions([]);
+                setReplay({ date, candles: [], idx: 0, speed: 2, playing: false, blind: true });
                 if (!feed.requestReplayDay(date)) showToast('Replay needs the bridge connection', 'err');
               }}
               onSet={(patch) => setReplay((r) => (r ? { ...r, ...patch } : r))}
