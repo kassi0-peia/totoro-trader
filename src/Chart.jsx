@@ -768,7 +768,10 @@ export default function Chart({
       // Falls back to the single openedAt when no per-fill blotter is attached
       // (replay / positions recovered before this session's blotter).
       const isCall = pos.type === 'call';
-      const half = MARKER_HALF * 0.7;
+      // Scale with the candles: wide zoomed-in bars get a proportionate chevron,
+      // dense zoomed-out tape gets a fine one (clamped so it never vanishes or
+      // dwarfs the bar it hugs).
+      const half = Math.max(2.2, Math.min(9, (layout?.candleW ?? 8) * 0.5));
       const fillTimes = (pos.fills && pos.fills.length)
         ? pos.fills.map((f) => f.ts)
         : (pos.openedAt != null ? [pos.openedAt] : []);
@@ -1144,8 +1147,14 @@ export default function Chart({
         return;
       }
     }
+    // Fill chevron → pin that leg's card (same window as the strike P/L chip).
+    // The hit still swallows the click either way, so a marker press can never
+    // fall through and place a trade on the candle underneath.
     for (const m of markerHitsRef.current) {
-      if (Math.abs(x - m.x) <= m.half && Math.abs(y - m.y) <= m.half) return;
+      if (Math.abs(x - m.x) <= m.half && Math.abs(y - m.y) <= m.half) {
+        onInspectPosition?.(m.position);
+        return;
+      }
     }
     // strike P/L label chip → open the inspect/order window (TP·SL exit, close)
     for (const b of posLabelHitsRef.current) {
@@ -1281,6 +1290,7 @@ export default function Chart({
                 </b>
               </div>
             )}
+            <div className="tt-hint">click to open</div>
           </div>
         );
       })()}

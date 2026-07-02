@@ -774,6 +774,18 @@ button {
   color: var(--c-text);
 }
 
+/* Discoverability whisper at the foot of the marker tooltip — the chevron
+   itself is clickable (pins the position card). */
+.tt-hint {
+  margin-top: 4px;
+  padding-top: 3px;
+  border-top: 1px solid var(--c-border);
+  color: var(--c-muted);
+  font-size: 10px;
+  text-align: center;
+  letter-spacing: 0.04em;
+}
+
 /* ============ MODAL ============ */
 
 .modal-backdrop {
