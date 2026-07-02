@@ -802,6 +802,46 @@ button {
   letter-spacing: 0.04em;
 }
 
+/* ============ DECISION-REPLAY GHOST LOG ============ */
+
+/* Floating tape log of her real fills revealed so far during replay. */
+.ghost-log {
+  position: fixed;
+  right: 14px;
+  bottom: 96px;
+  z-index: 60;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  max-width: 240px;
+  opacity: 0.94;
+}
+
+.ghost-log-head {
+  color: var(--c-muted);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  margin-bottom: 4px;
+}
+
+.ghost-log-row {
+  display: flex;
+  gap: 8px;
+  padding: 1px 0;
+  color: var(--c-text);
+}
+
+.gl-time { color: var(--c-muted); }
+
+.ghost-log-foot {
+  color: var(--c-muted);
+  font-size: 10px;
+  margin-top: 4px;
+}
+
 /* ============ JOURNAL ============ */
 
 .journal-panel {
@@ -1218,7 +1258,7 @@ button {
 }
 
 @media (max-width: 720px) {
-  .replay-bar, .tf-replay, .qs-replay { display: none; } /* desktop-only by design */
+  .replay-bar, .tf-replay, .qs-replay, .ghost-log { display: none; } /* desktop-only by design */
 }
 
 /* The mascot doubles as the totoro-detector toggle. */

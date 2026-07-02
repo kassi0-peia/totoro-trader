@@ -281,6 +281,28 @@ export default function App() {
     setReplay(null);
   }, [feed.replayDays, replay]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Decision replay (ghost fills): the fills she ACTUALLY took on the replayed
+  // day, revealed only as the replay clock passes them — no future leakage.
+  // Disabled on blind mystery days (her own fills would date the tape).
+  const dayGhosts = useMemo(() => {
+    if (!replayActive || replay.blind || !feed.journal) return null;
+    const fills = feed.journal[replay.date];
+    if (!fills || fills.length === 0) return null;
+    const first = replay.candles[0].t;
+    const last = replay.candles[replay.candles.length - 1].t + 60000;
+    return {
+      inSession: fills.filter((f) => f.ts >= first && f.ts < last).sort((a, b) => a.ts - b.ts),
+      outside: fills.filter((f) => f.ts < first || f.ts >= last).length
+    };
+  }, [replayActive, replay?.blind, replay?.date, replay?.candles, feed.journal]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const ghostsOn = replayActive && replay.ghosts !== false;
+  const visibleGhosts = useMemo(() => {
+    if (!dayGhosts || !ghostsOn || replayNow == null) return [];
+    const cutoff = replayNow + 60000; // a fill inside the current bar counts as revealed
+    return dayGhosts.inSession.filter((f) => f.ts < cutoff);
+  }, [dayGhosts, ghostsOn, replayNow]);
+
   // Replay: the playback clock (speed = bars per second). Pressing play from the
   // very first bar gets a 5s breather to get your bearings before the tape rolls;
   // resuming mid-session starts immediately.
@@ -897,6 +919,7 @@ export default function App() {
                 setReplayPositions([]);
                 setReplay({ date, candles: [], idx: 0, speed: 2, playing: false });
                 if (!feed.requestReplayDay(date)) showToast('Replay needs the bridge connection', 'err');
+                feed.requestJournal(); // ghost fills for this day, if any were recorded
               }}
               onMystery={() => {
                 mysteryTriedRef.current = new Set();
@@ -909,6 +932,8 @@ export default function App() {
               onSet={(patch) => setReplay((r) => (r ? { ...r, ...patch } : r))}
               onChangeDay={() => { setReplay(null); setReplayPositions([]); setReplayBarOpen(true); }}
               onExit={() => { setReplay(null); setReplayPositions([]); setReplayBarOpen(false); }}
+              ghosts={dayGhosts ? { total: dayGhosts.inSession.length, outside: dayGhosts.outside, on: ghostsOn } : null}
+              onToggleGhosts={() => setReplay((r) => (r ? { ...r, ghosts: !(r.ghosts !== false) } : r))}
             />
           )}
           <div className="chart-area">
@@ -953,6 +978,7 @@ export default function App() {
                 }
               }}
               onInspectPosition={(p) => { setHoverPos(null); setInspectId(p.id); }}
+              ghostFills={visibleGhosts}
               greeksMap={replayActive ? EMPTY_GREEKS : feed.greeksMap}
               requestQuote={!replayActive && feed.live ? feed.requestQuote : null}
               expectedMove={expectedMove}
@@ -1082,6 +1108,21 @@ export default function App() {
 
       {journalOpen && (
         <Journal days={feed.journal} theme={theme} onClose={() => setJournalOpen(false)} />
+      )}
+
+      {ghostsOn && dayGhosts && visibleGhosts.length > 0 && (
+        <div className="ghost-log">
+          <div className="ghost-log-head">👣 MY FILLS · {visibleGhosts.length}/{dayGhosts.inSession.length}</div>
+          {[...visibleGhosts].slice(-6).reverse().map((f) => (
+            <div className="ghost-log-row" key={f.id}>
+              <span className="gl-time">{new Date(f.ts).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour12: false, hour: '2-digit', minute: '2-digit' })}</span>
+              <span style={{ color: f.action === 'BUY' ? theme.profit : theme.loss }}>{f.action}</span>
+              <span>{f.strike}{f.right} ×{f.qty}</span>
+              <span>@ ${Number(f.price).toFixed(2)}</span>
+            </div>
+          ))}
+          {dayGhosts.outside > 0 && <div className="ghost-log-foot">+{dayGhosts.outside} outside session</div>}
+        </div>
       )}
 
       <footer className="footer">

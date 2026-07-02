@@ -14,7 +14,7 @@ function localYmd(d) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-export default function ReplayBar({ theme, replay, loading, onLoad, onMystery, onSet, onExit, onChangeDay }) {
+export default function ReplayBar({ theme, replay, loading, onLoad, onMystery, onSet, onExit, onChangeDay, ghosts = null, onToggleGhosts = null }) {
   const [dateStr, setDateStr] = useState(() => {
     const d = new Date(Date.now() - 24 * 3600 * 1000);
     while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() - 1);
@@ -88,6 +88,16 @@ export default function ReplayBar({ theme, replay, loading, onLoad, onMystery, o
       >
         {SPEEDS.map((s) => <option key={s} value={s}>{s}×</option>)}
       </select>
+      {ghosts && onToggleGhosts && (
+        <button
+          className="kind-btn"
+          style={ghosts.on ? { color: theme.accent, borderColor: theme.accent } : undefined}
+          data-tip={`Decision replay: the ${ghosts.total} fill${ghosts.total === 1 ? '' : 's'} you actually took this day appear on the tape as the clock reaches them${ghosts.outside ? ` (+${ghosts.outside} outside the session)` : ''}. Click to ${ghosts.on ? 'hide' : 'show'}.`}
+          onClick={onToggleGhosts}
+        >
+          👣 {ghosts.total}
+        </button>
+      )}
       <input
         type="range"
         className="replay-scrub"
