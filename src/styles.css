@@ -802,6 +802,92 @@ button {
   letter-spacing: 0.04em;
 }
 
+/* ============ JOURNAL ============ */
+
+.journal-panel {
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: 10px;
+  width: min(560px, 94vw);
+  max-height: 82vh;
+  display: flex;
+  flex-direction: column;
+  padding: 14px 16px;
+  gap: 10px;
+}
+
+.journal-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.journal-title {
+  font-size: 12px;
+  letter-spacing: 0.15em;
+  color: var(--c-text);
+}
+
+.journal-total {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.journal-close {
+  margin-left: auto;
+}
+
+.journal-curve {
+  width: 100%;
+  height: 120px;
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  background: var(--c-bg);
+}
+
+.journal-table {
+  overflow-y: auto;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.journal-row {
+  display: grid;
+  grid-template-columns: 1.5fr 0.7fr 0.7fr 0.8fr 1.2fr 1.2fr;
+  gap: 6px;
+  padding: 4px 2px;
+  border-bottom: 1px solid var(--c-border);
+  color: var(--c-text);
+}
+
+.journal-row span:nth-child(n+2) { text-align: right; }
+
+.journal-row-head {
+  color: var(--c-muted);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  position: sticky;
+  top: 0;
+  background: var(--c-surface);
+}
+
+.journal-empty {
+  color: var(--c-muted);
+  font-size: 12px;
+  padding: 18px 4px;
+}
+
+.journal-note {
+  color: var(--c-muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.th-journal-btn {
+  margin-left: auto;
+  padding: 1px 7px;
+}
+
 /* ============ MODAL ============ */
 
 .modal-backdrop {
