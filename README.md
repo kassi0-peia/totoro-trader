@@ -49,7 +49,6 @@ and uses whichever is listening. Set `IBKR_PORT` to pin one explicitly.
 | `IBKR_CLIENT_ID`  | `17`                   | Must be unique per TWS connection                |
 | `IBKR_MD_TYPE`    | `3`                    | 1=live, 2=frozen, 3=delayed, 4=delayed-frozen    |
 | `WS_PORT`         | `8787`                 | Browser websocket port                           |
-| `TOTORO_TOKEN`    | (unset)                | Shared-secret gate on the order socket — see "Order-path auth" below |
 
 ## Architecture
 
@@ -138,21 +137,22 @@ The account id (e.g. `DU1234567` / `U…`) is shown next to the badge. Execution
 fails safe — it stays disabled until an account is confirmed, and drops if the
 connection is lost.
 
-### Order-path auth (`TOTORO_TOKEN`)
+### Security boundary (network layer, not app layer)
 
-The order socket is open by default, which is fine on a trusted single-machine
-localhost setup. If you expose the port to other devices (e.g. to reach the PWA
-from a phone — see below), set a shared secret so only clients that know it can
-place orders:
+There is deliberately **no app-layer auth** on the order socket: anyone who can
+reach the port can place real orders. An earlier shared-secret gate
+(`TOTORO_TOKEN`) was removed because it was hollow — the token had to be baked
+into the built JS, and this same server serves that JS unauthenticated, so
+anyone who could reach the port could also read the token out of the bundle.
 
-- **Bridge:** set `TOTORO_TOKEN=<long random string>` in the environment (e.g. the
-  systemd unit). It's validated with a constant-time compare at connect; a socket
-  that omits or mismatches it is closed.
-- **Client:** build with `VITE_TOTORO_TOKEN=<same string>` so the app appends it to
-  the `/ws` URL.
+The security boundary is the **network layer**:
 
-It's opt-in: if `TOTORO_TOKEN` is unset the socket stays open and the bridge logs a
-startup reminder. Set it before exposing the port beyond localhost.
+- Single machine: keep the port bound to localhost (the default posture).
+- Phone / other devices: reach the port over a trusted overlay network
+  (**Tailscale or a VPN**), or at minimum a trusted private LAN.
+- **Never expose the port raw** to the internet (no port-forwarding, no
+  `0.0.0.0` on an untrusted network). There is nothing at the app layer to
+  stop an order being placed.
 
 **Prerequisites / behavior:**
 - IB Gateway must have **Read-Only API disabled** (Configure → Settings → API →
@@ -185,7 +185,9 @@ npm run serve          # = vite build && node server/ibkr-server.js
 ```
 
 Open port `8787` on the host firewall so the phone can reach it
-(`sudo ufw allow 8787/tcp`).
+(`sudo ufw allow 8787/tcp`). Remember the port carries the **order path with no
+app-layer auth** — only do this on a trusted network (see "Security boundary"
+above; prefer Tailscale/VPN over opening it on a shared LAN).
 
 - **iPhone (Safari):** browse to `http://<host-ip>:8787/`, then Share →
   *Add to Home Screen*. Launches fullscreen standalone (driven by the

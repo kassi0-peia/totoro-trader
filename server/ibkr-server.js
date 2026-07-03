@@ -13,7 +13,6 @@
 import net from 'node:net';
 import http from 'node:http';
 import https from 'node:https';
-import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -22,6 +21,16 @@ import { IBApi, EventName } from '@stoqey/ib';
 import { WebSocketServer } from 'ws';
 import { computeSession, etParts, ymd, lastCloseEt, etCloseEpoch } from './session.js';
 import { computeOptionsForward } from './options-forward.js';
+
+// Last-resort backstop: an unexpected throw in one handler must not kill the whole
+// bridge while working orders/brackets are live at IBKR. Log loudly and stay up —
+// a visible stall is preferred over a masked one. Never auto-restart or exit here.
+process.on('uncaughtException', (err) => {
+  console.error('[ibkr-server] UNCAUGHT EXCEPTION — bridge staying up:', err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[ibkr-server] UNHANDLED REJECTION — bridge staying up:', reason);
+});
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_DIR = path.resolve(__dirname, '..', 'dist');
@@ -43,22 +52,12 @@ const PORT_CANDIDATES = process.env.IBKR_PORT
 const IBKR_CLIENT_ID = parseInt(process.env.IBKR_CLIENT_ID || '17', 10);
 const WS_PORT = parseInt(process.env.WS_PORT || '8787', 10);
 
-// Optional shared-secret gate on the order path. When TOTORO_TOKEN is set, clients
-// must present it (`?token=`) to place orders; it's checked with a constant-time
-// compare at connect. Unset keeps the socket open (the localhost dev default).
-const AUTH_TOKEN = process.env.TOTORO_TOKEN || null;
-function tokenOk(provided) {
-  if (!AUTH_TOKEN) return true;                 // no gate configured
-  if (typeof provided !== 'string') return false;
-  const a = Buffer.from(provided);
-  const b = Buffer.from(AUTH_TOKEN);
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
-}
-// Defense-in-depth: the connect-time gate already drops unauthorized sockets
-// before any message handler is registered, so this is unreachable today — but
-// re-checking inside every side-effecting handler means a future refactor of the
-// connect path can't silently open an order/cancel hole.
-function wsAuthed(ws) { return !AUTH_TOKEN || ws.authed === true; }
+// There is deliberately NO app-layer auth on the order socket. The server also
+// serves the built client to anyone who can reach the port, so any token baked
+// into that build would leak to the same attacker the gate was meant to stop.
+// The security boundary is the network layer: keep the port on localhost or a
+// trusted overlay (Tailscale/VPN) — never expose it raw. See README
+// "Security boundary".
 
 // 1=live, 2=frozen, 3=delayed, 4=delayed-frozen.
 const MARKET_DATA_TYPE = parseInt(process.env.IBKR_MD_TYPE || '3', 10);
@@ -184,11 +183,7 @@ httpServer.listen(WS_PORT, () => {
   console.log(`[ibkr-server] serving build from ${DIST_DIR}${fs.existsSync(DIST_DIR) ? '' : '  (not built yet — run `npm run build`)'}`);
   console.log(`[ibkr-server] candidate IBKR ports = ${PORT_CANDIDATES.join(', ')} (clientId=${IBKR_CLIENT_ID})`);
   console.log(`[ibkr-server] session: source=${session.source} expiry=${session.expiry} rth=${session.rth}, md type=${MARKET_DATA_TYPE}`);
-  if (AUTH_TOKEN) {
-    console.log('[ibkr-server] order auth: TOTORO_TOKEN gate enabled');
-  } else {
-    console.log('[ibkr-server] order auth: open (set TOTORO_TOKEN to require a token when exposing the port beyond localhost)');
-  }
+  console.log('[ibkr-server] order path has no app-layer auth — keep this port on localhost or a trusted overlay (Tailscale/VPN), never exposed raw');
 });
 
 function createServer() {
@@ -205,17 +200,7 @@ function createServer() {
   return http.createServer(serveStatic);
 }
 
-wss.on('connection', (ws, req) => {
-  if (AUTH_TOKEN) {
-    let provided = null;
-    try { provided = new URL(req.url, 'http://localhost').searchParams.get('token'); } catch { /* malformed url */ }
-    if (!tokenOk(provided)) {
-      console.warn('[ibkr-server] rejected ws connection (bad/missing token)');
-      try { ws.close(1008, 'unauthorized'); } catch { /* already closing */ }
-      return;
-    }
-    ws.authed = true;
-  }
+wss.on('connection', (ws) => {
   ws.send(JSON.stringify(snapshotMsg()));
   ws.on('message', (data) => {
     let msg;
@@ -257,7 +242,16 @@ const CAROOT = process.env.CAROOT || (() => {
 })();
 
 function serveStatic(req, res) {
-  const reqPathRaw = decodeURIComponent((req.url || '/').split('?')[0]);
+  let reqPathRaw;
+  try {
+    reqPathRaw = decodeURIComponent((req.url || '/').split('?')[0]);
+  } catch {
+    // Malformed percent-encoding (e.g. GET /%) — a bad URL must never take the
+    // bridge down while orders are working at IBKR.
+    res.writeHead(400, { 'content-type': 'text/plain' });
+    res.end('Bad request');
+    return;
+  }
   // Convenience: let the phone download the mkcert root CA to install it.
   // The public CA cert is safe to distribute; the CA private key is never served.
   if (reqPathRaw === '/rootCA.pem' || reqPathRaw === '/totoro-ca.crt') {
@@ -1548,9 +1542,6 @@ function handleOrderRequest(ws, msg) {
   const clientRef = msg.clientRef;
   const reject = (reason) => send({ type: 'orderAck', clientRef, accepted: false, reason });
 
-  // Belt-and-braces: even if a future code path reaches here, a socket without a
-  // valid token can never place an order while the gate is configured.
-  if (!wsAuthed(ws)) return reject('unauthorized');
   if (!executionEnabled) {
     const why = 'no executable account connected';
     return reject(`execution disabled (${why})`);
@@ -1796,7 +1787,6 @@ function finishQuoteSnap(reqId) {
 
 function handleCancel(ws, msg) {
   const send = (m) => { if (ws.readyState === 1) ws.send(JSON.stringify(m)); };
-  if (!wsAuthed(ws)) return send({ type: 'cancelAck', ok: false, reason: 'unauthorized' });
   if (!ib || !connected) return send({ type: 'cancelAck', ok: false, reason: 'not connected' });
   let orderId = parseInt(msg.orderId, 10) || null;
   // Resolve by clientRef, then by contract — clientRefs don't survive a bridge
@@ -1830,7 +1820,6 @@ function handleCancel(ws, msg) {
 // the UI ever wires a "cancel all working orders" button.
 function handleCancelAll(ws, msg) {
   const send = (m) => { if (ws.readyState === 1) ws.send(JSON.stringify(m)); };
-  if (!wsAuthed(ws)) return send({ type: 'cancelAllAck', ok: false, reason: 'unauthorized' });
   if (!ib || !connected) return send({ type: 'cancelAllAck', ok: false, reason: 'not connected' });
   let n = 0;
   for (const [id, o] of orders) {
@@ -1904,12 +1893,24 @@ function snapshotMsg() {
   };
 }
 
+// Crash-safe persistence: write a temp file in the same directory, then rename
+// over the target (atomic on the same filesystem). A crash mid-write can then
+// never corrupt the previous good copy — the journal is the only data here with
+// real loss cost.
+function atomicWriteSync(file, data) {
+  const tmp = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, data);
+  fs.renameSync(tmp, file);
+}
+
 // ── Basis persistence ──────────────────────────────────────────────────────
 
 function saveBasis() {
   try {
-    fs.writeFileSync(BASIS_FILE, JSON.stringify({ basis, basisEstimated, esClose, spxClose, captureDate: basisCaptureDate, esExpiry: basisEsExpiry, ts: Date.now() }));
-  } catch {}
+    atomicWriteSync(BASIS_FILE, JSON.stringify({ basis, basisEstimated, esClose, spxClose, captureDate: basisCaptureDate, esExpiry: basisEsExpiry, ts: Date.now() }));
+  } catch (err) {
+    console.error('[ibkr] saveBasis failed:', err);
+  }
 }
 
 // ── Trade blotter (today's fills) ───────────────────────────────────────────
@@ -2011,7 +2012,11 @@ function recordExecution(contract, execution, live = false) {
 }
 
 function saveTrades() {
-  try { fs.writeFileSync(TRADES_FILE, JSON.stringify({ date: tradesDate, trades })); } catch {}
+  try {
+    atomicWriteSync(TRADES_FILE, JSON.stringify({ date: tradesDate, trades }));
+  } catch (err) {
+    console.error('[ibkr] saveTrades failed:', err);
+  }
   // Mirror the day into the journal as fills land, so history accrues live —
   // before the journal existed, the daily roll simply discarded yesterday.
   if (tradesDate && trades.length) {
@@ -2057,7 +2062,11 @@ function loadJournal() {
 }
 
 function saveJournal() {
-  try { fs.writeFileSync(JOURNAL_FILE, JSON.stringify({ days: journal })); } catch {}
+  try {
+    atomicWriteSync(JOURNAL_FILE, JSON.stringify({ days: journal }));
+  } catch (err) {
+    console.error('[ibkr] saveJournal failed:', err);
+  }
 }
 
 function journalDays() {
