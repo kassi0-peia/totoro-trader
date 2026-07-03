@@ -11,7 +11,7 @@
     "start": "concurrently -k -n SERVER,WEB -c cyan,magenta \"npm:server\" \"npm:dev\"",
     "serve": "vite build && node server/ibkr-server.js",
     "serve:https": "vite build && cross-env TLS=1 IBKR_MD_TYPE=1 node server/ibkr-server.js",
-    "test": "node --test server/"
+    "test": "node --test"
   },
   "dependencies": {
     "@stoqey/ib": "^1.3.22",
