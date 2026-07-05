@@ -11,6 +11,8 @@ import TimeframeBar from './TimeframeBar.jsx';
 import QuoteStrip from './QuoteStrip.jsx';
 import { useIbkrFeed, liveGreeks, liveQuote } from './feed.js';
 import { greeks as bsGreeks, nearestOtmStrike } from './options.js';
+import { expiryCutoffMs, suggestTimetable, displayRows, scanTouch } from './busstop.js';
+import BusStopPanel from './BusStopPanel.jsx';
 import { THEMES } from './themes.js';
 import { plDollars } from './pl.js';
 import Journal from './Journal.jsx';
@@ -121,6 +123,19 @@ export default function App() {
     try { const v = localStorage.getItem('tt.showMarkers'); return v == null ? true : v === '1'; } catch { return true; }
   });
   const [quickMode, setQuickMode] = useState(false); // ⚡ right-click quick trade — per session, not persisted
+  // 🚏 Bus Stop: called (price, time) coordinates. Stops persist (localStorage,
+  // per-browser — the calibration record is the point); the arm toggle doesn't.
+  const [busArmed, setBusArmed] = useState(false);
+  const [busPanelId, setBusPanelId] = useState(null);
+  const [busStops, setBusStops] = useState(() => {
+    try {
+      const v = JSON.parse(localStorage.getItem('tt.busStops') || '[]');
+      return Array.isArray(v) ? v : [];
+    } catch { return []; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('tt.busStops', JSON.stringify(busStops)); } catch {}
+  }, [busStops]);
   useEffect(() => {
     try {
       localStorage.setItem('tt.axischain', axisChain ? '1' : '0');
@@ -500,6 +515,82 @@ export default function App() {
     return { anchor: feed.spxClose, width: c + p };
   }, [feed.live, feed.price, feed.greeksMap, feed.spxClose]);
 
+  // 🚏 Drop a bus stop: her mind's-eye (price, time) coordinate, snapped to the
+  // minute and a quarter point. The timetable (contract suggestions) is computed
+  // once, from the chain as it stands at the call — a snapshot of the shot, not
+  // a live feed. Disarms after each drop so a stray second click can't dupe.
+  const handleDropBusStop = ({ price: rawPrice, t }) => {
+    if (replayActive) return; // v1 is live-mode only; replay practice is v1.1
+    if (!feed.live || !Number.isFinite(feed.price)) { showToast('Bus stop needs live data', 'err'); return; }
+    const targetTime = Math.round(t / 60000) * 60000;
+    const nowMs = Date.now();
+    if (targetTime <= nowMs + 60000) { showToast('Pick a spot in the future — right of the live candle', 'err'); return; }
+    const cutoff = expiryCutoffMs(feed.expiry, nowMs);
+    if (nowMs >= cutoff) { showToast("Today's contract has settled — wait for the 16:15 roll", 'err'); return; }
+    if (targetTime >= cutoff) { showToast('Past the 16:00 settle — the contract expires before the bus arrives', 'err'); return; }
+    const targetPrice = Math.round(rawPrice * 4) / 4;
+    const tt = suggestTimetable({ targetPrice, targetTime, spot: feed.price, greeksMap: feed.greeksMap, ivol: IVOL, cutoff });
+    const stop = {
+      id: `bs${nowMs.toString(36)}${Math.floor(Math.random() * 1e4).toString(36)}`,
+      createdAt: nowMs,
+      targetPrice,
+      targetTime,
+      side: tt.side,
+      spotAtDrop: feed.price,
+      expiry: feed.expiry,
+      timetable: {
+        rows: displayRows(tt),
+        tenXStrike: tt.tenX?.strike ?? null,
+        bestMult: tt.best ? Math.round(tt.best.onTarget * 100) / 100 : null
+      },
+      resolution: null
+    };
+    setBusStops((prev) => [...prev, stop]);
+    setBusPanelId(stop.id);
+    setBusArmed(false);
+  };
+
+  // Resolve open stops against the 1-min tape: bar highs/lows only, never the
+  // future — so this same scan safely resolves retroactively after a reload.
+  // The `now` tick (800 ms) also catches the "didn't run" case at settle.
+  useEffect(() => {
+    if (replayActive || !busStops.some((s) => !s.resolution)) return;
+    const nowMs = Date.now();
+    const resolvedNow = [];
+    const next = busStops.map((s) => {
+      if (s.resolution) return s;
+      const touch = scanTouch(s, feed.candles);
+      if (touch) {
+        const r = { ...s, resolution: touch.ts <= s.targetTime ? 'hit' : 'late', touchTs: touch.ts, ...(touch.est ? { est: true } : {}) };
+        resolvedNow.push(r);
+        return r;
+      }
+      if (nowMs > expiryCutoffMs(s.expiry, s.createdAt)) {
+        const r = { ...s, resolution: 'miss' };
+        resolvedNow.push(r);
+        return r;
+      }
+      return s;
+    });
+    if (resolvedNow.length) {
+      setBusStops(next);
+      for (const r of resolvedNow) {
+        const clock = new Date(r.touchTs ?? r.targetTime).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour12: false, hour: '2-digit', minute: '2-digit' });
+        if (r.resolution === 'hit') showToast(`🚏 The bus came — ${r.targetPrice.toFixed(2)} touched ${clock}${r.est ? ' (est.)' : ''}`, 'ok');
+        else if (r.resolution === 'late') showToast(`🚏 Bus was late — ${r.targetPrice.toFixed(2)} touched ${clock}${r.est ? ' (est.)' : ''}`, 'ok');
+        else showToast(`🚏 Didn't run today — ${r.targetPrice.toFixed(2)} was never reached`, 'err');
+      }
+    }
+  }, [feed.candles, now, replayActive, busStops]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Stops the chart draws: everything unresolved, plus resolved ones lingering
+  // until ~30 min past their settle. The full history stays in localStorage
+  // (that's the route record — v1.1 reads it).
+  const chartBusStops = useMemo(() => {
+    if (replayActive) return [];
+    return busStops.filter((s) => !s.resolution || now < expiryCutoffMs(s.expiry, s.createdAt) + 30 * 60000);
+  }, [busStops, replayActive, now]);
+
   // Day P/L: blotter cash flow plus the marked value of what's still open.
   // In replay: the practice session's P/L (closed + open marks vs entries).
   const dayPL = useMemo(() => {
@@ -534,10 +625,10 @@ export default function App() {
   })();
 
 
-  const handleRequestTrade = ({ strike, type }) => {
+  const handleRequestTrade = ({ strike, type, busStopId = null }) => {
     const g = resolveGreeks(strike, type);
     const q = replayActive ? null : liveQuote(feed.greeksMap, strike, type);
-    setPending({ id: Date.now(), strike, type, greeks: g, bid: q?.bid, ask: q?.ask });
+    setPending({ id: Date.now(), strike, type, greeks: g, bid: q?.bid, ask: q?.ask, busStopId });
   };
 
   const handleExecute = (qty, limit = null, takeProfit = null, stopLoss = null) => {
@@ -567,6 +658,11 @@ export default function App() {
       status: 'pending', openRef: ref, entryPremium: null, estPremium: limit ?? pending.greeks.premium,
       entryPrice: feed.price, openedAt: Date.now(), greeksLive: pending.greeks
     }]);
+    // Entered from a bus-stop timetable → pair the trade with the called shot.
+    if (pending.busStopId) {
+      const { busStopId, strike } = pending;
+      setBusStops((prev) => prev.map((s) => (s.id === busStopId ? { ...s, takenRef: ref, takenStrike: strike } : s)));
+    }
     setPending(null);
     triggerPulse();
   };
@@ -942,6 +1038,20 @@ export default function App() {
               <span className="chart-acct-id" data-tip={feed.account ? `IBKR account ${feed.account}` : 'no account connected'}>{feed.account || (feed.live ? '…' : 'no acct')}</span>
               {!replayActive && (
                 <button
+                  className={`acct-bus-btn${busArmed ? ' active' : ''}`}
+                  onClick={() => setBusArmed((v) => !v)}
+                  aria-label="Toggle bus stop mode"
+                  data-tip={
+                    busArmed
+                      ? '🚏 ARMED — click where you see price going (and when). Drops a stop + suggests the contract; disarms after each drop.'
+                      : 'Bus stop: call your shot — arm, then click the future (price, time) you see. Suggests the best contract for the ride.'
+                  }
+                >
+                  🚏
+                </button>
+              )}
+              {!replayActive && (
+                <button
                   className={`acct-quick-btn${quickMode ? ' active' : ''}${quickMode === 'market' ? ' market' : ''}`}
                   onClick={() => setQuickMode((v) => (v === 'limit' ? 'market' : v === 'market' ? false : 'limit'))}
                   aria-label="Toggle quick trade mode"
@@ -979,6 +1089,10 @@ export default function App() {
               }}
               onInspectPosition={(p) => { setHoverPos(null); setInspectId(p.id); }}
               ghostFills={visibleGhosts}
+              busStops={chartBusStops}
+              busArmed={busArmed && !replayActive}
+              onDropBusStop={handleDropBusStop}
+              onSelectBusStop={(s) => setBusPanelId(s.id)}
               greeksMap={replayActive ? EMPTY_GREEKS : feed.greeksMap}
               requestQuote={!replayActive && feed.live ? feed.requestQuote : null}
               expectedMove={expectedMove}
@@ -1109,6 +1223,24 @@ export default function App() {
       {journalOpen && (
         <Journal days={feed.journal} theme={theme} onClose={() => setJournalOpen(false)} />
       )}
+
+      {busPanelId != null && !replayActive && (() => {
+        const stop = busStops.find((s) => s.id === busPanelId);
+        if (!stop) return null;
+        return (
+          <BusStopPanel
+            stop={stop}
+            theme={theme}
+            now={now}
+            onTrade={(strike) => handleRequestTrade({ strike, type: stop.side, busStopId: stop.id })}
+            onCancelStop={() => {
+              setBusStops((prev) => prev.filter((s) => s.id !== stop.id));
+              setBusPanelId(null);
+            }}
+            onClose={() => setBusPanelId(null)}
+          />
+        );
+      })()}
 
       {ghostsOn && dayGhosts && visibleGhosts.length > 0 && (
         <div className="ghost-log">

@@ -82,6 +82,10 @@ export default function Chart({
   onHoverPosition = null,
   onInspectPosition = null,
   ghostFills = [],
+  busStops = [],
+  busArmed = false,
+  onDropBusStop = null,
+  onSelectBusStop = null,
   greeksMap,
   requestQuote = null,
   expectedMove = null,
@@ -127,6 +131,7 @@ export default function Chart({
   const suppressClickRef = useRef(false);
   const markerHitsRef = useRef([]); // [{ x, y, half, position, kind }]
   const ghostHitsRef = useRef([]);  // decision-replay ghost fills: [{ x, y, half, fill }]
+  const busHitsRef = useRef([]);    // bus-stop markers: [{ x, y, half, stop }]
   const closeHitsRef = useRef([]);  // ✕ boxes on position lines: [{ x0, y0, x1, y1, position }]
   const addHitsRef = useRef([]);    // + boxes on position lines: [{ x0, y0, x1, y1, position }]
   const posLabelHitsRef = useRef([]); // strike P/L label chips: [{ x0, y0, x1, y1, position }]
@@ -827,7 +832,63 @@ export default function Chart({
       }
       ghostHitsRef.current.push({ x: gx, y: gy, half: gHalf + 5, fill: f });
     }
-  }, [candles, price, positions, theme, size, view, layout, priceToY, indexToX, timeframe, showMarkers, showVolume, expectedMove, axisChain, greeksMap, ivol, timeToExpiryYears, source, showPositions, ghostFills]);
+
+    // 🚏 Bus stops: her called (price, time) coordinates. Time-anchored like the
+    // trade markers, but they may sit in the FUTURE space right of the live
+    // candle — extrapolate slots past the last bar at the current timeframe.
+    busHitsRef.current = [];
+    if (busStops.length && tfCandles.length) {
+      const lastIdx = tfCandles.length - 1;
+      const lastSlot = lastIdx - view.baseIdx;
+      const lastT = tfCandles[lastIdx].t;
+      for (const stop of busStops) {
+        const slot = stop.targetTime <= lastT
+          ? tToIdx(stop.targetTime)
+          : lastSlot + (stop.targetTime - lastT) / bucketMs;
+        if (slot < 0) continue; // scrolled out of view on the history side
+        let bx = indexToX(slot);
+        const clamped = bx > layout.chartW - 14; // target beyond the visible right edge
+        if (clamped) bx = layout.chartW - 14;
+        const by = priceToY(stop.targetPrice);
+        if (by < layout.priceTop - 20 || by > layout.priceBot + 20) continue;
+        const color = !stop.resolution ? theme.accent
+          : stop.resolution === 'hit' ? theme.profit
+          : stop.resolution === 'late' ? '#e0a94f'
+          : theme.muted;
+        // dashed guide from the live price to the coordinate (active stops only)
+        if (!stop.resolution && lastSlot >= 0 && lastSlot < view.slotCount) {
+          ctx.save();
+          ctx.setLineDash([3, 5]);
+          ctx.globalAlpha = 0.45;
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(indexToX(lastSlot), priceToY(price));
+          ctx.lineTo(bx, by);
+          ctx.stroke();
+          ctx.restore();
+        }
+        ctx.save();
+        ctx.globalAlpha = stop.resolution ? 0.75 : 0.95;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.4;
+        ctx.beginPath();
+        ctx.arc(bx, by, 10, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.font = '11px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('🚏', bx, by + 1);
+        if (clamped) { // off-screen arrow, like position lines for far strikes
+          ctx.fillStyle = color;
+          ctx.font = '10px "JetBrains Mono", monospace';
+          ctx.fillText('→', bx + 14, by);
+        }
+        ctx.restore();
+        busHitsRef.current.push({ x: bx, y: by, half: 12, stop });
+      }
+    }
+  }, [candles, price, positions, theme, size, view, layout, priceToY, indexToX, timeframe, showMarkers, showVolume, expectedMove, axisChain, greeksMap, ivol, timeToExpiryYears, source, showPositions, ghostFills, busStops]);
 
   // wheel zoom — attach non-passive so we can preventDefault page scroll
   useEffect(() => {
@@ -998,6 +1059,14 @@ export default function Chart({
       for (const g of ghostHitsRef.current) {
         if (Math.abs(x - g.x) <= g.half && Math.abs(y - g.y) <= g.half) {
           setMarkerHover({ x: g.x, y: g.y, ghost: g.fill, kind: 'ghost' });
+          setHover(null);
+          return;
+        }
+      }
+      // bus-stop markers
+      for (const b of busHitsRef.current) {
+        if (Math.abs(x - b.x) <= b.half && Math.abs(y - b.y) <= b.half) {
+          setMarkerHover({ x: b.x, y: b.y, stop: b.stop, kind: 'bus' });
           setHover(null);
           return;
         }
@@ -1203,6 +1272,14 @@ export default function Chart({
     for (const g of ghostHitsRef.current) {
       if (Math.abs(x - g.x) <= g.half && Math.abs(y - g.y) <= g.half) return;
     }
+    // Bus-stop marker → open its timetable card. Swallows the click either way
+    // so a stop press can never fall through and place a trade.
+    for (const b of busHitsRef.current) {
+      if (Math.abs(x - b.x) <= b.half && Math.abs(y - b.y) <= b.half) {
+        onSelectBusStop?.(b.stop);
+        return;
+      }
+    }
     // strike P/L label chip → open the inspect/order window (TP·SL exit, close)
     for (const b of posLabelHitsRef.current) {
       if (x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1) {
@@ -1212,6 +1289,18 @@ export default function Chart({
     }
     // Trading clicks only at the live candle and rightward (history is read-only).
     const di = view.baseIdx + Math.floor(x / layout.candleW);
+    // 🚏 armed: a click drops a bus stop at the (price, time) coordinate instead
+    // of opening the trade modal. The time extrapolates into the empty future
+    // space at the current timeframe (same math as the crosshair readout);
+    // validation (must be future, before settle) lives in App, which can toast.
+    if (busArmed && onDropBusStop) {
+      const lastT = tfCandles.length ? tfCandles[tfCandles.length - 1].t : null;
+      const tAtX = di >= 0 && di < tfCandles.length
+        ? tfCandles[di].t
+        : (lastT != null ? lastT + (di - (tfCandles.length - 1)) * timeframe * 60000 : null);
+      if (tAtX != null) onDropBusStop({ price: yToPrice(y), t: tAtX });
+      return;
+    }
     if (di < tfCandles.length - 1) return;
     const rawPrice = yToPrice(y);
     const type = rawPrice > price ? 'call' : 'put';
@@ -1309,7 +1398,36 @@ export default function Chart({
           </div>
         );
       })()}
-      {markerHover && markerHover.kind !== 'ghost' && (() => {
+      {markerHover && markerHover.kind === 'bus' && (() => {
+        const s = markerHover.stop;
+        const c = s.side === 'call' ? theme.up : theme.down;
+        const clock = (ts) => new Date(ts).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour12: false, hour: '2-digit', minute: '2-digit' });
+        const status = !s.resolution ? 'WAITING'
+          : s.resolution === 'hit' ? 'BUS CAME'
+          : s.resolution === 'late' ? 'LATE'
+          : "DIDN'T RUN";
+        return (
+          <div
+            className="chart-tooltip marker-tooltip"
+            style={{
+              left: Math.min(markerHover.x + 14, size.w - 220),
+              top: Math.max(8, markerHover.y - 90),
+              borderColor: theme.accent
+            }}
+          >
+            <div className="tt-head">
+              <span className="tt-type" style={{ color: c }}>🚏 {s.targetPrice.toFixed(2)}</span>
+              <span className="tt-kind">{status}</span>
+            </div>
+            <div className="tt-row"><span>Due</span><b>{clock(s.targetTime)}</b></div>
+            {s.touchTs != null && (
+              <div className="tt-row"><span>Arrived</span><b>{clock(s.touchTs)}{s.est ? ' (est.)' : ''}</b></div>
+            )}
+            <div className="tt-hint">click for the timetable</div>
+          </div>
+        );
+      })()}
+      {markerHover && markerHover.kind !== 'ghost' && markerHover.kind !== 'bus' && (() => {
         const p = markerHover.position;
         const isClosed = p.status === 'closed';
         const filled = p.entryPremium != null; // false while the open order is still working
