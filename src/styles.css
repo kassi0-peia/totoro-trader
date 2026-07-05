@@ -842,6 +842,117 @@ button {
   margin-top: 4px;
 }
 
+/* ============ BUS STOP 🚏 (spec-bus-stop.md) ============ */
+
+/* Floating timetable card: the called coordinate, countdown/result, and the
+   contract picks. Fixed on the right like the ghost log, above the fold. */
+.busstop-panel {
+  position: fixed;
+  right: 14px;
+  top: 110px;
+  z-index: 62;
+  width: 308px;
+  background: var(--c-surface);
+  border: 1px solid;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+}
+
+.bs-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 6px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid var(--c-border);
+}
+.bs-title {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  color: var(--c-muted);
+}
+.bs-coord {
+  font-size: 12.5px;
+  font-weight: 600;
+  margin-left: auto;
+}
+.bs-x {
+  background: none;
+  border: none;
+  color: var(--c-muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 4px;
+}
+.bs-x:hover { color: var(--c-text); }
+
+.bs-status {
+  font-size: 11px;
+  margin-bottom: 8px;
+  letter-spacing: 0.03em;
+}
+
+.bs-grid {
+  display: grid;
+  grid-template-columns: 1fr 48px 44px 44px 44px 40px;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 0;
+}
+.bs-grid-head {
+  color: var(--c-muted);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  border-bottom: 1px solid var(--c-border);
+  padding-bottom: 3px;
+  margin-bottom: 2px;
+}
+.bs-row { color: var(--c-text); }
+.bs-row.bs-tenx {
+  background: color-mix(in srgb, var(--c-accent) 10%, transparent);
+  border-radius: 4px;
+}
+.bs-strike { font-weight: 600; }
+.bs-buy {
+  background: none;
+  border: 1px solid;
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 2px 0;
+  cursor: pointer;
+  transition: background 140ms;
+}
+.bs-buy:hover { background: rgba(255, 255, 255, 0.08); }
+
+.bs-note {
+  color: var(--c-muted);
+  font-size: 9.5px;
+  margin-top: 6px;
+  line-height: 1.5;
+}
+
+.bs-foot {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+.bs-cancel {
+  background: none;
+  border: 1px solid var(--c-border);
+  border-radius: 4px;
+  color: var(--c-muted);
+  font-size: 9.5px;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+.bs-cancel:hover { color: var(--c-loss, #e07d8a); border-color: var(--c-loss, #e07d8a); }
+
 /* ============ JOURNAL ============ */
 
 .journal-panel {
@@ -1258,7 +1369,7 @@ button {
 }
 
 @media (max-width: 720px) {
-  .replay-bar, .tf-replay, .qs-replay, .ghost-log { display: none; } /* desktop-only by design */
+  .replay-bar, .tf-replay, .qs-replay, .ghost-log, .busstop-panel { display: none; } /* desktop-only by design */
 }
 
 /* The mascot doubles as the totoro-detector toggle. */
@@ -1613,6 +1724,34 @@ button {
   0%, 100% { box-shadow: 0 0 0 2px rgba(224, 71, 58, 0.35); }
   50% { box-shadow: 0 0 0 4px rgba(224, 71, 58, 0.15); }
 }
+/* 🚏 bus-stop arm toggle, next to ⚡. Emoji renders greyscale via filter until
+   armed — armed uses the accent ring like the ⚡ limit arm (it places no order
+   by itself, so it never needs the red treatment). */
+.acct-bus-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  font-size: 13px;
+  line-height: 1;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: 50%;
+  color: var(--c-muted);
+  cursor: pointer;
+  filter: grayscale(1) opacity(0.75);
+  transition: color 160ms, border-color 160ms, background 160ms, filter 160ms;
+}
+.acct-bus-btn:hover { border-color: var(--c-accent); filter: grayscale(0.4); }
+.acct-bus-btn.active {
+  background: var(--c-accent);
+  border-color: var(--c-accent);
+  filter: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--c-accent) 35%, transparent);
+}
+
 /* Feed status (● LIVE/SIM) stacked under the account badge — mobile only. */
 .acct-feed {
   display: none;
@@ -1896,6 +2035,7 @@ button {
 
   .chart-acct { top: 36px; }   /* drop below the OHLC legend so they don't overlap */
   .acct-quick-btn { display: none; }   /* quick mode is right-click → desktop only */
+  .acct-bus-btn { display: none; }     /* bus stop is desktop-only (spec-bus-stop.md) */
 
   /* Move Close-all / IBKR to a full-width row under the timeframe buttons. */
   .tf-bar { flex-wrap: wrap; }

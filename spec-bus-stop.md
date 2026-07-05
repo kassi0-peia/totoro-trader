@@ -49,8 +49,13 @@ contracts. No new math, no new data: live per-strike IV/bid/ask already stream i
   - **20 min late** — same S, T from target time + 20 min
   - **short** — S = target − ⅓ of the move (calls; mirrored for puts), T from target time
   - **doesn't get there** — shown as −100%, plainly (it's 0DTE)
-- Badge the **sturdy pick**: highest *geometric mean* across the three live scenarios —
-  usually one or two strikes closer in than the raw max. Default-highlight it.
+- Badge the **sturdy pick** 🛡: highest *geometric mean* across the three live scenarios —
+  usually one or two strikes closer in than the raw max.
+- Badge the **10× pick** 🎯 (kisa's ask, 2026-07-05 — "i basically need most like 10
+  bagger"): the *closest-in* strike whose on-target multiple is ≥ 10 — nearest wins, so
+  the ten-bagger keeps the most cushion. When the coordinate physically can't produce a
+  10× (move too small for the time left on the clock), the panel says so plainly
+  ("no 10× on this route — best is ×N") instead of pretending.
 - All projected values labeled **est.** — repricing assumes each strike's IV holds
   (sticky strike); a fast move re-bids vol, so these are estimates in the same spirit as
   the expected-move lines. Never present them as quotes.
