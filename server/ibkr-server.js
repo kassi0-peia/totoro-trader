@@ -21,6 +21,7 @@ import { IBApi, EventName } from '@stoqey/ib';
 import { WebSocketServer } from 'ws';
 import { computeSession, etParts, ymd, lastCloseEt, etCloseEpoch } from './session.js';
 import { computeOptionsForward } from './options-forward.js';
+import { pickExpiry, deriveStrikeStep, strikeWindow, validateOrder as validateGuestOrder } from './guest-symbol.js';
 
 // Last-resort backstop: an unexpected throw in one handler must not kill the whole
 // bridge while working orders/brackets are live at IBKR. Log loudly and stay up —
@@ -143,6 +144,26 @@ const chain = new Map();
 let chainCenter = null;
 let reqSeq = 100;
 
+// ── Guest-symbol layer (multi-symbol Phase A) ────────────────────────────────
+// A single optional guest equity (e.g. SPCX) subscribed BESIDE the SPX home
+// instrument — never inside it. When no guest is active every SPX code path is
+// byte-identical to before. Its own candle series + runaway guard, its own reqId
+// range and maps, its own narrow near-ATM chain. While a guest is active the
+// SPXW chain subscription is PAUSED (the line hog) but SPX/ES/VIX index ticks
+// and all basis machinery keep running; the SPXW chain is restored on deactivate.
+// Guest state is NOT persisted — after a bridge/socket restart the client
+// re-activates from memory. See server/guest-symbol.js and spec-multi-symbol.md.
+const GUEST_STRIKE_WINDOW = 6;    // n strikes each side of spot (narrower than SPXW)
+const GUEST_RECENTRE_STEPS = 1;   // recenter once spot drifts a full step past the window edge
+const GUEST_HISTORY_CANDLES = 3000;
+const guestChain = new Map();     // `${strike}${right}` -> { reqId, strike, right, expiry, ... }
+// null when no guest active. `discovered` holds the secdef params the order path
+// validates against; `series` is the guest's own candle series (+ runaway guard).
+let guest = null;
+function newGuestSeries() {
+  return { candles: [], edge: nextCandleEdge(Date.now()), recentBars: [], lastTick: 0 };
+}
+
 // Account safety + order execution state.
 let account = null;             // e.g. "DU1234567"
 let accountType = null;         // 'paper' | 'live' | null (unknown)
@@ -202,6 +223,7 @@ function createServer() {
 
 wss.on('connection', (ws) => {
   ws.send(JSON.stringify(snapshotMsg()));
+  if (guest) ws.send(JSON.stringify(guestMsg())); // a guest active on another client
   ws.on('message', (data) => {
     let msg;
     try { msg = JSON.parse(data); } catch { return; }
@@ -214,6 +236,9 @@ wss.on('connection', (ws) => {
     else if (msg.type === 'quote') handleQuoteRequest(ws, msg);
     else if (msg.type === 'cancel') handleCancel(ws, msg);
     else if (msg.type === 'cancelAll') handleCancelAll(ws, msg);
+    else if (msg.type === 'symbolSearch') handleSymbolSearch(ws, msg);
+    else if (msg.type === 'activateSymbol') handleActivateSymbol(ws, msg);
+    else if (msg.type === 'deactivateSymbol') handleDeactivateSymbol(ws, msg);
   });
 });
 
@@ -417,6 +442,7 @@ function wireHandlers(api) {
       type: 'fill',
       clientRef: o.clientRef,
       orderId,
+      symbol: o.symbol ?? 'SPX', // absent-in-old-rows defaults to SPXW
       action: o.action,
       strike: o.strike,
       right: o.right,
@@ -562,6 +588,18 @@ function wireHandlers(api) {
       if (!(value > 0)) return;
       if (field === 4 || field === 68) { vixLast = value; broadcastVix(); }
       else if (field === 9 || field === 75) { vixClose = value; broadcastVix(); }
+    } else if (s.kind === 'guest-stk') {
+      if (!guest || value <= 0) return;
+      if (field === 4 || field === 68) feedGuestTick(value);
+      else if ((field === 9 || field === 75) && guest.price == null) feedGuestTick(value);
+    } else if (s.kind === 'guest-opt') {
+      if (!guest) return;
+      const entry = guestChain.get(s.key);
+      if (!entry || entry.expiry !== guest.expiry || value < 0) return;
+      if (field === 1 || field === 66) { entry.bid = value; entry.tickTs = Date.now(); broadcast(guestChainPayload(entry)); }
+      else if (field === 2 || field === 67) { entry.ask = value; entry.tickTs = Date.now(); broadcast(guestChainPayload(entry)); }
+      else if (field === 6 || field === 72) { entry.dayHigh = value; broadcast(guestChainPayload(entry)); }
+      else if (field === 7 || field === 73) { entry.dayLow = value; broadcast(guestChainPayload(entry)); }
     }
   });
 
@@ -570,9 +608,19 @@ function wireHandlers(api) {
     EventName.tickOptionComputation,
     (tickerId, tickType, iv, delta, optPrice, _pvDiv, gamma, vega, theta, undPrice) => {
       const s = subs.get(tickerId);
-      if (!s || s.kind !== 'option') return;
+      if (!s) return;
       if (tickType !== 13 && tickType !== 53) return; // MODEL_OPTION / DELAYED_MODEL_OPTION
       if (!Number.isFinite(optPrice) || optPrice < 0) return;
+      if (s.kind === 'guest-opt') {
+        if (!guest) return;
+        const entry = guestChain.get(s.key);
+        if (!entry || entry.expiry !== guest.expiry) return;
+        entry.premium = optPrice; entry.delta = delta; entry.gamma = gamma;
+        entry.theta = theta; entry.vega = vega; entry.iv = iv;
+        broadcast(guestChainPayload(entry));
+        return;
+      }
+      if (s.kind !== 'option') return;
       const entry = chain.get(s.key);
       if (!entry || entry.expiry !== currentExpiry) return; // stale (post-roll) ticks
       entry.premium = optPrice;
@@ -587,7 +635,9 @@ function wireHandlers(api) {
 
   api.on(EventName.contractDetails, (reqId, details) => {
     const s = subs.get(reqId);
-    if (!s || s.kind !== 'es-cd' || esContract) return;
+    if (!s) return;
+    if (s.kind === 'guest-cd') { onGuestContractDetails(s, details); return; }
+    if (s.kind !== 'es-cd' || esContract) return;
     const c = details.contract;
     esContract = {
       conId: c.conId,
@@ -603,9 +653,72 @@ function wireHandlers(api) {
     requestEsHistory();
   });
 
+  // Guest-symbol search: reqMatchingSymbols → up to ~8 US stock matches.
+  api.on(EventName.symbolSamples, (reqId, contractDescriptions) => {
+    const s = subs.get(reqId);
+    if (!s || s.kind !== 'symbol-search') return;
+    subs.delete(reqId);
+    const matches = [];
+    for (const d of contractDescriptions || []) {
+      const c = d?.contract;
+      if (!c) continue;
+      // Stocks on US exchanges only (Phase A). derivativeSecTypes must include OPT
+      // so we don't offer a symbol that has no options to trade.
+      if (c.secType !== 'STK') continue;
+      if (c.currency && c.currency !== 'USD') continue;
+      const hasOpt = Array.isArray(d.derivativeSecTypes) && d.derivativeSecTypes.includes('OPT');
+      if (!hasOpt) continue;
+      matches.push({
+        symbol: c.symbol,
+        name: c.description || c.symbol,
+        conId: c.conId,
+        secType: c.secType,
+        exchange: c.primaryExch || c.exchange || 'SMART',
+        currency: c.currency || 'USD'
+      });
+      if (matches.length >= 8) break;
+    }
+    if (s.ws && s.ws.readyState === 1) {
+      s.ws.send(JSON.stringify({ type: 'symbolSearchResult', q: s.q, matches }));
+    }
+  });
+
+  // Guest secdef: expirations + strikes for the resolved underlying. May fire once
+  // per exchange; we keep the SMART/most-complete set. End event drives the chain.
+  api.on(EventName.securityDefinitionOptionParameter,
+    (reqId, exchange, underlyingConId, tradingClass, multiplier, expirations, strikes) => {
+      const s = subs.get(reqId);
+      if (!s || s.kind !== 'guest-secdef' || !guest || guest.reqId !== reqId) return;
+      onGuestSecDef({ exchange, tradingClass, multiplier, expirations, strikes });
+    });
+  api.on(EventName.securityDefinitionOptionParameterEnd, (reqId) => {
+    const s = subs.get(reqId);
+    if (!s || s.kind !== 'guest-secdef' || !guest || guest.reqId !== reqId) return;
+    subs.delete(reqId);
+    finishGuestSecDef();
+  });
+
   api.on(EventName.historicalData, (reqId, time, open, high, low, close, volume) => {
     const s = subs.get(reqId);
     if (!s) return;
+    if (s.kind === 'guest-hist') {
+      // Seeds the guest series. Ignored if the guest was torn down mid-flight.
+      if (!guest || guest.series !== s.series) { if (typeof time === 'string' && time.startsWith('finished')) subs.delete(reqId); return; }
+      if (typeof time === 'string' && time.startsWith('finished')) {
+        subs.delete(reqId);
+        s.series.edge = nextCandleEdge(Date.now());
+        if (guest.price == null && s.series.candles.length) guest.price = s.series.candles[s.series.candles.length - 1].close;
+        broadcast(guestMsg());
+        console.log(`[ibkr] guest ${guest.symbol} history seed complete (${s.series.candles.length} bars)`);
+        return;
+      }
+      const t = parseHistTime(time);
+      if (t != null) {
+        s.series.candles.push({ t, open, high, low, close, volume: Math.max(volume, 0) });
+        if (s.series.candles.length > GUEST_HISTORY_CANDLES) s.series.candles = s.series.candles.slice(-GUEST_HISTORY_CANDLES);
+      }
+      return;
+    }
     if (s.kind === 'replay-day') {
       if (typeof time === 'string' && time.startsWith('finished')) {
         subs.delete(reqId);
@@ -1296,12 +1409,37 @@ function displayCandles() {
 // ── Option chain ──────────────────────────────────────────────────────────────
 
 function maybeRecenterChain(price) {
+  // Paused while a guest is active — the SPXW chain is the market-data line hog,
+  // so it yields the lines to the guest chain. SPX/ES/VIX index ticks and all
+  // basis machinery keep running; only the chain sleeps. Restored on deactivate.
+  if (spxwChainPaused) return;
   if (price == null || currentExpiry == null) return;
   const center = Math.round(price / STRIKE_STEP) * STRIKE_STEP;
   if (chainCenter == null || Math.abs(center - chainCenter) >= STRIKE_STEP * RECENTRE_THRESHOLD) {
     setChain(center);
     chainCenter = center;
   }
+}
+
+// Pause/restore the SPXW chain subscriptions (guest activate/deactivate). Cancels
+// the option mkt-data subs to free the lines; keeps `currentExpiry` so the roll
+// logic is untouched. Restoring re-subscribes at the current price. Consequence:
+// while paused overnight, the options-implied basis has no chain to qualify, so
+// effectiveBasis() falls back to the frozen 4 PM capture — acceptable, and
+// basisSource already reports 'frozen'/'estimated' honestly.
+let spxwChainPaused = false;
+function pauseSpxwChain() {
+  spxwChainPaused = true;
+  for (const [key, entry] of chain.entries()) {
+    if (ib) { try { ib.cancelMktData(entry.reqId); } catch {} }
+    subs.delete(entry.reqId);
+    chain.delete(key);
+  }
+  chainCenter = null; // force a full re-subscribe on restore
+}
+function restoreSpxwChain() {
+  spxwChainPaused = false;
+  maybeRecenterChain(displayPrice());
 }
 
 function setChain(center) {
@@ -1351,6 +1489,319 @@ function rebuildChainForExpiry(exp) {
   currentExpiry = exp;
   chainCenter = null; // force re-subscribe
   maybeRecenterChain(displayPrice());
+}
+
+// ── Guest-symbol lifecycle ───────────────────────────────────────────────────
+
+// {type:'symbolSearch', q} → reqMatchingSymbols → symbolSamples event replies.
+function handleSymbolSearch(ws, msg) {
+  const q = String(msg.q || '').trim();
+  if (!q || !ib || !connected) {
+    if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'symbolSearchResult', q, matches: [] }));
+    return;
+  }
+  const reqId = reqSeq++;
+  subs.set(reqId, { kind: 'symbol-search', q, ws });
+  try {
+    ib.reqMatchingSymbols(reqId, q);
+  } catch (e) {
+    console.log('[ibkr] reqMatchingSymbols failed:', e.message);
+    subs.delete(reqId);
+    if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'symbolSearchResult', q, matches: [] }));
+  }
+}
+
+// {type:'activateSymbol', symbol, conId} → tear down any prior guest, pause the
+// SPXW chain, resolve the stock, subscribe ticks + history, discover the option
+// params, subscribe the near-ATM chain. Broadcasts a 'guest' snapshot as data
+// arrives.
+function handleActivateSymbol(ws, msg) {
+  const symbol = String(msg.symbol || '').trim().toUpperCase();
+  const conId = Number(msg.conId) || null;
+  if (!symbol || !ib || !connected) return;
+  teardownGuest();       // any previous guest first
+  pauseSpxwChain();      // yield the market-data lines to the guest chain
+  guest = {
+    symbol, conId,
+    reqId: null,         // the guest-secdef reqId (set below)
+    stkReqId: null,
+    contract: null,      // resolved STK contract
+    price: null,
+    series: newGuestSeries(),
+    expiry: null,
+    strikeStep: null,
+    expirations: [],
+    strikes: [],         // full discovered strike list (order validation)
+    windowStrikes: [],   // the subscribed near-ATM window
+    multiplier: '100',
+    tradingClass: null,
+    exchange: 'SMART',
+    secdefRaw: null,     // best secdef row seen (most strikes)
+    live: false
+  };
+  console.log(`[ibkr] guest activate: ${symbol} (conId=${conId})`);
+  // Resolve the stock contract first (need the conId + primaryExch for reqMktData
+  // and the secdef lookup). If the client supplied a conId we still resolve to get
+  // the canonical contract.
+  const cdReqId = reqSeq++;
+  subs.set(cdReqId, { kind: 'guest-cd' });
+  try {
+    ib.reqContractDetails(cdReqId, conId
+      ? { conId, exchange: 'SMART' }
+      : { symbol, secType: 'STK', exchange: 'SMART', currency: 'USD' });
+  } catch (e) {
+    console.log('[ibkr] guest reqContractDetails failed:', e.message);
+    subs.delete(cdReqId);
+    teardownGuest();
+    restoreSpxwChain();
+  }
+  broadcast(guestMsg());
+}
+
+function onGuestContractDetails(s, details) {
+  if (!guest) return;
+  const c = details?.contract;
+  if (!c) return;
+  // First details row wins (SMART already collapses exchanges for a US stock).
+  if (guest.contract) return;
+  guest.contract = {
+    conId: c.conId,
+    symbol: c.symbol || guest.symbol,
+    secType: 'STK',
+    exchange: 'SMART',
+    primaryExch: c.primaryExch || c.exchange || undefined,
+    currency: c.currency || 'USD'
+  };
+  guest.conId = c.conId;
+  subscribeGuestStock();
+  requestGuestHistory();
+  requestGuestSecDef();
+}
+
+function subscribeGuestStock() {
+  if (!ib || !guest || !guest.contract) return;
+  const reqId = reqSeq++;
+  guest.stkReqId = reqId;
+  subs.set(reqId, { kind: 'guest-stk' });
+  try {
+    ib.reqMktData(reqId, guest.contract, '', false, false, []);
+  } catch (e) {
+    console.log('[ibkr] guest stock reqMktData failed:', e.message);
+  }
+}
+
+function requestGuestHistory() {
+  if (!ib || !guest || !guest.contract) return;
+  const reqId = reqSeq++;
+  subs.set(reqId, { kind: 'guest-hist', series: guest.series });
+  try {
+    ib.reqHistoricalData(reqId, guest.contract, '', '2 D', '1 min', 'TRADES', 1, 2, false);
+  } catch (e) {
+    console.log('[ibkr] guest reqHistoricalData failed:', e.message);
+  }
+}
+
+function requestGuestSecDef() {
+  if (!ib || !guest || !guest.conId) return;
+  const reqId = reqSeq++;
+  guest.reqId = reqId;
+  subs.set(reqId, { kind: 'guest-secdef' });
+  try {
+    // futFopExchange '' for a stock underlying; underlyingSecType STK.
+    ib.reqSecDefOptParams(reqId, guest.symbol, '', 'STK', guest.conId);
+  } catch (e) {
+    console.log('[ibkr] guest reqSecDefOptParams failed:', e.message);
+    subs.delete(reqId);
+  }
+}
+
+// Multiple secdef rows can arrive (one per listing exchange); keep the row with
+// the most strikes — usually the SMART/OCC-complete set.
+function onGuestSecDef({ exchange, tradingClass, multiplier, expirations, strikes }) {
+  if (!guest) return;
+  const n = Array.isArray(strikes) ? strikes.length : 0;
+  const bestN = guest.secdefRaw ? guest.secdefRaw.strikes.length : -1;
+  if (n > bestN) {
+    guest.secdefRaw = {
+      exchange, tradingClass, multiplier,
+      expirations: (expirations || []).map(String),
+      strikes: (strikes || []).map(Number).filter((k) => Number.isFinite(k) && k > 0)
+    };
+  }
+}
+
+function finishGuestSecDef() {
+  if (!guest || !guest.secdefRaw) { console.log('[ibkr] guest secdef: no params returned'); return; }
+  const raw = guest.secdefRaw;
+  guest.expirations = raw.expirations.slice().sort();
+  guest.strikes = raw.strikes.slice().sort((a, b) => a - b);
+  guest.multiplier = raw.multiplier || '100';
+  guest.tradingClass = raw.tradingClass || guest.symbol;
+  const expiry = pickExpiry(guest.expirations, Date.now());
+  if (!expiry) { console.log(`[ibkr] guest ${guest.symbol}: no live weekly expiry in secdef`); broadcast(guestMsg()); return; }
+  guest.expiry = expiry;
+  guest.strikeStep = deriveStrikeStep(guest.strikes, guest.price ?? guest.strikes[Math.floor(guest.strikes.length / 2)]);
+  console.log(`[ibkr] guest ${guest.symbol}: expiry ${expiry}, step ${guest.strikeStep}, ${guest.strikes.length} strikes`);
+  setGuestChain();
+  broadcast(guestMsg());
+}
+
+// Subscribe the near-ATM window (n strikes each side of spot) with greeks. Same
+// tick-handling shape as the SPXW chain but a separate reqId range + map.
+function setGuestChain() {
+  if (!ib || !guest || guest.expiry == null || guest.price == null) return;
+  const want = new Set(strikeWindow(guest.strikes, guest.price, GUEST_STRIKE_WINDOW));
+  guest.windowStrikes = [...want].sort((a, b) => a - b);
+
+  for (const [key, entry] of guestChain.entries()) {
+    if (!want.has(entry.strike)) {
+      try { ib.cancelMktData(entry.reqId); } catch {}
+      subs.delete(entry.reqId);
+      guestChain.delete(key);
+    }
+  }
+  for (const strike of want) {
+    for (const right of ['C', 'P']) {
+      const key = `${strike}${right}`;
+      if (guestChain.has(key)) continue;
+      const reqId = reqSeq++;
+      const entry = { reqId, strike, right, expiry: guest.expiry };
+      guestChain.set(key, entry);
+      subs.set(reqId, { kind: 'guest-opt', strike, right, key });
+      try {
+        ib.reqMktData(reqId, guestOptContract(strike, right, guest.expiry), '', false, false, []);
+      } catch (e) {
+        console.log(`[ibkr] guest reqMktData ${strike}${right} failed:`, e.message);
+      }
+    }
+  }
+}
+
+// Recenter the guest chain when spot drifts a full step beyond the window edge —
+// mirrors maybeRecenterChain, guest-side.
+function maybeRecenterGuestChain() {
+  if (!guest || guest.expiry == null || guest.price == null || !guest.strikeStep) return;
+  const w = guest.windowStrikes;
+  if (!w.length) { setGuestChain(); return; }
+  const lo = w[0], hi = w[w.length - 1];
+  const margin = guest.strikeStep * GUEST_RECENTRE_STEPS;
+  if (guest.price < lo - margin || guest.price > hi + margin) setGuestChain();
+}
+
+function feedGuestTick(price) {
+  if (!guest) return;
+  guest.price = price;
+  guest.live = true;
+  guest.series.lastTick = Date.now();
+  const candle = feedGuestSeries(price);
+  // Guest chain hasn't been built yet until the secdef + a price both land.
+  if (guest.expiry != null && guestChain.size === 0) setGuestChain();
+  maybeRecenterGuestChain();
+  broadcast({ type: 'guestTick', symbol: guest.symbol, price, candle });
+}
+
+// A parallel candle builder + runaway guard, isolated from the SPX series/watchdog.
+function feedGuestSeries(price) {
+  const s = guest.series;
+  const now = Date.now();
+  const bucket = Math.floor(now / CANDLE_MS) * CANDLE_MS;
+  const last = s.candles[s.candles.length - 1];
+  if (!last || last.t < bucket) {
+    const open = price;
+    s.candles.push({ t: bucket, open, high: open, low: open, close: price, volume: 0 });
+    s.edge = bucket + CANDLE_MS;
+    s.recentBars.push(now);
+    s.recentBars = s.recentBars.filter((t) => now - t < 60_000);
+    // Runaway guard: a drifted clock must not spawn multiple bars/minute. Unlike
+    // the SPX watchdog we don't reconnect (that would kill live orders) — we just
+    // stop appending and log; the bucket math self-heals on the next real minute.
+    if (s.recentBars.length > BAR_RUNAWAY) {
+      console.log(`[ibkr] guest ${guest.symbol} candle runaway — dropping bar`);
+      s.candles.pop();
+      return s.candles[s.candles.length - 1];
+    }
+    if (s.candles.length > GUEST_HISTORY_CANDLES + 32) s.candles = s.candles.slice(-GUEST_HISTORY_CANDLES - 32);
+  } else {
+    last.high = Math.max(last.high, price);
+    last.low = Math.min(last.low, price);
+    last.close = price;
+  }
+  return s.candles[s.candles.length - 1];
+}
+
+// The guest OPT contract from discovered params. multiplier from the secdef; the
+// bridge validates strike/expiry against the discovered lists BEFORE this is built.
+function guestOptContract(strike, right, expiry) {
+  return {
+    symbol: guest.symbol, secType: 'OPT', exchange: 'SMART', currency: 'USD',
+    lastTradeDateOrContractMonth: expiry, strike, right,
+    multiplier: guest.multiplier || '100',
+    ...(guest.tradingClass ? { tradingClass: guest.tradingClass } : {})
+  };
+}
+
+function handleDeactivateSymbol() {
+  if (!guest) return;
+  console.log(`[ibkr] guest deactivate: ${guest.symbol}`);
+  teardownGuest();
+  restoreSpxwChain();
+  broadcast(guestMsg()); // guest: null
+}
+
+// Cancel all guest subs and clear the guest state. Safe to call when no guest.
+function teardownGuest() {
+  if (guest) {
+    for (const entry of guestChain.values()) { if (ib) { try { ib.cancelMktData(entry.reqId); } catch {} } }
+    if (ib && guest.stkReqId != null) { try { ib.cancelMktData(guest.stkReqId); } catch {} }
+  }
+  for (const [reqId, s] of [...subs]) {
+    if (s.kind === 'guest-stk' || s.kind === 'guest-opt' || s.kind === 'guest-cd' ||
+        s.kind === 'guest-secdef' || s.kind === 'guest-hist') subs.delete(reqId);
+  }
+  guestChain.clear();
+  guest = null;
+}
+
+function guestChainPayload(e) {
+  return {
+    type: 'guestGreeks',
+    strike: e.strike,
+    optionType: e.right === 'C' ? 'call' : 'put',
+    premium: e.premium, delta: e.delta, gamma: e.gamma, theta: e.theta, vega: e.vega, iv: e.iv,
+    bid: e.bid, ask: e.ask, dayHigh: e.dayHigh, dayLow: e.dayLow
+  };
+}
+
+// The guest snapshot. Same field SHAPES as the SPX snapshot's equivalents so the
+// client reuses its parsing. guest:null means no guest is active.
+function guestMsg() {
+  if (!guest) return { type: 'guest', guest: null };
+  const greeks = [];
+  for (const e of guestChain.values()) {
+    if (e.expiry !== guest.expiry) continue;
+    if (e.premium == null && e.bid == null && e.ask == null) continue;
+    greeks.push({
+      strike: e.strike,
+      type: e.right === 'C' ? 'call' : 'put',
+      premium: e.premium, delta: e.delta, gamma: e.gamma, theta: e.theta, vega: e.vega, iv: e.iv,
+      bid: e.bid, ask: e.ask, dayHigh: e.dayHigh, dayLow: e.dayLow
+    });
+  }
+  return {
+    type: 'guest',
+    guest: {
+      symbol: guest.symbol,
+      price: guest.price,
+      candles: guest.series.candles,
+      greeks,
+      expiry: guest.expiry,
+      strikeStep: guest.strikeStep,
+      expirations: guest.expirations,
+      secType: 'STK',
+      settlement: 'physical',
+      live: guest.live
+    }
+  };
 }
 
 // ── Session evaluation ──────────────────────────────────────────────────────
@@ -1409,6 +1860,11 @@ function resetSubscriptions() {
   currentExpiry = null;
   esContract = null;
   esExpiry = null;
+  // Guest state is NOT persisted across a reconnect — its subs were just cleared
+  // with everyone else's, and the client re-activates from memory. Drop it so a
+  // stale guest can't drive the order path against contracts we no longer track.
+  guestChain.clear();
+  guest = null;
 }
 
 function setStatus(s) {
@@ -1497,6 +1953,7 @@ function workingOrdersList() {
     .filter(([, o]) => !DEAD_ORDER_STATUSES.has(o.status))
     .map(([orderId, o]) => ({
       orderId,
+      symbol: o.symbol ?? 'SPX',
       action: o.action,
       strike: o.strike,
       right: o.right,
@@ -1552,7 +2009,30 @@ function handleOrderRequest(ws, msg) {
   const right = msg.right === 'P' ? 'P' : 'C';
   const strike = Number(msg.strike);
   const qty = Math.max(1, Math.min(99, parseInt(msg.qty, 10) || 0));
-  const expiry = /^\d{8}$/.test(String(msg.expiry || '')) ? String(msg.expiry) : currentExpiry;
+
+  // A guest order carries a `symbol` (absent, or 'SPX', means SPXW exactly as
+  // before). Guests: build the OPT contract from DISCOVERED params, validate the
+  // strike/expiry against them, and refuse a naked MKT — marketable limits only
+  // in Phase A (the ⚡ red MKT arm is SPX-only). `makeContract` unifies both paths.
+  const guestSym = typeof msg.symbol === 'string' && msg.symbol && msg.symbol !== 'SPX'
+    ? msg.symbol.toUpperCase() : null;
+  let expiry, makeContract, orderSymbol;
+  if (guestSym) {
+    if (!guest || guest.symbol !== guestSym) return reject(`guest ${guestSym} not active`);
+    expiry = /^\d{8}$/.test(String(msg.expiry || '')) ? String(msg.expiry) : guest.expiry;
+    const v = validateGuestOrder({ strike, right, expiry }, { strikes: guest.strikes, expirations: guest.expirations });
+    if (!v.ok) return reject(v.reason);
+    // Naked MKT is never routed for a guest — require a real limit price.
+    if (!(Number.isFinite(Number(msg.limit)) && Number(msg.limit) > 0)) {
+      return reject('guest orders are marketable limits only (no MKT)');
+    }
+    orderSymbol = guestSym;
+    makeContract = () => guestOptContract(strike, right, expiry);
+  } else {
+    expiry = /^\d{8}$/.test(String(msg.expiry || '')) ? String(msg.expiry) : currentExpiry;
+    orderSymbol = 'SPX';
+    makeContract = () => spxwContract(strike, right, expiry);
+  }
   if (!(strike > 0) || !qty || !expiry) return reject('invalid order (strike/qty/expiry)');
 
   // Optional limit price: caps what a resting order can pay (a queued MKT order
@@ -1591,20 +2071,20 @@ function handleOrderRequest(ws, msg) {
     // order placed outside RTH would be held until the regular open.
     outsideRth: true
   };
-  orders.set(orderId, { clientRef, action, strike, right, expiry, qty, orderType: order.orderType, limit: isLimit ? limit : isStop ? stop : null, status: 'submitted', filled: 0, avgFillPrice: 0 });
+  orders.set(orderId, { clientRef, symbol: orderSymbol, action, strike, right, expiry, qty, orderType: order.orderType, limit: isLimit ? limit : isStop ? stop : null, status: 'submitted', filled: 0, avgFillPrice: 0 });
   // Track every id we hand to IBKR so a mid-bracket throw can unwind cleanly.
   // The parent goes out transmit:false when children exist; if a child placeOrder
   // throws, the parent is sitting HELD in TWS and must be cancelled, not just
   // dropped from the map — otherwise it squats an order-id slot forever.
   const placedIds = [];
   try {
-    ib.placeOrder(orderId, spxwContract(strike, right, expiry), order);
+    ib.placeOrder(orderId, makeContract(), order);
     placedIds.push(orderId);
     if (wantTp || wantSl) {
-      const contract = spxwContract(strike, right, expiry);
+      const contract = makeContract();
       if (wantTp) {
         const tpId = reqSeq++;
-        orders.set(tpId, { clientRef: `${clientRef}:tp`, action: 'SELL', strike, right, expiry, qty, orderType: 'LMT', limit: takeProfit, status: 'submitted', filled: 0, avgFillPrice: 0 });
+        orders.set(tpId, { clientRef: `${clientRef}:tp`, symbol: orderSymbol, action: 'SELL', strike, right, expiry, qty, orderType: 'LMT', limit: takeProfit, status: 'submitted', filled: 0, avgFillPrice: 0 });
         ib.placeOrder(tpId, contract, {
           action: 'SELL', orderType: 'LMT', lmtPrice: takeProfit, totalQuantity: qty,
           tif: 'DAY', parentId: orderId, transmit: !wantSl, account, outsideRth: true
@@ -1614,7 +2094,7 @@ function handleOrderRequest(ws, msg) {
       }
       if (wantSl) {
         const slId = reqSeq++;
-        orders.set(slId, { clientRef: `${clientRef}:sl`, action: 'SELL', strike, right, expiry, qty, orderType: 'STP', limit: stopLoss, status: 'submitted', filled: 0, avgFillPrice: 0 });
+        orders.set(slId, { clientRef: `${clientRef}:sl`, symbol: orderSymbol, action: 'SELL', strike, right, expiry, qty, orderType: 'STP', limit: stopLoss, status: 'submitted', filled: 0, avgFillPrice: 0 });
         ib.placeOrder(slId, contract, {
           action: 'SELL', orderType: 'STP', auxPrice: stopLoss, totalQuantity: qty,
           tif: 'DAY', parentId: orderId, transmit: true, account, outsideRth: true
@@ -1623,7 +2103,8 @@ function handleOrderRequest(ws, msg) {
         console.log(`[ibkr] bracket SL SELL STP@${stopLoss} (order ${slId}, parent ${orderId})`);
       }
     }
-    console.log(`[ibkr] placed ${action} ${isLimit ? `LMT@${limit}` : isStop ? `STP@${stop}` : 'MKT'}${ocaGroup ? ' [oca]' : ''} ${qty} SPXW ${strike}${right} ${expiry} (order ${orderId})`);
+    const label = orderSymbol === 'SPX' ? 'SPXW' : orderSymbol;
+    console.log(`[ibkr] placed ${action} ${isLimit ? `LMT@${limit}` : isStop ? `STP@${stop}` : 'MKT'}${ocaGroup ? ' [oca]' : ''} ${qty} ${label} ${strike}${right} ${expiry} (order ${orderId})`);
     broadcastOrders();
     send({ type: 'orderAck', clientRef, orderId, accepted: true });
   } catch (e) {
@@ -1935,7 +2416,9 @@ function recordTrade(orderId, o, filled, avgFillPrice) {
   o.recorded = true;
   const trade = {
     id: ++tradeSeq, orderId, ts: Date.now(), action: o.action, strike: o.strike,
-    right: o.right, expiry: o.expiry, qty: filled, price: avgFillPrice
+    right: o.right, expiry: o.expiry, qty: filled, price: avgFillPrice,
+    // Blotter/journal rows gain a symbol; absent (old rows) reads as SPXW.
+    ...(o.symbol && o.symbol !== 'SPX' ? { symbol: o.symbol } : {})
   };
   trades.push(trade);
   if (trades.length > 1000) trades = trades.slice(-1000);
@@ -1987,6 +2470,9 @@ function recordExecution(contract, execution, live = false) {
   const strike = Number(contract.strike);
   const right = contract.right === 'P' ? 'P' : 'C';
   const expiry = String(contract.lastTradeDateOrContractMonth || '').slice(0, 8);
+  // Underlying symbol is authoritative from the contract. SPX (SPXW) stays
+  // absent for back-compat; a guest carries its symbol on the row.
+  const symbol = String(contract.symbol || '') !== 'SPX' ? String(contract.symbol || '') : null;
   const qty = execution.shares ?? 0;
   const price = execution.avgPrice ?? execution.price ?? 0;
   seenExecIds.add(execId);
@@ -2003,7 +2489,8 @@ function recordExecution(contract, execution, live = false) {
     id: ++tradeSeq, orderId: execution.orderId, execId,
     // Live fill: stamp now. Backfill: parse the Central time, clamped to now.
     ts: live ? Date.now() : Math.min(parseExecTime(execution.time), Date.now()),
-    action, strike, right, expiry, qty, price
+    action, strike, right, expiry, qty, price,
+    ...(symbol ? { symbol } : {})
   };
   trades.push(trade);
   if (trades.length > 1000) trades = trades.slice(-1000);
