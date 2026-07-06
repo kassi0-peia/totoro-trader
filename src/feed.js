@@ -51,7 +51,14 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent } = {}) {
       replayDays: {},        // replay mode: "YYYYMMDD" -> full 1-min RTH session
       journal: null,         // multi-day fill archive: "YYYYMMDD" -> [fill, ...] (null until requested)
       funds: null,           // { availableFunds, buyingPower, netLiquidation }
-      spxClose: null         // previous trading day's 4:00 PM SPX cash close
+      spxClose: null,        // previous trading day's 4:00 PM SPX cash close
+      // ── Guest-symbol layer (multi-symbol Phase A) ──
+      // null when no guest is active; otherwise the guest instrument's cockpit
+      // data, same field shapes as the SPX equivalents so parsing is reusable.
+      // guestGreeksMap is SEPARATE from greeksMap — guest greeks never merge in.
+      guest: null,           // { symbol, price, candles, expiry, strikeStep, expirations, settlement, live }
+      guestGreeksMap: new Map(),
+      searchResults: null    // { q, matches:[{symbol,name,conId,secType,exchange,currency}] } | null
     };
   });
 
@@ -170,10 +177,34 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent } = {}) {
     return true;
   }, []);
 
-  return { ...snapshot, sendOrder, sendCancel, requestQuote, requestHistory, requestOptHistory, requestReplayDay, requestJournal };
+  // ── Guest-symbol senders (multi-symbol Phase A) ──
+  const searchSymbols = useCallback((q) => {
+    const ws = socketRef.current;
+    if (!ws || ws.readyState !== 1) return false;
+    ws.send(JSON.stringify({ type: 'symbolSearch', q }));
+    return true;
+  }, []);
+
+  const activateSymbol = useCallback((symbol, conId) => {
+    const ws = socketRef.current;
+    if (!ws || ws.readyState !== 1) return false;
+    ws.send(JSON.stringify({ type: 'activateSymbol', symbol, conId }));
+    return true;
+  }, []);
+
+  const deactivateSymbol = useCallback(() => {
+    const ws = socketRef.current;
+    if (!ws || ws.readyState !== 1) return false;
+    ws.send(JSON.stringify({ type: 'deactivateSymbol' }));
+    return true;
+  }, []);
+
+  return { ...snapshot, sendOrder, sendCancel, requestQuote, requestHistory, requestOptHistory, requestReplayDay, requestJournal, searchSymbols, activateSymbol, deactivateSymbol };
 }
 
-function applyMessage(s, msg) {
+// Exported for unit testing the reducer (guest merges must not disturb SPX
+// snapshot fields). Not part of the hook's public surface otherwise.
+export function applyMessage(s, msg) {
   if (msg.type === 'snapshot') {
     const greeksMap = new Map();
     for (const g of msg.greeks || []) greeksMap.set(key(g.strike, g.type), g);
@@ -296,6 +327,42 @@ function applyMessage(s, msg) {
       bid: msg.bid, ask: msg.ask, dayHigh: msg.dayHigh, dayLow: msg.dayLow, tickTs: msg.tickTs
     });
     return { ...s, greeksMap: next };
+  }
+
+  // ── Guest-symbol messages (multi-symbol Phase A) ──
+  // A full guest snapshot. Rebuilds the SEPARATE guestGreeksMap from scratch;
+  // guest:null tears the guest cockpit down. SPX snapshot fields are untouched.
+  if (msg.type === 'guest') {
+    if (!msg.guest) return { ...s, guest: null, guestGreeksMap: new Map() };
+    const gm = new Map();
+    for (const g of msg.guest.greeks || []) gm.set(key(g.strike, g.type), g);
+    const { greeks, ...rest } = msg.guest;
+    return { ...s, guest: rest, guestGreeksMap: gm };
+  }
+
+  if (msg.type === 'guestTick') {
+    if (!s.guest || msg.symbol !== s.guest.symbol) return s;
+    let candles = s.guest.candles;
+    if (msg.candle) {
+      const last = candles[candles.length - 1];
+      if (last && last.t === msg.candle.t) candles = [...candles.slice(0, -1), msg.candle];
+      else candles = [...candles, msg.candle];
+    }
+    return { ...s, guest: { ...s.guest, price: msg.price, candles, live: true } };
+  }
+
+  if (msg.type === 'guestGreeks') {
+    const next = new Map(s.guestGreeksMap);
+    next.set(key(msg.strike, msg.optionType), {
+      strike: msg.strike, type: msg.optionType, premium: msg.premium,
+      delta: msg.delta, gamma: msg.gamma, theta: msg.theta, vega: msg.vega, iv: msg.iv,
+      bid: msg.bid, ask: msg.ask, dayHigh: msg.dayHigh, dayLow: msg.dayLow
+    });
+    return { ...s, guestGreeksMap: next };
+  }
+
+  if (msg.type === 'symbolSearchResult') {
+    return { ...s, searchResults: { q: msg.q, matches: msg.matches || [] } };
   }
 
   return s;
