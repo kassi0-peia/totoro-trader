@@ -293,7 +293,7 @@ function applyMessage(s, msg) {
     next.set(key(msg.strike, msg.optionType), {
       strike: msg.strike, type: msg.optionType, premium: msg.premium,
       delta: msg.delta, gamma: msg.gamma, theta: msg.theta, vega: msg.vega, iv: msg.iv,
-      bid: msg.bid, ask: msg.ask, dayHigh: msg.dayHigh, dayLow: msg.dayLow
+      bid: msg.bid, ask: msg.ask, dayHigh: msg.dayHigh, dayLow: msg.dayLow, tickTs: msg.tickTs
     });
     return { ...s, greeksMap: next };
   }

@@ -31,6 +31,10 @@ function randomPastWeekday(exclude) {
 }
 
 const IVOL = 0.18;
+// How stale a bid/ask may be and still take the mark over the model tick.
+// Chain strikes tick every few seconds when the book is alive; the far-strike
+// snapshot poller refreshes every 30 s — 60 s covers both without flapping.
+const MID_FRESH_MS = 60_000;
 
 function timeToExpiryYearsAt(now) {
   const d = new Date(now);
@@ -389,12 +393,27 @@ export default function App() {
       return { premium: intrinsic, delta: 0, gamma: 0, theta: 0, vega: 0, source: 'expired' };
     }
     const live = liveGreeks(feed.greeksMap, strike, type);
+    const q = liveQuote(feed.greeksMap, strike, type);
+    // Prefer the market's own mid for the MARK when the quote is fresh. IBKR's
+    // model tick prices the whole chain off one shared underlying that can sit
+    // points away from the options market's parity — measured $150+/contract of
+    // phantom P/L on 2026-07-02 (holiday) AND 2026-07-05 (normal overnight),
+    // mark-audit.js. Greeks still come from the model; only the premium moves.
+    // Freshness gate (tickTs from the bridge, snapshotTs for far-strike polls)
+    // so a dead quote can never poison the mark; zero-bid wings excluded.
+    const freshTs = q?.tickTs ?? q?.snapshotTs;
+    const fresh = q && q.bid > 0 && q.ask >= q.bid && freshTs != null && now - freshTs < MID_FRESH_MS;
+    if (fresh) {
+      const mid = (q.bid + q.ask) / 2;
+      if (live) return { premium: mid, delta: live.delta, gamma: live.gamma, theta: live.theta, vega: live.vega, source: 'mid' };
+      const g = bsGreeks({ S: feed.price, K: strike, T, sigma: IVOL, type });
+      return { ...g, premium: mid, source: 'mid' };
+    }
     if (live) {
       return { premium: live.premium, delta: live.delta, gamma: live.gamma, theta: live.theta, vega: live.vega, source: 'ibkr' };
     }
     // No model premium, but a real quote (e.g. snapshot for a far strike):
     // mark at the bid/ask mid — the flat-IV model misprices wings badly.
-    const q = liveQuote(feed.greeksMap, strike, type);
     const g = bsGreeks({ S: feed.price, K: strike, T, sigma: IVOL, type });
     if (q && q.bid != null && q.ask != null) {
       return { ...g, premium: (q.bid + q.ask) / 2, source: 'quote' };
