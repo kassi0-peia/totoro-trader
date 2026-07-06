@@ -64,8 +64,11 @@ ws.on('message', async (data) => {
   // of a model-underlying error — near zero means the model agrees with parity.
   const band = rows.filter((r) => Math.abs(r.delta ?? 0) >= 0.15 && Math.abs(r.delta ?? 0) <= 0.60);
   const worst = rows.reduce((w, r) => (Math.abs(r.gap) > Math.abs(w.gap) ? r : w));
+  // gap ≈ delta·ΔS, so the shared-underlying estimate is Σ(gap/δ)·|δ| / Σ|δ| =
+  // Σ gap·sign(δ) / Σ|δ|. Summing raw gaps would let call(+) and put(−) gaps
+  // CANCEL — hiding exactly the shared offset this line exists to expose.
   const wSum = band.reduce((s, r) => s + Math.abs(r.delta), 0);
-  const undOff = wSum ? band.reduce((s, r) => s + r.gap, 0) / wSum : null;
+  const undOff = wSum ? band.reduce((s, r) => s + r.gap * Math.sign(r.delta || 1), 0) / wSum : null;
   const meanAbs = band.length ? band.reduce((s, r) => s + Math.abs(r.gap), 0) / band.length : null;
 
   console.log('---');
