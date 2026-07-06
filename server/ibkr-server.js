@@ -1845,7 +1845,7 @@ function chainPayload(e) {
     strike: e.strike,
     optionType: e.right === 'C' ? 'call' : 'put',
     premium: e.premium, delta: e.delta, gamma: e.gamma, theta: e.theta, vega: e.vega, iv: e.iv,
-    bid: e.bid, ask: e.ask, dayHigh: e.dayHigh, dayLow: e.dayLow
+    bid: e.bid, ask: e.ask, dayHigh: e.dayHigh, dayLow: e.dayLow, tickTs: e.tickTs
   };
 }
 
@@ -1858,7 +1858,7 @@ function snapshotMsg() {
       strike: e.strike,
       type: e.right === 'C' ? 'call' : 'put',
       premium: e.premium, delta: e.delta, gamma: e.gamma, theta: e.theta, vega: e.vega, iv: e.iv,
-      bid: e.bid, ask: e.ask, dayHigh: e.dayHigh, dayLow: e.dayLow
+      bid: e.bid, ask: e.ask, dayHigh: e.dayHigh, dayLow: e.dayLow, tickTs: e.tickTs
     });
   }
   return {
