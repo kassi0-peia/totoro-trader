@@ -315,6 +315,21 @@ export default function Chart({
     ctx.fillStyle = theme.bg;
     ctx.fillRect(0, 0, size.w, size.h);
 
+    // ── DRAW ORDER IS Z-ORDER ────────────────────────────────────────────────
+    // Each painter below is called in the exact sequence the original inline
+    // effect used; the sequence is the layering contract — later calls paint OVER
+    // earlier ones. DO NOT reorder:
+    //   grid → candles (ITM shading, bodies/wicks, ES badge, volume)
+    //        → live price line + expected-move band
+    //        → axis-chain premiums (right gutter)
+    //        → position lines (+/label/✕ chips)   → { close, add, label } hits
+    //        → trade markers + decision-replay ghosts → { markers, ghosts } hits
+    //        → 🚏 bus stops (painted last, on top)  → bus hits
+    // The hit-lists are consumed in a DIFFERENT, also-fixed order by updateHover /
+    // handleClick (markers → ghosts → bus → label chips); click-swallowing depends
+    // on that cascade, so it too must not be reordered.
+    // ─────────────────────────────────────────────────────────────────────────
+
     drawGrid(ctx, { view, layout, theme, priceToY, indexToX, timeframe, showVolume, axisChain });
 
     drawCandles(ctx, { view, layout, theme, priceToY, indexToX, price, positions, showPositions, source, showVolume });
