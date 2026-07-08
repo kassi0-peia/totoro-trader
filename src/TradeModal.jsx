@@ -1,18 +1,27 @@
 import React, { useState, useEffect, useRef } from 'react';
 
-export default function TradeModal({ pending, theme, series, onRefresh, onCancel, onExecute, executionEnabled = false, accountType = null }) {
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function fmtExpiry(exp) {
+  if (typeof exp === 'string' && /^\d{8}$/.test(exp)) return `${MONTHS[+exp.slice(4, 6) - 1]} ${+exp.slice(6, 8)}`;
+  return null;
+}
+
+export default function TradeModal({ pending, theme, series, onRefresh, onCancel, onExecute, executionEnabled = false, accountType = null, guest = false }) {
   const canvasRef = useRef(null);
   const [cursor, setCursor] = useState(null); // {x,y} over the premium graph
   const [qty, setQty] = useState(1);
-  const [orderKind, setOrderKind] = useState('MKT'); // market is always the default
+  // Guest orders are marketable limits only (the bridge rejects a guest MKT), so
+  // the ticket opens on LMT and the MKT arm is disabled. SPX defaults to MKT.
+  const [orderKind, setOrderKind] = useState(guest ? 'LMT' : 'MKT');
   const [limitStr, setLimitStr] = useState('');
   const [tpStr, setTpStr] = useState('');  // optional bracket take-profit (SELL LMT, native — works overnight)
   const [slStr, setSlStr] = useState('');  // optional bracket stop (IBKR-simulated; unreliable pre-midnight)
 
   useEffect(() => {
     setQty(1);
-    setOrderKind('MKT');
-    // Prefill the limit field with the live ask so switching to LMT is one click.
+    setOrderKind(guest ? 'LMT' : 'MKT');
+    // Prefill the limit field with the live ask so switching to LMT is one click
+    // (and, in guest mode, so the pre-selected LMT ticket already has a price).
     setLimitStr(pending?.ask != null ? pending.ask.toFixed(2) : '');
     setTpStr('');
     setSlStr('');
@@ -163,8 +172,10 @@ export default function TradeModal({ pending, theme, series, onRefresh, onCancel
   }, [pending, series, theme, cursor]);
 
   if (!pending) return null;
-  const { strike, type, greeks, bid, ask } = pending;
+  const { strike, type, greeks, bid, ask, symbol, expiry, settlement } = pending;
   const color = type === 'call' ? theme.callLine : theme.putLine;
+  const expLabel = fmtExpiry(expiry);
+  const physical = settlement === 'physical';
   const hasQuote = bid != null && ask != null;
   const spread = hasQuote ? ask - bid : null;
   // Market BUY pays the ask (when quoted); a limit BUY can't pay more than the limit.
@@ -178,12 +189,20 @@ export default function TradeModal({ pending, theme, series, onRefresh, onCancel
         style={{ borderColor: color }}
       >
         <div className="modal-head">
+          {guest && symbol && <span className="modal-sym" style={{ color }}>{symbol}</span>}
           <span className="modal-type" style={{ color }}>
             {type === 'call' ? 'CALL' : 'PUT'}
           </span>
           <span className="modal-strike">{strike}</span>
-          <span className="modal-exp">0DTE</span>
+          {/* SPX 0DTE shows "0DTE"; a guest shows its real nearest-weekly date. */}
+          <span className="modal-exp">{guest ? (expLabel ? `W ${expLabel}` : 'weekly') : '0DTE'}</span>
         </div>
+
+        {physical && (
+          <div className="modal-settle-warn" data-tip="Unlike SPX (cash-settled), equity options settle into shares.">
+            American-style, physically settled — ITM at expiry becomes ±100 shares, not cash.
+          </div>
+        )}
 
         <canvas
           ref={canvasRef}
@@ -222,7 +241,9 @@ export default function TradeModal({ pending, theme, series, onRefresh, onCancel
           <div className="order-kind">
             <button
               className={`kind-btn${orderKind === 'MKT' ? ' active' : ''}`}
-              onClick={() => setOrderKind('MKT')}
+              onClick={() => !guest && setOrderKind('MKT')}
+              disabled={guest}
+              data-tip={guest ? 'Guest orders are marketable limits only — MKT is SPX-only in Phase A' : undefined}
             >MKT</button>
             <button
               className={`kind-btn${orderKind === 'LMT' ? ' active' : ''}`}
