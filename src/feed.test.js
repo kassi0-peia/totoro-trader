@@ -57,6 +57,13 @@ test('guestGreeks merges into guestGreeksMap only, never the SPX greeksMap', () 
   assert.equal(s1.greeksMap, s0.greeksMap); // SPX greeks untouched
 });
 
+test('guestGreeks carries tickTs so the guest mark ladder has a freshness gate', () => {
+  const s0 = { ...spxState(), guest: { symbol: 'SPCX' } };
+  const ts = 1_700_000_000_000;
+  const s1 = applyMessage(s0, { type: 'guestGreeks', strike: 455, optionType: 'call', premium: 5.0, bid: 4.9, ask: 5.1, tickTs: ts });
+  assert.equal(s1.guestGreeksMap.get('455C').tickTs, ts);
+});
+
 test('guestTick appends/replaces the live guest candle', () => {
   const s0 = { ...spxState(), guest: { symbol: 'SPCX', price: 452, candles: [{ t: 10, close: 452 }], live: true } };
   const s1 = applyMessage(s0, { type: 'guestTick', symbol: 'SPCX', price: 452.5, candle: { t: 10, close: 452.5 } });
