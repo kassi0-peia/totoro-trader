@@ -75,6 +75,7 @@ export default function Chart({
   ivol,
   timeToExpiryYears,
   timeframe,
+  strikeStep = 5,
   onRequestTrade,
   onQuickTrade = null,
   onClosePosition = null,
@@ -599,8 +600,11 @@ export default function Chart({
       ctx.font = '8.5px "JetBrains Mono", monospace';
       ctx.textBaseline = 'middle';
       ctx.textAlign = 'left';
-      const pxPer5 = (5 / Math.max(view.hi - view.lo, 0.001)) * (layout.priceBot - layout.priceTop);
-      const step = Math.max(1, Math.ceil(16 / Math.max(pxPer5, 0.0001))) * 5;
+      // Space the axis-chain rows on the instrument's real strike grid (SPX 5,
+      // a guest whatever its secdef reports). `pxPerStep` is the pixels one grid
+      // step spans; thin them to a multiple of the step when they'd crowd.
+      const pxPerStep = (strikeStep / Math.max(view.hi - view.lo, 0.001)) * (layout.priceBot - layout.priceTop);
+      const step = Math.max(1, Math.ceil(16 / Math.max(pxPerStep, 0.0001))) * strikeStep;
       const firstK = Math.ceil(view.lo / step) * step;
       const mid = (q) => (q && q.bid != null && q.ask != null ? (q.bid + q.ask) / 2 : q?.premium ?? null);
       const fmt = (v) => (v == null ? '–' : v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2));
@@ -888,7 +892,7 @@ export default function Chart({
         busHitsRef.current.push({ x: bx, y: by, half: 12, stop });
       }
     }
-  }, [candles, price, positions, theme, size, view, layout, priceToY, indexToX, timeframe, showMarkers, showVolume, expectedMove, axisChain, greeksMap, ivol, timeToExpiryYears, source, showPositions, ghostFills, busStops]);
+  }, [candles, price, positions, theme, size, view, layout, priceToY, indexToX, timeframe, showMarkers, showVolume, expectedMove, axisChain, strikeStep, greeksMap, ivol, timeToExpiryYears, source, showPositions, ghostFills, busStops]);
 
   // wheel zoom — attach non-passive so we can preventDefault page scroll
   useEffect(() => {
@@ -1090,7 +1094,7 @@ export default function Chart({
       }
       const rawPrice = yToPrice(y);
       const type = rawPrice > price ? 'call' : 'put';
-      const strike = snapStrike(rawPrice, 5);
+      const strike = snapStrike(rawPrice, strikeStep);
       // Strike-picking (premium tooltip, quotes, trading) only applies at the
       // live candle and rightward — hovering history is for reading the chart.
       const future = di >= tfCandles.length - 1;
@@ -1109,7 +1113,7 @@ export default function Chart({
       }
       setHover({ x, y, strike, type, future, greeks: g, ask: q?.ask, bid: q?.bid });
     },
-    [layout, view, tfCandles, yToPrice, price, ivol, timeToExpiryYears, greeksMap, requestQuote, timeframe, onHoverPosition]
+    [layout, view, tfCandles, yToPrice, price, ivol, timeToExpiryYears, greeksMap, requestQuote, timeframe, onHoverPosition, strikeStep]
   );
 
   // shared drag-move logic, used by mouse + single-finger touch
@@ -1304,7 +1308,7 @@ export default function Chart({
     if (di < tfCandles.length - 1) return;
     const rawPrice = yToPrice(y);
     const type = rawPrice > price ? 'call' : 'put';
-    const strike = snapStrike(rawPrice, 5);
+    const strike = snapStrike(rawPrice, strikeStep);
     onRequestTrade({ strike, type });
   };
 
