@@ -3,60 +3,20 @@ import { greeks, snapStrike } from './options.js';
 import { aggregateCandles } from './candles.js';
 import { liveQuote } from './feed.js';
 import { plDollars, plSign } from './pl.js';
+import { fmtTimeTf, fmtVol } from './chart/format.js';
+import { drawGrid } from './chart/draw/grid.js';
+import { drawCandles } from './chart/draw/candles.js';
+import { drawPriceLine } from './chart/draw/priceline.js';
+import { drawAxisChain } from './chart/draw/axisChain.js';
+import { drawPositions } from './chart/draw/positions.js';
+import { makeTToIdx } from './chart/coords.js';
+import { drawMarkers } from './chart/draw/markers.js';
+import { drawBusStops } from './chart/draw/busstops.js';
 
 const RIGHT_AXIS = 64;
 const BOTTOM_AXIS = 22;
 const VOLUME_HEIGHT_FRAC = 0.22;
 const PADDING_TOP = 12;
-const CANDLE_GAP_FRAC = 0.2;
-const ES_PROXY_ALPHA = 0.5; // overnight ES-proxy candles render at this opacity (provisional, not real SPX)
-
-function fmtPrice(p) {
-  return p.toFixed(2);
-}
-
-// Timeframe-aware axis label. Daily bars: month + day. Hourly: a compact
-// intraday axis — the time within a day, the bare day NUMBER at a day boundary,
-// and the month name at a month boundary. Keeping these narrow is also what stops
-// the 1h labels from overlapping (the old "Jun 14 21:00" was far too wide).
-function fmtTimeTf(t, tf) {
-  const d = new Date(t);
-  if (tf >= 1440) return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
-  if (tf >= 60) {
-    if (d.getDate() === 1 && d.getHours() === 0) return d.toLocaleDateString([], { month: 'short' });
-    if (d.getHours() === 0) return String(d.getDate());
-    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
-  }
-  return fmtTime(t);
-}
-
-function fmtTime(t) {
-  const d = new Date(t);
-  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
-}
-
-// "Nice" axis steps (1-2.5-5 sequence) so gridlines land on round prices
-// (… 2.5, 5, 10, 25, 50, 100 …) instead of arbitrary values like 7511.5.
-const TICK_STEPS = [0.25, 0.5, 1, 2.5, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000];
-function niceStep(raw) {
-  for (const s of TICK_STEPS) if (s >= raw) return s;
-  return TICK_STEPS[TICK_STEPS.length - 1];
-}
-function priceDecimals(step) {
-  if (Number.isInteger(step)) return 0;
-  return step >= 1 ? 1 : 2;
-}
-// Nice time-axis increments in minutes, so labels land on round clock times.
-const TIME_STEPS = [1, 2, 5, 10, 15, 20, 30, 60, 120, 240, 360, 720, 1440];
-function niceTimeStep(rawMin, tfMin) {
-  for (const s of TIME_STEPS) if (s >= rawMin && s >= tfMin) return s;
-  return TIME_STEPS[TIME_STEPS.length - 1];
-}
-function fmtVol(v) {
-  if (v >= 1e6) return (v / 1e6).toFixed(2) + 'M';
-  if (v >= 1e3) return (v / 1e3).toFixed(1) + 'k';
-  return Math.round(v).toString();
-}
 
 const MIN_VISIBLE = 14;
 const MAX_VISIBLE = 240;
@@ -356,542 +316,47 @@ export default function Chart({
     ctx.fillStyle = theme.bg;
     ctx.fillRect(0, 0, size.w, size.h);
 
-    // grid
-    ctx.strokeStyle = theme.grid;
-    ctx.lineWidth = 1;
-    ctx.font = '11px "JetBrains Mono", monospace';
+    // ── DRAW ORDER IS Z-ORDER ────────────────────────────────────────────────
+    // Each painter below is called in the exact sequence the original inline
+    // effect used; the sequence is the layering contract — later calls paint OVER
+    // earlier ones. DO NOT reorder:
+    //   grid → candles (ITM shading, bodies/wicks, ES badge, volume)
+    //        → live price line + expected-move band
+    //        → axis-chain premiums (right gutter)
+    //        → position lines (+/label/✕ chips)   → { close, add, label } hits
+    //        → trade markers + decision-replay ghosts → { markers, ghosts } hits
+    //        → 🚏 bus stops (painted last, on top)  → bus hits
+    // The hit-lists are consumed in a DIFFERENT, also-fixed order by updateHover /
+    // handleClick (markers → ghosts → bus → label chips); click-swallowing depends
+    // on that cascade, so it too must not be reordered.
+    // ─────────────────────────────────────────────────────────────────────────
 
-    // horizontal grid + price-axis labels. Normally the scale lives in the right
-    // gutter on "nice" 1-2.5-5 increments. But when the strike chain occupies the
-    // right gutter (axisChain), the price labels would collide with the call/put
-    // column — so move them to the LEFT and step on strike-friendly increments
-    // (10, then 25, 50, 100… as you zoom out) so they read as round strikes.
-    const STRIKE_STEPS = [10, 25, 50, 100, 250, 500, 1000];
-    const usableH = layout.priceBot - layout.priceTop;
-    const pStep = axisChain
-      ? (STRIKE_STEPS.find((s) => (s / Math.max(view.hi - view.lo, 0.001)) * usableH >= 34) ?? 2000)
-      : niceStep((view.hi - view.lo) / 6);
-    const pDec = priceDecimals(pStep);
-    ctx.textBaseline = 'middle';
-    const firstK = Math.ceil(view.lo / pStep);
-    const lastK = Math.floor(view.hi / pStep);
-    for (let k = firstK; k <= lastK; k++) {
-      const p = k * pStep;
-      const y = priceToY(p);
-      ctx.strokeStyle = theme.grid;
-      ctx.beginPath();
-      ctx.moveTo(0, y + 0.5);
-      ctx.lineTo(layout.chartW, y + 0.5);
-      ctx.stroke();
-      const label = p.toFixed(pDec);
-      ctx.fillStyle = theme.muted;
-      if (axisChain) {
-        // Tuck the price just inside the chart's right edge, directly left of the
-        // call/put premium columns (which live in the gutter past chartW). Right-
-        // aligned, with a faint chip so the number stays legible over candles.
-        ctx.textAlign = 'right';
-        const tw = ctx.measureText(label).width;
-        const rx = layout.chartW - 4;
-        ctx.save();
-        ctx.globalAlpha = 0.6;
-        ctx.fillStyle = theme.bg;
-        ctx.fillRect(rx - tw - 3, y - 7, tw + 6, 14);
-        ctx.restore();
-        ctx.fillStyle = theme.muted;
-        ctx.fillText(label, rx, y);
-      } else {
-        ctx.textAlign = 'left';
-        ctx.fillText(label, layout.chartW + 6, y);
-      }
-    }
+    drawGrid(ctx, { view, layout, theme, priceToY, indexToX, timeframe, showVolume, axisChain });
 
-    // vertical grid on "nice" time increments (… 5, 10, 15, 30, 60 min …),
-    // labelling only candles whose timestamp lands on a round clock boundary.
-    // Size the step to the pixels available (labels live in the real-candle
-    // region, ~left half), keeping them >= ~1.6 label-widths apart so the axis
-    // stays readable when zoomed in on a narrow mobile screen.
-    // Measure the ACTUAL label width for this timeframe — hourly+ labels carry a
-    // date ("Sep 28 23:59") and are far wider than a bare "00:00", so measuring
-    // the real format is what keeps the 1h bottom labels from overlapping.
-    const labelW = ctx.measureText(fmtTimeTf(Date.UTC(2026, 8, 28, 23, 59), timeframe)).width;
-    const realPx = view.want * layout.candleW;
-    const maxLabels = Math.max(1, Math.floor(realPx / (labelW * 1.6)));
-    const spanMin = view.want * timeframe;
-    let stepMin = niceTimeStep(spanMin / maxLabels, timeframe);
-    // When zoomed in tight, the chosen "nice" step can be wider than the entire
-    // visible window — then no candle's timestamp aligns to it and the time
-    // line disappears. Fall back to the largest TIME_STEP that fits the window
-    // so at least one label is guaranteed.
-    if (stepMin > spanMin) {
-      let fallback = timeframe;
-      for (const s of TIME_STEPS) {
-        if (s < timeframe) continue;
-        if (s > spanMin) break;
-        fallback = s;
-      }
-      stepMin = fallback;
-    }
-    const stepMs = stepMin * 60000;
-    ctx.textAlign = 'center';
-    for (let i = 0; i < view.slotCount; i++) {
-      const c = view.slots[i];
-      if (!c || c.t % stepMs !== 0) continue;
-      const x = indexToX(i);
-      ctx.beginPath();
-      ctx.moveTo(x + 0.5, layout.priceTop);
-      ctx.lineTo(x + 0.5, layout.volBot);
-      ctx.strokeStyle = theme.grid;
-      ctx.stroke();
-      ctx.fillStyle = theme.muted;
-      ctx.fillText(fmtTimeTf(c.t, timeframe), x, layout.h - 8);
-    }
+    drawCandles(ctx, { view, layout, theme, priceToY, indexToX, price, positions, showPositions, source, showVolume });
 
-    // separator between price + volume (only when the volume pane is visible)
-    if (showVolume) {
-      ctx.strokeStyle = theme.border;
-      ctx.beginPath();
-      ctx.moveTo(0, layout.priceBot + 0.5);
-      ctx.lineTo(layout.chartW, layout.priceBot + 0.5);
-      ctx.stroke();
-    }
+    drawPriceLine(ctx, { layout, theme, priceToY, price, expectedMove, rightAxis: RIGHT_AXIS });
 
-    // ITM shaded regions for open positions
-    for (const pos of showPositions ? positions : []) {
-      if (pos.status !== 'open') continue;
-      const isITM =
-        (pos.type === 'call' && price > pos.strike) ||
-        (pos.type === 'put' && price < pos.strike);
-      if (!isITM) continue;
-      const y1 = priceToY(pos.strike);
-      const y2 = priceToY(price);
-      const top = Math.min(y1, y2);
-      const bot = Math.max(y1, y2);
-      ctx.fillStyle = pos.type === 'call' ? 'rgba(125, 212, 160, 0.10)' : 'rgba(224, 125, 138, 0.10)';
-      ctx.fillRect(0, top, layout.chartW, bot - top);
-    }
+    drawAxisChain(ctx, { view, layout, theme, priceToY, price, axisChain, greeksMap, ivol, timeToExpiryYears, strikeStep });
 
-    // candles
-    const gap = layout.candleW * CANDLE_GAP_FRAC;
-    const bodyW = Math.max(1, layout.candleW - gap);
-    for (let i = 0; i < view.slotCount; i++) {
-      const c = view.slots[i];
-      if (!c) continue;
-      const x = indexToX(i);
-      const isUp = c.close >= c.open;
-      const color = isUp ? theme.up : theme.down;
-      const filled = isUp ? theme.upFilled : theme.downFilled;
-      const yHigh = priceToY(c.high);
-      const yLow = priceToY(c.low);
-      const yO = priceToY(c.open);
-      const yC = priceToY(c.close);
-      // Overnight ES-proxy bars (SPX-equiv = ES − frozen basis) are an estimate,
-      // not real SPX. Only dim them once real SPX cash is the live source (after
-      // 9:30) — while ES IS the live feed overnight, dimming would fade the whole
-      // working chart; the distinction only matters once real bars exist to contrast.
-      const proxy = c.src === 'ES' && source === 'SPX';
-      if (proxy) { ctx.save(); ctx.globalAlpha = ES_PROXY_ALPHA; }
-      // wick
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(x + 0.5, yHigh);
-      ctx.lineTo(x + 0.5, yLow);
-      ctx.stroke();
-      // body
-      const bodyTop = Math.min(yO, yC);
-      const bodyH = Math.max(1, Math.abs(yC - yO));
-      if (filled) {
-        ctx.fillStyle = color;
-        ctx.fillRect(x - bodyW / 2, bodyTop, bodyW, bodyH);
-      } else {
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 1.2;
-        ctx.strokeRect(x - bodyW / 2 + 0.5, bodyTop + 0.5, bodyW - 1, bodyH - 1);
-      }
-      if (proxy) ctx.restore();
-    }
-
-    // "ES" / "ES est." marker over the overnight proxy stretch (est = the basis
-    // itself is a cold-start/mid-roll estimate, so it's a proxy on an estimate).
     {
-      let firstProxy = -1, lastProxy = -1, anyEst = false;
-      for (let i = 0; i < view.slotCount; i++) {
-        const c = view.slots[i];
-        if (c && c.src === 'ES') { if (firstProxy < 0) firstProxy = i; lastProxy = i; if (c.est) anyEst = true; }
-      }
-      if (firstProxy >= 0 && source === 'SPX') {
-        const xMid = (indexToX(firstProxy) + indexToX(lastProxy)) / 2;
-        ctx.save();
-        ctx.globalAlpha = 0.6;
-        ctx.fillStyle = theme.muted;
-        ctx.font = '9px "JetBrains Mono", monospace';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'top';
-        ctx.fillText(anyEst ? 'ES est.' : 'ES', xMid, layout.priceTop + 4);
-        ctx.restore();
-      }
+      const posHits = drawPositions(ctx, { layout, theme, priceToY, positions, showPositions });
+      closeHitsRef.current = posHits.close;
+      addHitsRef.current = posHits.add;
+      posLabelHitsRef.current = posHits.label;
     }
 
-    // volume bars (skipped entirely when the volume pane is toggled off)
-    if (showVolume) {
-      for (let i = 0; i < view.slotCount; i++) {
-        const c = view.slots[i];
-        if (!c) continue;
-        const x = indexToX(i);
-        const isUp = c.close >= c.open;
-        const h = ((c.volume / Math.max(1, view.vmax)) * (layout.volBot - layout.volTop));
-        ctx.fillStyle = isUp ? theme.volUp : theme.volDown;
-        ctx.fillRect(x - bodyW / 2, layout.volBot - h, bodyW, h);
-      }
-    }
-
-    // current price dashed line
-    const yPrice = priceToY(price);
-    ctx.save();
-    ctx.setLineDash([5, 4]);
-    ctx.strokeStyle = theme.accent;
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(0, yPrice + 0.5);
-    ctx.lineTo(layout.chartW, yPrice + 0.5);
-    ctx.stroke();
-    ctx.restore();
-
-    // price label on right axis
-    ctx.fillStyle = theme.accent;
-    ctx.fillRect(layout.chartW, yPrice - 9, RIGHT_AXIS, 18);
-    ctx.fillStyle = '#0a0c12';
-    ctx.font = '11px "JetBrains Mono", monospace';
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(fmtPrice(price), layout.chartW + 6, yPrice);
-
-    // Expected-move band: the range the ATM straddle prices for expiry,
-    // anchored at the previous 4:00 PM cash close.
-    if (expectedMove && Number.isFinite(expectedMove.anchor) && expectedMove.width > 0) {
-      const yU = priceToY(expectedMove.anchor + expectedMove.width);
-      const yL = priceToY(expectedMove.anchor - expectedMove.width);
-      ctx.save();
-      ctx.globalAlpha = 0.35;
-      ctx.setLineDash([3, 5]);
-      ctx.strokeStyle = theme.muted;
-      ctx.lineWidth = 1;
-      for (const yy of [yU, yL]) {
-        ctx.beginPath();
-        ctx.moveTo(0, yy + 0.5);
-        ctx.lineTo(layout.chartW, yy + 0.5);
-        ctx.stroke();
-      }
-      ctx.font = '9px "JetBrains Mono", monospace';
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'bottom';
-      ctx.fillStyle = theme.muted;
-      ctx.globalAlpha = 0.7;
-      ctx.fillText(`+EM ${(expectedMove.anchor + expectedMove.width).toFixed(0)}`, 6, yU - 2);
-      ctx.fillText(`−EM ${(expectedMove.anchor - expectedMove.width).toFixed(0)}`, 6, yL - 2);
-      ctx.restore();
-    }
-
-    // Axis-as-chain: live call/put premiums painted beside each strike level
-    // in the right gutter — the chain lives on the chart, no bouncing. Falls
-    // back to the model where no quote streams (far strikes, replay).
-    if (axisChain) {
-      ctx.save();
-      ctx.font = '8.5px "JetBrains Mono", monospace';
-      ctx.textBaseline = 'middle';
-      ctx.textAlign = 'left';
-      // Space the axis-chain rows on the instrument's real strike grid (SPX 5,
-      // a guest whatever its secdef reports). `pxPerStep` is the pixels one grid
-      // step spans; thin them to a multiple of the step when they'd crowd.
-      const pxPerStep = (strikeStep / Math.max(view.hi - view.lo, 0.001)) * (layout.priceBot - layout.priceTop);
-      const step = Math.max(1, Math.ceil(16 / Math.max(pxPerStep, 0.0001))) * strikeStep;
-      const firstK = Math.ceil(view.lo / step) * step;
-      const mid = (q) => (q && q.bid != null && q.ask != null ? (q.bid + q.ask) / 2 : q?.premium ?? null);
-      const fmt = (v) => (v == null ? '–' : v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2));
-      for (let k = firstK; k <= view.hi; k += step) {
-        const y = priceToY(k);
-        if (y < layout.priceTop + 10 || y > layout.priceBot - 10) continue;
-        let c = mid(liveQuote(greeksMap, k, 'call'));
-        let p = mid(liveQuote(greeksMap, k, 'put'));
-        if (c == null) c = greeks({ S: price, K: k, T: timeToExpiryYears, sigma: ivol, type: 'call' }).premium;
-        if (p == null) p = greeks({ S: price, K: k, T: timeToExpiryYears, sigma: ivol, type: 'put' }).premium;
-        ctx.globalAlpha = 0.75;
-        // Order pivots on the price line: below it (lower strikes) the OTM-downside
-        // put reads first; above it the OTM-upside call reads first. Baseline is
-        // 'middle' so each premium lines up with its strike's SPX gridline/label.
-        const callItem = { txt: fmt(c), color: theme.callLine };
-        const putItem = { txt: fmt(p), color: theme.putLine };
-        const [first, second] = k < price ? [putItem, callItem] : [callItem, putItem];
-        ctx.fillStyle = first.color;
-        ctx.fillText(first.txt, layout.chartW + 3, y);
-        const fw = ctx.measureText(first.txt).width;
-        ctx.fillStyle = second.color;
-        ctx.fillText(second.txt, layout.chartW + 5 + fw, y);
-      }
-      ctx.restore();
-    }
-
-    // position dashed lines + labels
-    ctx.font = '10px "JetBrains Mono", monospace';
-    closeHitsRef.current = [];
-    addHitsRef.current = [];
-    posLabelHitsRef.current = [];
-    for (const pos of showPositions ? positions : []) {
-      if (pos.status !== 'open') continue;
-      const y = priceToY(pos.strike);
-      // Line + label colored by the position's live P/L, not call/put.
-      const live = pos.greeksLive?.premium ?? pos.entryPremium;
-      const pl = pos.entryPremium != null ? plDollars(pos, live) : 0;
-      const color = pl >= 0 ? theme.profit : theme.loss;
-      ctx.save();
-      ctx.setLineDash([6, 5]);
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 1.2;
-      ctx.beginPath();
-      ctx.moveTo(0, y + 0.5);
-      ctx.lineTo(layout.chartW, y + 0.5);
-      ctx.stroke();
-      ctx.restore();
-
-      const sign = pl >= 0 ? '+' : '−';
-      const label = `${pos.strike}${pos.type === 'call' ? 'C' : 'P'} ×${pos.qty}  ${sign}$${Math.abs(pl).toFixed(0)}`;
-      const lw = ctx.measureText(label).width + 12;
-      const xw = 18; // action-box width (✕ / +)
-      // Left-aligned (keep the right edge for prices), but start past the trades
-      // drawer's left-edge controls (.trades-hotzone is 22px wide, the ›pull 15px,
-      // both above the canvas) — otherwise the leftmost + box hides under them and
-      // a "+ add" click opens the drawer instead of adding to the position.
-      const lx = 30;
-      // Layout left→right: [+ add][label chip][✕ close]. + sits on the OPPOSITE
-      // side of the label from ✕ so add and close are never adjacent.
-      const adBox = lx;            // + box left edge (leftmost)
-      const labelX = lx + xw;      // label chip left edge
-      const cxBox = labelX + lw;   // ✕ box left edge (right of the label)
-      // label chip
-      ctx.fillStyle = color;
-      ctx.fillRect(labelX, y - 9, lw, 18);
-      ctx.fillStyle = '#0a0c12';
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(label, labelX + 6, y);
-      // + box (left of label): adds one contract to the same leg (marketable limit)
-      ctx.fillStyle = '#0a0c12';
-      ctx.fillRect(adBox, y - 9, xw, 18);
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 1;
-      ctx.strokeRect(adBox + 0.5, y - 8.5, xw - 1, 17);
-      ctx.fillStyle = color;
-      ctx.textAlign = 'center';
-      ctx.fillText('+', adBox + xw / 2, y);
-      // ✕ box (right of label): closes the position at a marketable limit
-      ctx.fillStyle = '#0a0c12';
-      ctx.fillRect(cxBox, y - 9, xw, 18);
-      ctx.strokeStyle = color;
-      ctx.strokeRect(cxBox + 0.5, y - 8.5, xw - 1, 17);
-      ctx.fillStyle = color;
-      ctx.fillText('✕', cxBox + xw / 2, y);
-      ctx.textAlign = 'left';
-      // hit boxes pad the OUTER edges only (kinder to fingers); + is leftmost, ✕
-      // rightmost, label between — so a click never lands on both.
-      addHitsRef.current.push({ x0: adBox - 4, y0: y - 13, x1: adBox + xw, y1: y + 13, position: pos });
-      closeHitsRef.current.push({ x0: cxBox, y0: y - 13, x1: cxBox + xw + 4, y1: y + 13, position: pos });
-      // the label chip itself (not the ✕/+) → hover opens the premium popup
-      posLabelHitsRef.current.push({ x0: labelX, y0: y - 11, x1: labelX + lw, y1: y + 11, position: pos });
-    }
-
-    // trade markers (entry arrows, exit arrows, dotted connectors)
-    markerHitsRef.current = [];
+    // trade markers (entry arrows, exit arrows, dotted connectors) + ghosts.
+    // bucketMs + tToIdx are also consumed by the bus-stop block below.
     const bucketMs = timeframe * 60 * 1000;
-    // tfCandles is sorted by time but NOT contiguous — session seams, weekends,
-    // holidays, and prepended deep history (differently aligned) all leave gaps.
-    // Map a timestamp to its REAL array index by binary search; the old arithmetic
-    // `(bucket − firstCandleT)/bucketMs` assumed a gapless minute grid and silently
-    // returned -1 across any gap, so trade markers never drew on the overnight tape.
-    const tToIdx = (t) => {
-      if (t == null || !tfCandles.length) return -1;
-      const bucket = Math.floor(t / bucketMs) * bucketMs;
-      let lo = 0, hi = tfCandles.length - 1, di = -1;
-      while (lo <= hi) {
-        const mid = (lo + hi) >> 1;
-        const ct = tfCandles[mid].t;
-        if (ct === bucket) { di = mid; break; }
-        if (ct < bucket) lo = mid + 1; else hi = mid - 1;
-      }
-      if (di < 0) di = lo - 1;   // no exact bucket → snap to the candle just before
-      if (di < 0) return -1;     // trade predates the first loaded candle
-      const slot = di - view.baseIdx;
-      if (slot < 0 || slot >= view.slotCount) return -1;
-      return slot;
-    };
-
-    // Tapered chevron (ʌ / v): a filled shape — full thickness at the apex,
-    // narrowing to fine points at the two tips. (A plain stroke is uniform-width
-    // and can't taper, so we fill a 4-point kite instead.)
-    const drawChevron = (cx, cy, half, dir, color) => {
-      const v = half * 0.7;
-      const w = Math.max(1, half * 0.42); // apex half-thickness; arms taper to 0 at the tips
-      ctx.save();
-      ctx.globalAlpha = 0.9;
-      ctx.fillStyle = color;
-      ctx.beginPath();
-      if (dir === 'up') {
-        ctx.moveTo(cx - half, cy + v);   // left tip (point)
-        ctx.lineTo(cx, cy - v - w);      // apex, outer edge
-        ctx.lineTo(cx + half, cy + v);   // right tip (point)
-        ctx.lineTo(cx, cy - v + w);      // apex, inner edge
-      } else {
-        ctx.moveTo(cx - half, cy - v);   // left tip (point)
-        ctx.lineTo(cx, cy + v + w);      // apex, outer edge
-        ctx.lineTo(cx + half, cy - v);   // right tip (point)
-        ctx.lineTo(cx, cy + v - w);      // apex, inner edge
-      }
-      ctx.closePath();
-      ctx.fill();
-      ctx.restore();
-    };
-
-    // 🐾 Totoro pattern detector — parked in src/experimental/totoro-detector.js
-    // (decorative; lifted out of the render loop 2026-06-22 to slim this file).
-    // See that module's header to improve + re-add.
-
-    for (const pos of (showMarkers ? positions : [])) {
-      const color = pos.type === 'call' ? theme.up : theme.down;
-      const entryIdx = tToIdx(pos.openedAt);
-      const exitIdx = pos.status === 'closed' ? tToIdx(pos.closedAt) : -1;
-      const entryXY = entryIdx >= 0 ? { x: indexToX(entryIdx), y: priceToY(pos.entryPrice ?? pos.strike) } : null;
-      const exitXY = exitIdx >= 0 ? { x: indexToX(exitIdx), y: priceToY(pos.exitPrice ?? pos.strike) } : null;
-
-      if (entryXY && exitXY) {
-        ctx.save();
-        ctx.setLineDash([2, 3]);
-        ctx.globalAlpha = 0.7;
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(entryXY.x, entryXY.y);
-        ctx.lineTo(exitXY.x, exitXY.y);
-        ctx.stroke();
-        ctx.restore();
-      }
-
-      // A small chevron hugging EACH fill's candle (every added lot, not just the
-      // first) — under the low for calls (ʌ, bullish), over the high for puts (v).
-      // Falls back to the single openedAt when no per-fill blotter is attached
-      // (replay / positions recovered before this session's blotter).
-      const isCall = pos.type === 'call';
-      // Scale with the candles: wide zoomed-in bars get a proportionate chevron,
-      // dense zoomed-out tape gets a fine one (clamped so it never vanishes or
-      // dwarfs the bar it hugs).
-      const half = Math.max(2.2, Math.min(9, (layout?.candleW ?? 8) * 0.5));
-      const fillTimes = (pos.fills && pos.fills.length)
-        ? pos.fills.map((f) => f.ts)
-        : (pos.openedAt != null ? [pos.openedAt] : []);
-      for (const ts of fillTimes) {
-        const fi = tToIdx(ts);
-        if (fi < 0) continue;
-        const fx = indexToX(fi);
-        const ec = view.slots[fi];
-        const ay = ec
-          ? (isCall ? priceToY(ec.low) + half + 5 : priceToY(ec.high) - half - 5)
-          : priceToY(pos.entryPrice ?? pos.strike) + (isCall ? half + 12 : -half - 12);
-        drawChevron(fx, ay, half, isCall ? 'up' : 'down', '#fff');
-        markerHitsRef.current.push({ x: fx, y: ay, half: half + 5, position: pos, kind: 'entry' });
-      }
-      if (exitXY) {
-        const ay = exitXY.y - half - 16;
-        drawChevron(exitXY.x, ay, half, 'down', color); // exit: colored v above, same size as entries
-        markerHitsRef.current.push({ x: exitXY.x, y: ay, half: half + 3, position: pos, kind: 'exit' });
-      }
+    const tToIdx = makeTToIdx(tfCandles, view, bucketMs);
+    {
+      const mHits = drawMarkers(ctx, { view, layout, theme, priceToY, indexToX, positions, showMarkers, ghostFills, tToIdx });
+      markerHitsRef.current = mHits.markers;
+      ghostHitsRef.current = mHits.ghosts;
     }
 
-    // Decision-replay ghosts: the fills she ACTUALLY took on the replayed day,
-    // revealed by the replay clock (App gates which ones arrive). Accent-colored
-    // so they can't be confused with the white sim chevrons, offset further from
-    // the bar so both stay readable when she re-trades the same candle: BUY is a
-    // filled kite, SELL a hollow stroke.
-    ghostHitsRef.current = [];
-    const gHalf = Math.max(2.2, Math.min(9, (layout?.candleW ?? 8) * 0.5));
-    for (const f of ghostFills) {
-      const gi = tToIdx(f.ts);
-      if (gi < 0) continue;
-      const gx = indexToX(gi);
-      const gc = view.slots[gi];
-      if (!gc) continue;
-      const isCall = f.right === 'C';
-      const gy = isCall ? priceToY(gc.low) + gHalf + 16 : priceToY(gc.high) - gHalf - 16;
-      const dir = isCall ? 'up' : 'down';
-      if (f.action === 'BUY') {
-        drawChevron(gx, gy, gHalf, dir, theme.accent);
-      } else {
-        const v = gHalf * 0.7;
-        ctx.save();
-        ctx.strokeStyle = theme.accent;
-        ctx.globalAlpha = 0.9;
-        ctx.lineWidth = 1.2;
-        ctx.beginPath();
-        if (dir === 'up') { ctx.moveTo(gx - gHalf, gy + v); ctx.lineTo(gx, gy - v); ctx.lineTo(gx + gHalf, gy + v); }
-        else { ctx.moveTo(gx - gHalf, gy - v); ctx.lineTo(gx, gy + v); ctx.lineTo(gx + gHalf, gy - v); }
-        ctx.stroke();
-        ctx.restore();
-      }
-      ghostHitsRef.current.push({ x: gx, y: gy, half: gHalf + 5, fill: f });
-    }
-
-    // 🚏 Bus stops: her called (price, time) coordinates. Time-anchored like the
-    // trade markers, but they may sit in the FUTURE space right of the live
-    // candle — extrapolate slots past the last bar at the current timeframe.
-    busHitsRef.current = [];
-    if (busStops.length && tfCandles.length) {
-      const lastIdx = tfCandles.length - 1;
-      const lastSlot = lastIdx - view.baseIdx;
-      const lastT = tfCandles[lastIdx].t;
-      for (const stop of busStops) {
-        const slot = stop.targetTime <= lastT
-          ? tToIdx(stop.targetTime)
-          : lastSlot + (stop.targetTime - lastT) / bucketMs;
-        if (slot < 0) continue; // scrolled out of view on the history side
-        let bx = indexToX(slot);
-        const clamped = bx > layout.chartW - 14; // target beyond the visible right edge
-        if (clamped) bx = layout.chartW - 14;
-        const by = priceToY(stop.targetPrice);
-        if (by < layout.priceTop - 20 || by > layout.priceBot + 20) continue;
-        const color = !stop.resolution ? theme.accent
-          : stop.resolution === 'hit' ? theme.profit
-          : stop.resolution === 'late' ? '#e0a94f'
-          : theme.muted;
-        // dashed guide from the live price to the coordinate (active stops only)
-        if (!stop.resolution && lastSlot >= 0 && lastSlot < view.slotCount) {
-          ctx.save();
-          ctx.setLineDash([3, 5]);
-          ctx.globalAlpha = 0.45;
-          ctx.strokeStyle = color;
-          ctx.lineWidth = 1;
-          ctx.beginPath();
-          ctx.moveTo(indexToX(lastSlot), priceToY(price));
-          ctx.lineTo(bx, by);
-          ctx.stroke();
-          ctx.restore();
-        }
-        ctx.save();
-        ctx.globalAlpha = stop.resolution ? 0.75 : 0.95;
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 1.4;
-        ctx.beginPath();
-        ctx.arc(bx, by, 10, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.font = '11px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText('🚏', bx, by + 1);
-        if (clamped) { // off-screen arrow, like position lines for far strikes
-          ctx.fillStyle = color;
-          ctx.font = '10px "JetBrains Mono", monospace';
-          ctx.fillText('→', bx + 14, by);
-        }
-        ctx.restore();
-        busHitsRef.current.push({ x: bx, y: by, half: 12, stop });
-      }
-    }
+    busHitsRef.current = drawBusStops(ctx, { view, layout, theme, priceToY, indexToX, price, busStops, tfCandles, tToIdx, bucketMs });
   }, [candles, price, positions, theme, size, view, layout, priceToY, indexToX, timeframe, showMarkers, showVolume, expectedMove, axisChain, strikeStep, greeksMap, ivol, timeToExpiryYears, source, showPositions, ghostFills, busStops]);
 
   // wheel zoom — attach non-passive so we can preventDefault page scroll
