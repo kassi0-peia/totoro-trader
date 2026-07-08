@@ -1752,6 +1752,131 @@ button {
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--c-accent) 35%, transparent);
 }
 
+/* ── Multi-symbol Phase A: header-area symbol search + [SPX] chip ──
+   Sits in the chart-acct row beside ⚡/🚏 (desktop-first — hidden on mobile
+   with them). The [SPX] chip returns home; the input searches; the dropdown
+   floats over the chart. */
+.symbol-search {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 4px;
+}
+.sym-chip {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  padding: 3px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--c-border);
+  background: var(--c-surface);
+  color: var(--c-muted);
+  cursor: pointer;
+  transition: color 160ms, border-color 160ms, background 160ms;
+}
+.sym-chip:hover { border-color: var(--c-accent); color: var(--c-accent); }
+.sym-chip.active {
+  color: #0a0c12;
+  background: var(--c-accent);
+  border-color: var(--c-accent);
+}
+.sym-active {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--c-text);
+}
+.sym-active.pending { color: var(--c-muted); font-style: italic; }
+.sym-input {
+  width: 92px;
+  font-size: 11px;
+  font-family: 'JetBrains Mono', monospace;
+  letter-spacing: 0.06em;
+  padding: 3px 7px;
+  border-radius: 4px;
+  border: 1px solid var(--c-border);
+  background: var(--c-surface);
+  color: var(--c-text);
+  outline: none;
+  transition: border-color 160ms;
+}
+.sym-input:focus { border-color: var(--c-accent); }
+.sym-input:disabled { opacity: 0.5; cursor: not-allowed; }
+.sym-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 4px;
+  min-width: 220px;
+  max-height: 240px;
+  overflow-y: auto;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+  z-index: 40;
+}
+.sym-empty {
+  padding: 8px 10px;
+  font-size: 11px;
+  color: var(--c-muted);
+}
+.sym-opt {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+  border-bottom: 1px solid var(--c-border);
+}
+.sym-opt:last-child { border-bottom: none; }
+.sym-opt:hover { background: var(--c-surfaceAlt); }
+.sym-opt-tkr {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--c-text);
+  font-family: 'JetBrains Mono', monospace;
+}
+.sym-opt-name {
+  flex: 1 1 auto;
+  font-size: 10px;
+  color: var(--c-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sym-opt-exch {
+  font-size: 9px;
+  color: var(--c-muted);
+  letter-spacing: 0.08em;
+}
+.guest-weekly {
+  font-size: 11px;
+  color: var(--c-muted);
+  letter-spacing: 0.04em;
+}
+/* Guest ticket: symbol tag + physical-settlement warning line. */
+.modal-sym {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+.modal-settle-warn {
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: #e0a23a;
+  background: color-mix(in srgb, #e0a23a 12%, transparent);
+  border: 1px solid color-mix(in srgb, #e0a23a 40%, transparent);
+  border-radius: 5px;
+  padding: 7px 9px;
+  margin-bottom: 12px;
+}
+
 /* Feed status (● LIVE/SIM) stacked under the account badge — mobile only. */
 .acct-feed {
   display: none;
@@ -2036,6 +2161,7 @@ button {
   .chart-acct { top: 36px; }   /* drop below the OHLC legend so they don't overlap */
   .acct-quick-btn { display: none; }   /* quick mode is right-click → desktop only */
   .acct-bus-btn { display: none; }     /* bus stop is desktop-only (spec-bus-stop.md) */
+  .symbol-search { display: none; }    /* multi-symbol search is desktop-first (Phase A) */
 
   /* Move Close-all / IBKR to a full-width row under the timeframe buttons. */
   .tf-bar { flex-wrap: wrap; }

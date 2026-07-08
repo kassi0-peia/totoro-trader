@@ -6,8 +6,9 @@ const ivPct = (iv) => (Number.isFinite(iv) ? (iv * 100).toFixed(1) + '%' : '—'
 
 // Bold strip above the chart: ATM call/put quote + IV, and the VIX (red when up
 // on the day, green when down). ATM is the nearest 5-point strike to the SPX(-equiv) price.
-export default function QuoteStrip({ price, greeksMap, vix, theme, onReplay = null, replayOn = false }) {
-  const atm = Number.isFinite(price) ? Math.round(price / 5) * 5 : null;
+export default function QuoteStrip({ price, greeksMap, vix, theme, onReplay = null, replayOn = false, atmStep = 5 }) {
+  const step = atmStep > 0 ? atmStep : 5;
+  const atm = Number.isFinite(price) ? Math.round(price / step) * step : null;
   const call = atm != null ? liveQuote(greeksMap, atm, 'call') : null;
   const put = atm != null ? liveQuote(greeksMap, atm, 'put') : null;
 
