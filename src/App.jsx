@@ -9,6 +9,7 @@ import ReplayBar from './ReplayBar.jsx';
 import ThemePanel from './ThemePanel.jsx';
 import TimeframeBar from './TimeframeBar.jsx';
 import QuoteStrip from './QuoteStrip.jsx';
+import SymbolSearch from './SymbolSearch.jsx';
 import { useIbkrFeed, liveGreeks, liveQuote } from './feed.js';
 import { greeks as bsGreeks, nearestOtmStrike } from './options.js';
 import { expiryCutoffMs, suggestTimetable, displayRows, scanTouch } from './busstop.js';
@@ -260,6 +261,55 @@ export default function App() {
 
   const feed = useIbkrFeed({ onOrderEvent: handleOrderEvent });
 
+  // ── Multi-symbol Phase A: the active instrument ──
+  // 'SPX' (default, home) or a guest equity symbol. A guest is only truly active
+  // once the bridge has confirmed it (feed.guest matches) — until then the cockpit
+  // stays on SPX so a pending activation can't blank the chart. When no guest is
+  // active every SPX code path below is byte-identical to before.
+  const [activeSymbol, setActiveSymbol] = useState('SPX');
+  const guestActive = activeSymbol !== 'SPX' && !!feed.guest && feed.guest.symbol === activeSymbol;
+  const guest = guestActive ? feed.guest : null;
+  // The cockpit's data source. In guest mode price/candles/greeksMap/expiry/
+  // strikeStep come from feed.guest; otherwise the SPX feed, untouched. Replay is
+  // disabled in guest mode, so these never collide with replay's own price/time.
+  const cockpitPrice = guestActive ? guest.price : feed.price;
+  const cockpitCandles = guestActive ? (guest.candles || []) : feed.candles;
+  const cockpitGreeksMap = guestActive ? feed.guestGreeksMap : feed.greeksMap;
+  const cockpitExpiry = guestActive ? guest.expiry : feed.expiry;
+  const strikeStep = guestActive ? (guest.strikeStep || 5) : 5;
+
+  // Return home: deactivate the guest and snap the cockpit back to SPX.
+  const goHome = useCallback(() => {
+    activeConIdRef.current = null;
+    setActiveSymbol('SPX');
+    feed.deactivateSymbol();
+  }, [feed]);
+
+  // The conId the user picked for the active guest — kept so we can re-activate
+  // after a reconnect (the bridge doesn't persist guest state).
+  const activeConIdRef = useRef(null);
+
+  // Activate a searched symbol: tell the bridge, and optimistically flip the
+  // active symbol so the header chip + gating update immediately (the cockpit
+  // itself waits for feed.guest to confirm via guestActive).
+  const activateGuest = useCallback((symbol, conId) => {
+    const sym = String(symbol || '').toUpperCase();
+    if (!sym || sym === 'SPX') return;
+    activeConIdRef.current = conId ?? null;
+    setActiveSymbol(sym);
+    feed.activateSymbol(sym, conId);
+  }, [feed]);
+
+  // Re-activate after a bridge/socket reconnect: guest state is NOT persisted on
+  // the bridge, so when the socket comes back and we still intend a guest, resend
+  // the activation (the client keeps the active symbol + conId in memory).
+  useEffect(() => {
+    if (activeSymbol === 'SPX') return;
+    if (!feed.socketOpen) return;
+    if (feed.guest && feed.guest.symbol === activeSymbol) return;
+    feed.activateSymbol(activeSymbol, activeConIdRef.current);
+  }, [feed.socketOpen, activeSymbol]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Keep marks honest for open positions outside the streamed chain: nudge a
   // snapshot quote every 30 s (server caches + dedupes) so P/L reflects the
   // real market instead of the flat-IV model, which misprices far wings badly.
@@ -274,8 +324,9 @@ export default function App() {
     return () => clearInterval(id);
   }, [feed.live, feed.requestQuote]);
 
-  // Replay: the price/time the whole UI prices against.
-  const dispPrice = replayActive ? replayPrice : feed.price;
+  // Replay: the price/time the whole UI prices against. In guest mode (replay is
+  // disabled) the cockpit prices against the guest's spot.
+  const dispPrice = replayActive ? replayPrice : cockpitPrice;
 
   // Replay: adopt the day's bars when the bridge delivers them, starting at the
   // very first bar of the session. A zero-bar day (holiday / missing data) exits
@@ -375,12 +426,36 @@ export default function App() {
 
   const T = useMemo(() => timeToExpiryYearsAt(replayActive ? replayNow : now), [now, replayActive, replayNow]);
 
-  const resolveGreeks = (strike, type, expiry = null) => {
+  // `symbol` marks WHICH instrument this strike belongs to (default: the active
+  // cockpit). A guest position is only marked against the guest chain when the
+  // guest is currently active AND the position is that guest's — an SPX position
+  // keeps marking against SPX even while a guest cockpit is up.
+  const resolveGreeks = (strike, type, expiry = null, symbol = activeSymbol) => {
     // Replay mode prices everything with the model at the replayed time —
     // live quotes belong to the present and would poison the practice tape.
     if (replayActive) {
       const g = bsGreeks({ S: dispPrice, K: strike, T, sigma: IVOL, type });
       return { ...g, source: 'replay' };
+    }
+    // Guest mode: mark against the guest chain with the SAME ladder SPX uses —
+    // fresh bid/ask mid first, then the model tick, then flat-IV BS. No 16:15
+    // roll / cash-settlement intrinsic (stocks don't PM-settle to an index).
+    // Only for THIS guest's own strikes; an SPX position falls through to SPX.
+    if (guestActive && symbol === activeSymbol) {
+      const S = guest.price;
+      const gLive = liveGreeks(feed.guestGreeksMap, strike, type);
+      const gq = liveQuote(feed.guestGreeksMap, strike, type);
+      const gFresh = gq && gq.bid > 0 && gq.ask >= gq.bid && gq.tickTs != null && now - gq.tickTs < MID_FRESH_MS;
+      if (gFresh) {
+        const mid = (gq.bid + gq.ask) / 2;
+        if (gLive) return { premium: mid, delta: gLive.delta, gamma: gLive.gamma, theta: gLive.theta, vega: gLive.vega, source: 'mid' };
+        const g = bsGreeks({ S, K: strike, T, sigma: IVOL, type });
+        return { ...g, premium: mid, source: 'mid' };
+      }
+      if (gLive) return { premium: gLive.premium, delta: gLive.delta, gamma: gLive.gamma, theta: gLive.theta, vega: gLive.vega, source: 'ibkr' };
+      const g = bsGreeks({ S, K: strike, T, sigma: IVOL, type });
+      if (gq && gq.bid != null && gq.ask != null) return { ...g, premium: (gq.bid + gq.ask) / 2, source: 'quote' };
+      return { ...g, source: 'bs' };
     }
     // The greeks map is keyed by strike+right only and always holds the chain's
     // CURRENT target expiry. After the 16:15 roll a still-open position from the
@@ -453,6 +528,10 @@ export default function App() {
       out.push({
         id: loc?.id ?? `srv:${sp.conId}`,
         source: 'ibkr',
+        // Instrument symbol so chart overlays can filter to the active symbol.
+        // SPXW positions carry symbol 'SPX' (or undefined on old rows) — both
+        // read as SPX downstream. Guest equities carry their real symbol.
+        symbol: sp.symbol ?? 'SPX',
         type: sp.right === 'C' ? 'call' : 'put',
         side: sp.qty > 0 ? 'long' : 'short',
         strike: sp.strike,
@@ -483,36 +562,50 @@ export default function App() {
   // chart markers + the hover card can show them all, not just the blended entry.
   const legFills = (p) => (replayActive ? null : (feed.trades || []).filter((t) =>
     t.strike === p.strike && t.right === rightOf(p.type) &&
-    t.expiry === p.expiry && t.action === (p.side === 'long' ? 'BUY' : 'SELL')));
+    t.expiry === p.expiry && t.action === (p.side === 'long' ? 'BUY' : 'SELL') &&
+    // Match instrument too — a guest and an SPX leg can collide on strike/expiry.
+    (t.symbol ?? 'SPX') === (p.symbol ?? 'SPX')));
 
   const positionsLive = useMemo(() => {
     const source = replayActive ? replayPositions : mergedPositions;
     return source.map((p) => {
       const fills = legFills(p);
       if (p.status === 'closed' || p.status === 'rejected') return fills ? { ...p, fills } : p;
+      const psym = p.symbol ?? 'SPX';
       return {
         ...p,
         fills,
-        greeksLive: resolveGreeks(p.strike, p.type, replayActive ? null : p.expiry),
-        dayQuote: replayActive ? null : liveQuote(feed.greeksMap, p.strike, p.type)
+        greeksLive: resolveGreeks(p.strike, p.type, replayActive ? null : p.expiry, psym),
+        // The day quote reads from the instrument's own chain.
+        dayQuote: replayActive ? null : liveQuote(psym === 'SPX' ? feed.greeksMap : feed.guestGreeksMap, p.strike, p.type)
       };
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mergedPositions, replayActive, replayPositions, dispPrice, feed.greeksMap, feed.trades, T]);
+  }, [mergedPositions, replayActive, replayPositions, dispPrice, feed.greeksMap, feed.guestGreeksMap, guestActive, feed.trades, T]);
 
   // Strikes the snapshot poller keeps fresh (open positions only; replay
-  // positions are imaginary and get no real quotes).
+  // positions are imaginary and get no real quotes). SPX positions only — the
+  // far-strike poller hits the SPXW chain, so quoting a guest strike there would
+  // resolve the wrong contract and poison the SPX greeks map. Guest positions
+  // stay fresh via the guest chain's own streaming window.
   openStrikesRef.current = replayActive ? [] : positionsLive
-    .filter((p) => p.status === 'open')
+    .filter((p) => p.status === 'open' && (p.symbol ?? 'SPX') === 'SPX')
     .map((p) => ({ strike: p.strike, right: rightOf(p.type) }));
 
   // Chart shows only positions for the CURRENT session's expiry (these are 0DTE —
   // a prior day's position has a past expiry and is already settled, so its lines
   // and markers shouldn't keep sitting on today's chart).
-  const activeExpiry = replayActive ? replay?.date : feed.expiry;
+  const activeExpiry = replayActive ? replay?.date : cockpitExpiry;
   const chartPositions = useMemo(
-    () => positionsLive.filter((p) => p.expiry === activeExpiry),
-    [positionsLive, activeExpiry]
+    () => positionsLive.filter((p) => {
+      if (p.expiry !== activeExpiry) return false;
+      // Filter to the active instrument: a position with no symbol (old SPXW rows)
+      // reads as 'SPX'. In guest mode only the guest's own positions draw; on home
+      // only SPX positions draw.
+      const psym = p.symbol ?? 'SPX';
+      return psym === activeSymbol;
+    }),
+    [positionsLive, activeExpiry, activeSymbol]
   );
 
   // Fetch deep history when a higher timeframe is selected (5m → 1 week …
@@ -525,6 +618,7 @@ export default function App() {
   // previous 4:00 PM cash close: the band the options market prices for expiry.
   const expectedMove = useMemo(() => {
     if (replayActive) return null; // no chain in the past
+    if (guestActive) return null;  // SPX-only band (anchored to the SPX cash close)
     if (!feed.live || !Number.isFinite(feed.spxClose)) return null;
     const atm = Math.round(feed.price / 5) * 5;
     const mid = (q) => (q && q.bid != null && q.ask != null ? (q.bid + q.ask) / 2 : q?.premium ?? null);
@@ -532,7 +626,7 @@ export default function App() {
     const p = mid(liveQuote(feed.greeksMap, atm, 'put'));
     if (c == null || p == null) return null;
     return { anchor: feed.spxClose, width: c + p };
-  }, [feed.live, feed.price, feed.greeksMap, feed.spxClose]);
+  }, [feed.live, feed.price, feed.greeksMap, feed.spxClose, guestActive]);
 
   // 🚏 Drop a bus stop: her mind's-eye (price, time) coordinate, snapped to the
   // minute and a quarter point. The timetable (contract suggestions) is computed
@@ -646,8 +740,12 @@ export default function App() {
 
   const handleRequestTrade = ({ strike, type, busStopId = null }) => {
     const g = resolveGreeks(strike, type);
-    const q = replayActive ? null : liveQuote(feed.greeksMap, strike, type);
-    setPending({ id: Date.now(), strike, type, greeks: g, bid: q?.bid, ask: q?.ask, busStopId });
+    const q = replayActive ? null : liveQuote(cockpitGreeksMap, strike, type);
+    setPending({
+      id: Date.now(), strike, type, greeks: g, bid: q?.bid, ask: q?.ask, busStopId,
+      // Guest ticket context for the modal (symbol, expiry, settlement warning).
+      ...(guestActive ? { symbol: activeSymbol, expiry: guest.expiry, settlement: guest.settlement } : {})
+    });
   };
 
   const handleExecute = (qty, limit = null, takeProfit = null, stopLoss = null) => {
@@ -665,17 +763,20 @@ export default function App() {
       return;
     }
     if (!feed.executionEnabled) { showToast('Execution disabled', 'err'); return; }
+    // Guest orders MUST be a marketable limit — the bridge rejects a guest MKT.
+    if (guestActive && limit == null) { showToast('Guest orders need a limit price', 'err'); return; }
     const ref = feed.sendOrder({
-      intent: 'open', action: 'BUY', strike: pending.strike, right: rightOf(pending.type), qty, expiry: feed.expiry,
+      intent: 'open', action: 'BUY', strike: pending.strike, right: rightOf(pending.type), qty, expiry: cockpitExpiry,
+      ...(guestActive ? { symbol: activeSymbol } : {}),
       ...(limit != null ? { limit } : {}),
       ...(takeProfit != null ? { takeProfit } : {}),
       ...(stopLoss != null ? { stopLoss } : {})
     });
     if (!ref) { showToast('Order not sent — not connected', 'err'); return; }
     setPositions((prev) => [...prev, {
-      id: posSeq++, type: pending.type, side: 'long', strike: pending.strike, qty, expiry: feed.expiry,
+      id: posSeq++, symbol: activeSymbol, type: pending.type, side: 'long', strike: pending.strike, qty, expiry: cockpitExpiry,
       status: 'pending', openRef: ref, entryPremium: null, estPremium: limit ?? pending.greeks.premium,
-      entryPrice: feed.price, openedAt: Date.now(), greeksLive: pending.greeks
+      entryPrice: cockpitPrice, openedAt: Date.now(), greeksLive: pending.greeks
     }]);
     // Entered from a bus-stop timetable → pair the trade with the called shot.
     if (pending.busStopId) {
@@ -707,17 +808,19 @@ export default function App() {
     // A live ask is still required even in MARKET mode — it's the guard against
     // firing blind into a strike with no streaming quote (where MKT slippage is worst).
     if (ask == null || !(ask > 0)) { showToast(`No live ask for ${strike}${rightOf(type)} — hover until a quote loads`, 'err'); return; }
-    const market = quickMode === 'market';
+    // The ⚡ red MKT arm is SPX-only in Phase A. In guest mode it degrades to the
+    // amber marketable limit (a guest MKT would be rejected by the bridge anyway).
+    const market = quickMode === 'market' && !guestActive;
     const tick = ask < 3 ? 0.05 : 0.10;
     const limit = market ? null : Math.round((ask + tick) * 100) / 100;
     // MARKET mode omits the limit → the bridge routes a real MKT (never naked elsewhere).
-    const ref = feed.sendOrder({ intent: 'open', action: 'BUY', strike, right: rightOf(type), qty: 1, expiry: feed.expiry, ...(market ? {} : { limit }) });
+    const ref = feed.sendOrder({ intent: 'open', action: 'BUY', strike, right: rightOf(type), qty: 1, expiry: cockpitExpiry, ...(guestActive ? { symbol: activeSymbol } : {}), ...(market ? {} : { limit }) });
     if (!ref) { showToast('Order not sent — not connected', 'err'); return; }
     const g = resolveGreeks(strike, type);
     setPositions((prev) => [...prev, {
-      id: posSeq++, type, side: 'long', strike, qty: 1, expiry: feed.expiry,
+      id: posSeq++, symbol: activeSymbol, type, side: 'long', strike, qty: 1, expiry: cockpitExpiry,
       status: 'pending', openRef: ref, entryPremium: null, estPremium: market ? ask : limit,
-      entryPrice: feed.price, openedAt: Date.now(), greeksLive: g
+      entryPrice: cockpitPrice, openedAt: Date.now(), greeksLive: g
     }]);
     // Routing is unchanged — red MKT still routes a real MKT. But IBKR holds an
     // option MKT placed outside RTH until the overnight session opens (~00:10 ET),
@@ -748,7 +851,7 @@ export default function App() {
       return prev.map((p) => (p.status === 'open' && posKey(p.strike, rightOf(p.type), p.expiry) === k ? { ...p, status: 'closing', closeRef } : p));
     }
     return [...prev, {
-      id: posSeq++, type: pos.type, side: pos.side, strike: pos.strike, qty: pos.qty, expiry: pos.expiry,
+      id: posSeq++, symbol: pos.symbol, type: pos.type, side: pos.side, strike: pos.strike, qty: pos.qty, expiry: pos.expiry,
       status: 'closing', entryPremium: pos.entryPremium, entryPrice: pos.entryPrice, openedAt: pos.openedAt, closeRef
     }];
   };
@@ -757,16 +860,21 @@ export default function App() {
   // sends a naked MKT — IBKR simulates MKT-outside-RTH and holds it until the
   // ~00:10 reset, and in thin books MKT slippage is uncapped.
   const tickFor = (px) => (px < 3 ? 0.05 : 0.10);
+  // Quote lookups read the active cockpit's chain (guest map in guest mode).
   const sellLimitFor = (strike, type) => {
-    const q = liveQuote(feed.greeksMap, strike, type);
+    const q = liveQuote(cockpitGreeksMap, strike, type);
     if (!q || !(q.bid > 0)) return null;
     return Math.max(0.05, Math.round((q.bid - tickFor(q.bid)) * 100) / 100);
   };
   const buyLimitFor = (strike, type) => {
-    const q = liveQuote(feed.greeksMap, strike, type);
+    const q = liveQuote(cockpitGreeksMap, strike, type);
     if (!q || !(q.ask > 0)) return null;
     return Math.round((q.ask + tickFor(q.ask)) * 100) / 100;
   };
+  // Pass the guest symbol on an order for a guest position (bridge routes SPXW
+  // when absent/'SPX'). A position's own symbol drives this, so a guest exit works
+  // even if the active cockpit has since changed.
+  const symbolFieldFor = (pos) => (pos.symbol && pos.symbol !== 'SPX' ? { symbol: pos.symbol } : {});
 
   const closePosition = (pos) => {
     if (!pos || pos.status !== 'open') return;
@@ -782,7 +890,7 @@ export default function App() {
     if (!feed.executionEnabled) { showToast('Execution disabled', 'err'); return; }
     const limit = sellLimitFor(pos.strike, pos.type);
     if (limit == null) { showToast(`No live bid for ${pos.strike}${rightOf(pos.type)} — wait for a quote`, 'err'); return; }
-    const ref = feed.sendOrder({ intent: 'close', action: pos.side === 'long' ? 'SELL' : 'BUY', strike: pos.strike, right: rightOf(pos.type), qty: pos.qty, expiry: pos.expiry, limit });
+    const ref = feed.sendOrder({ intent: 'close', action: pos.side === 'long' ? 'SELL' : 'BUY', strike: pos.strike, right: rightOf(pos.type), qty: pos.qty, expiry: pos.expiry, limit, ...symbolFieldFor(pos) });
     if (!ref) { showToast('Close not sent — not connected', 'err'); return; }
     setPositions((prev) => markClosing(prev, pos, ref));
     triggerPulse();
@@ -808,13 +916,13 @@ export default function App() {
     const isLong = pos.side === 'long';
     const limit = isLong ? buyLimitFor(pos.strike, pos.type) : sellLimitFor(pos.strike, pos.type);
     if (limit == null) { showToast(`No live quote for ${pos.strike}${rightOf(pos.type)} — wait for a quote`, 'err'); return; }
-    const ref = feed.sendOrder({ intent: 'open', action: isLong ? 'BUY' : 'SELL', strike: pos.strike, right: rightOf(pos.type), qty: 1, expiry: pos.expiry, limit });
+    const ref = feed.sendOrder({ intent: 'open', action: isLong ? 'BUY' : 'SELL', strike: pos.strike, right: rightOf(pos.type), qty: 1, expiry: pos.expiry, limit, ...symbolFieldFor(pos) });
     if (!ref) { showToast('Add not sent — not connected', 'err'); return; }
     const g = resolveGreeks(pos.strike, pos.type);
     setPositions((prev) => [...prev, {
-      id: posSeq++, type: pos.type, side: pos.side, strike: pos.strike, qty: 1, expiry: pos.expiry,
+      id: posSeq++, symbol: pos.symbol, type: pos.type, side: pos.side, strike: pos.strike, qty: 1, expiry: pos.expiry,
       status: 'pending', openRef: ref, entryPremium: null, estPremium: limit,
-      entryPrice: feed.price, openedAt: Date.now(), greeksLive: g
+      entryPrice: cockpitPrice, openedAt: Date.now(), greeksLive: g
     }]);
     showToast(`+1 ${pos.strike}${rightOf(pos.type)} LMT ${limit.toFixed(2)}`, 'ok');
     triggerPulse();
@@ -849,7 +957,7 @@ export default function App() {
     if (!feed.executionEnabled) { showToast('Execution disabled', 'err'); return; }
     if (!pos || pos.status !== 'open') return;
     const action = pos.side === 'long' ? 'SELL' : 'BUY';
-    const base = { intent: 'close', action, strike: pos.strike, right: rightOf(pos.type), qty: pos.qty, expiry: pos.expiry };
+    const base = { intent: 'close', action, strike: pos.strike, right: rightOf(pos.type), qty: pos.qty, expiry: pos.expiry, ...symbolFieldFor(pos) };
     const oca = tp != null && sl != null ? `exit-${pos.strike}${rightOf(pos.type)}-${Date.now().toString(36)}` : null;
     // Send each leg separately and track each ref. A truthy ref from ONE leg must
     // not be read as "both attached" — if the socket drops between sends, the TP
@@ -928,13 +1036,13 @@ export default function App() {
     }
     if (!feed.executionEnabled) { showToast('Execution disabled', 'err'); return; }
     const oppositeType = pos.type === 'call' ? 'put' : 'call';
-    const newStrike = nearestOtmStrike(feed.price, oppositeType, 5);
+    const newStrike = nearestOtmStrike(cockpitPrice, oppositeType, strikeStep);
     const closeLimit = sellLimitFor(pos.strike, pos.type);
     const openLimit = buyLimitFor(newStrike, oppositeType);
     if (closeLimit == null || openLimit == null) { showToast('Reverse needs live quotes on both legs — wait a moment', 'err'); return; }
-    const closeRef = feed.sendOrder({ intent: 'close', action: pos.side === 'long' ? 'SELL' : 'BUY', strike: pos.strike, right: rightOf(pos.type), qty: pos.qty, expiry: pos.expiry, limit: closeLimit });
+    const closeRef = feed.sendOrder({ intent: 'close', action: pos.side === 'long' ? 'SELL' : 'BUY', strike: pos.strike, right: rightOf(pos.type), qty: pos.qty, expiry: pos.expiry, limit: closeLimit, ...symbolFieldFor(pos) });
     if (!closeRef) { showToast('Reverse not sent — not connected', 'err'); return; }
-    const openRef = feed.sendOrder({ intent: 'open', action: 'BUY', strike: newStrike, right: rightOf(oppositeType), qty: pos.qty, expiry: feed.expiry, limit: openLimit });
+    const openRef = feed.sendOrder({ intent: 'open', action: 'BUY', strike: newStrike, right: rightOf(oppositeType), qty: pos.qty, expiry: cockpitExpiry, limit: openLimit, ...(guestActive ? { symbol: activeSymbol } : {}) });
     // The close leg already went out. If the socket dropped between the two sends
     // the open leg never reached the bridge — mark the close as closing but DON'T
     // append a phantom pending the bridge has no record of. Surface the half-send
@@ -948,9 +1056,9 @@ export default function App() {
     setPositions((prev) => [
       ...markClosing(prev, pos, closeRef),
       {
-        id: posSeq++, type: oppositeType, side: 'long', strike: newStrike, qty: pos.qty, expiry: feed.expiry,
+        id: posSeq++, symbol: activeSymbol, type: oppositeType, side: 'long', strike: newStrike, qty: pos.qty, expiry: cockpitExpiry,
         status: 'pending', openRef, entryPremium: null, estPremium: g.premium,
-        entryPrice: feed.price, openedAt: Date.now(), greeksLive: g
+        entryPrice: cockpitPrice, openedAt: Date.now(), greeksLive: g
       }
     ]);
     triggerPulse();
@@ -974,8 +1082,8 @@ export default function App() {
 
       <Header
         price={dispPrice}
-        basisSource={replayActive ? null : feed.basisSource}
-        prevClose={replayActive ? null : feed.spxClose}
+        basisSource={replayActive || guestActive ? null : feed.basisSource}
+        prevClose={replayActive || guestActive ? null : feed.spxClose}
         theme={theme}
         mood={mood}
         earsUp={earsUp}
@@ -985,8 +1093,9 @@ export default function App() {
         live={feed.live}
         delayed={feed.delayed}
         replayMode={replayActive}
-        source={feed.live ? feed.source : 'SPX'}
-        expiry={replayActive ? replay.date : feed.live ? feed.expiry : null}
+        source={guestActive ? 'GUEST' : feed.live ? feed.source : 'SPX'}
+        guestSymbol={guestActive ? activeSymbol : null}
+        expiry={replayActive ? replay.date : guestActive ? guest.expiry : feed.live ? feed.expiry : null}
         account={feed.account}
         accountType={feed.accountType}
       />
@@ -1015,12 +1124,14 @@ export default function App() {
       <main className="main">
         <div className="main-inner">
           <QuoteStrip
-            price={feed.price}
-            greeksMap={feed.greeksMap}
+            price={guestActive ? guest.price : feed.price}
+            greeksMap={cockpitGreeksMap}
+            atmStep={strikeStep}
             vix={feed.vix}
             theme={theme}
             replayOn={replay != null || replayBarOpen}
-            onReplay={() => {
+            // Replay is SPX-only (disabled in guest mode). VIX stays (global).
+            onReplay={guestActive ? null : () => {
               if (replay != null) { setReplay(null); setReplayPositions([]); setReplayBarOpen(false); }
               else setReplayBarOpen((v) => !v);
             }}
@@ -1055,7 +1166,7 @@ export default function App() {
             <div className={`chart-acct${axisChain ? ' chart-acct--axis' : ''}`}>
               <span className="acct-badge" style={{ color: '#0a0c12', background: acctColor }} data-tip={feed.account ? `IBKR account ${feed.account}` : 'no account connected'}>{acctLabel}</span>
               <span className="chart-acct-id" data-tip={feed.account ? `IBKR account ${feed.account}` : 'no account connected'}>{feed.account || (feed.live ? '…' : 'no acct')}</span>
-              {!replayActive && (
+              {!replayActive && !guestActive && (
                 <button
                   className={`acct-bus-btn${busArmed ? ' active' : ''}`}
                   onClick={() => setBusArmed((v) => !v)}
@@ -1071,11 +1182,19 @@ export default function App() {
               )}
               {!replayActive && (
                 <button
-                  className={`acct-quick-btn${quickMode ? ' active' : ''}${quickMode === 'market' ? ' market' : ''}`}
-                  onClick={() => setQuickMode((v) => (v === 'limit' ? 'market' : v === 'market' ? false : 'limit'))}
+                  className={`acct-quick-btn${quickMode ? ' active' : ''}${quickMode === 'market' && !guestActive ? ' market' : ''}`}
+                  // In guest mode the red MKT arm is unreachable (Phase A: guest
+                  // orders are marketable limits only) — the cycle is off ↔ limit.
+                  onClick={() => setQuickMode((v) => (guestActive
+                    ? (v ? false : 'limit')
+                    : (v === 'limit' ? 'market' : v === 'market' ? false : 'limit')))}
                   aria-label="Toggle quick trade mode"
                   data-tip={
-                    quickMode === 'market'
+                    guestActive
+                      ? (quickMode
+                        ? 'Quick mode ARMED — right-click a strike = 1-lot marketable limit (ask + 1 tick). The ⚡ red MKT arm is SPX-only. Click to disarm.'
+                        : 'Quick mode: right-click a strike = 1-lot marketable limit. (Red MKT is SPX-only in guest mode.) Click to arm.')
+                      : quickMode === 'market'
                       ? '⚡ MARKET mode ARMED (red) — right-click a strike = 1-lot MKT. Instant fill but UNCAPPED slippage, and outside RTH it\'s held until ~00:10. Click to disarm.'
                       : quickMode === 'limit'
                       ? 'Quick mode ARMED — right-click a strike = 1-lot marketable limit (ask + 1 tick). Click again for MARKET (red) mode.'
@@ -1085,15 +1204,27 @@ export default function App() {
                   <svg viewBox="0 0 24 24" width="17" height="17" fill="currentColor"><path d="M13 2 4 14h6l-1 8 9-12h-6z" /></svg>
                 </button>
               )}
+              {!replayActive && (
+                <SymbolSearch
+                  activeSymbol={activeSymbol}
+                  guestPending={activeSymbol !== 'SPX' && !guestActive}
+                  results={feed.searchResults}
+                  onSearch={feed.searchSymbols}
+                  onActivate={activateGuest}
+                  onHome={goHome}
+                  live={feed.live}
+                />
+              )}
             </div>
             <Chart
-              candles={replayActive ? replay.candles.slice(0, replay.idx + 1) : feed.candles}
+              candles={replayActive ? replay.candles.slice(0, replay.idx + 1) : cockpitCandles}
               price={dispPrice}
               positions={chartPositions}
               theme={chartTheme}
               ivol={IVOL}
               timeToExpiryYears={T}
               timeframe={timeframe}
+              strikeStep={strikeStep}
               onRequestTrade={handleRequestTrade}
               onQuickTrade={handleQuickTrade}
               onClosePosition={closePosition}
@@ -1108,22 +1239,22 @@ export default function App() {
               }}
               onInspectPosition={(p) => { setHoverPos(null); setInspectId(p.id); }}
               ghostFills={visibleGhosts}
-              busStops={chartBusStops}
-              busArmed={busArmed && !replayActive}
+              busStops={guestActive ? [] : chartBusStops}
+              busArmed={busArmed && !replayActive && !guestActive}
               onDropBusStop={handleDropBusStop}
               onSelectBusStop={(s) => setBusPanelId(s.id)}
-              greeksMap={replayActive ? EMPTY_GREEKS : feed.greeksMap}
-              requestQuote={!replayActive && feed.live ? feed.requestQuote : null}
+              greeksMap={replayActive ? EMPTY_GREEKS : cockpitGreeksMap}
+              requestQuote={!replayActive && !guestActive && feed.live ? feed.requestQuote : null}
               expectedMove={expectedMove}
-              histCandles={replayActive ? null : feed.histSeries[timeframe] || null}
+              histCandles={replayActive || guestActive ? null : feed.histSeries[timeframe] || null}
               axisChain={axisChain}
               onToggleAxisChain={() => setAxisChain((v) => !v)}
-              onRung={rungButton ? buyNextRung : null}
-              showOvn={showOvn}
+              onRung={rungButton && !guestActive ? buyNextRung : null}
+              showOvn={guestActive ? false : showOvn}
               showPositions={showPositions}
               showMarkers={showMarkers}
-              quickMode={quickMode}
-              source={replayActive ? 'SPX' : feed.live ? feed.source : 'SPX'}
+              quickMode={guestActive && quickMode === 'market' ? 'limit' : quickMode}
+              source={replayActive || guestActive ? 'SPX' : feed.live ? feed.source : 'SPX'}
             />
             {toast && (
               <div className={`fill-toast fill-${toast.kind}`} role="status">{toast.text}</div>
@@ -1194,12 +1325,13 @@ export default function App() {
       <TradeModal
         pending={pending}
         theme={theme}
-        series={pending && !replayActive ? feed.optHist[`${pending.strike}${rightOf(pending.type)}`] : null}
-        onRefresh={replayActive ? null : (p) => feed.requestOptHistory({ strike: p.strike, right: rightOf(p.type), expiry: feed.expiry })}
+        series={pending && !replayActive && !guestActive ? feed.optHist[`${pending.strike}${rightOf(pending.type)}`] : null}
+        onRefresh={replayActive || guestActive ? null : (p) => feed.requestOptHistory({ strike: p.strike, right: rightOf(p.type), expiry: feed.expiry })}
         onCancel={() => setPending(null)}
         onExecute={handleExecute}
         executionEnabled={replayActive ? true : feed.executionEnabled}
         accountType={feed.accountType}
+        guest={guestActive}
       />
 
       {(() => {

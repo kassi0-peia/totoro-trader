@@ -29,7 +29,7 @@ function formatExpiry(expiry, now) {
 // Amber for the DELAYED state (theme-independent: it's a warning, not a mood).
 const DELAYED_COLOR = '#e6a23c';
 
-export default function Header({ price, prevClose, theme, mood, earsUp, pulse, onToggleSettings, now, live, delayed = false, replayMode = false, source = 'SPX', expiry = null, account = null, accountType = null, basisSource = null }) {
+export default function Header({ price, prevClose, theme, mood, earsUp, pulse, onToggleSettings, now, live, delayed = false, replayMode = false, source = 'SPX', guestSymbol = null, expiry = null, account = null, accountType = null, basisSource = null }) {
   // Daily change vs the previous 4:00 PM SPX cash close.
   const haveDaily = Number.isFinite(prevClose) && prevClose > 0 && Number.isFinite(price);
   const change = haveDaily ? price - prevClose : NaN;
@@ -38,7 +38,9 @@ export default function Header({ price, prevClose, theme, mood, earsUp, pulse, o
   const { h, m } = expiryCountdown(now);
   const feedColor = replayMode ? theme.accent : live ? (delayed ? DELAYED_COLOR : theme.profit) : theme.muted;
   const feedLabel = replayMode ? 'REPLAY' : live ? (delayed ? 'DELAYED' : 'LIVE') : 'OFFLINE';
-  const sourceLabel = source === 'ES' ? 'ES/SPX' : 'SPX';
+  // Guest mode: the ticker, and a "W" weekly marker so it's never ambiguous which
+  // expiry a click buys. Home: SPX, or ES/SPX overnight (with the basis dot).
+  const sourceLabel = guestSymbol ? guestSymbol : source === 'ES' ? 'ES/SPX' : 'SPX';
   const expiryDate = formatExpiry(expiry, now);
 
   return (
@@ -81,6 +83,11 @@ export default function Header({ price, prevClose, theme, mood, earsUp, pulse, o
         <div className="price-block">
           <div className="symbol">
             {sourceLabel}
+            {guestSymbol && (
+              <span className="guest-weekly" data-tip={`Nearest weekly — a buy targets the ${expiryDate} expiry`}>
+                {' · W '}{expiryDate}
+              </span>
+            )}
             {source === 'ES' && basisSource && (
               <span
                 className={`basis-dot basis-${basisSource}`}
