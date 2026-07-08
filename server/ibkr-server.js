@@ -1695,7 +1695,14 @@ function feedGuestTick(price) {
   guest.series.lastTick = Date.now();
   const candle = feedGuestSeries(price);
   // Guest chain hasn't been built yet until the secdef + a price both land.
-  if (guest.expiry != null && guestChain.size === 0) setGuestChain();
+  if (guest.expiry != null && guestChain.size === 0) {
+    // Re-derive the strike step against the real spot now that we have one — the
+    // secdef may have finished before any price arrived, leaving strikeStep sized
+    // off the middle-of-list strike (wrong on an irregular grid). Harmless when
+    // it was already correct.
+    if (guest.strikes.length) guest.strikeStep = deriveStrikeStep(guest.strikes, price);
+    setGuestChain();
+  }
   maybeRecenterGuestChain();
   broadcast({ type: 'guestTick', symbol: guest.symbol, price, candle });
 }
@@ -1768,7 +1775,7 @@ function guestChainPayload(e) {
     strike: e.strike,
     optionType: e.right === 'C' ? 'call' : 'put',
     premium: e.premium, delta: e.delta, gamma: e.gamma, theta: e.theta, vega: e.vega, iv: e.iv,
-    bid: e.bid, ask: e.ask, dayHigh: e.dayHigh, dayLow: e.dayLow
+    bid: e.bid, ask: e.ask, dayHigh: e.dayHigh, dayLow: e.dayLow, tickTs: e.tickTs
   };
 }
 
@@ -1784,7 +1791,7 @@ function guestMsg() {
       strike: e.strike,
       type: e.right === 'C' ? 'call' : 'put',
       premium: e.premium, delta: e.delta, gamma: e.gamma, theta: e.theta, vega: e.vega, iv: e.iv,
-      bid: e.bid, ask: e.ask, dayHigh: e.dayHigh, dayLow: e.dayLow
+      bid: e.bid, ask: e.ask, dayHigh: e.dayHigh, dayLow: e.dayLow, tickTs: e.tickTs
     });
   }
   return {
