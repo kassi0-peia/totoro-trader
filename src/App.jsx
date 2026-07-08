@@ -1136,6 +1136,21 @@ export default function App() {
               else setReplayBarOpen((v) => !v);
             }}
           />
+          {/* Symbol search: a thin right-aligned row under the ATM quote strip —
+              collapsed to a 🔍 that expands on click (kisa's placement, 07-07). */}
+          {!replayActive && (
+            <div className="symbol-search-row">
+              <SymbolSearch
+                activeSymbol={activeSymbol}
+                guestPending={activeSymbol !== 'SPX' && !guestActive}
+                results={feed.searchResults}
+                onSearch={feed.searchSymbols}
+                onActivate={activateGuest}
+                onHome={goHome}
+                live={feed.live}
+              />
+            </div>
+          )}
           {(replayBarOpen || replay != null) && (
             <ReplayBar
               theme={theme}
@@ -1203,17 +1218,6 @@ export default function App() {
                 >
                   <svg viewBox="0 0 24 24" width="17" height="17" fill="currentColor"><path d="M13 2 4 14h6l-1 8 9-12h-6z" /></svg>
                 </button>
-              )}
-              {!replayActive && (
-                <SymbolSearch
-                  activeSymbol={activeSymbol}
-                  guestPending={activeSymbol !== 'SPX' && !guestActive}
-                  results={feed.searchResults}
-                  onSearch={feed.searchSymbols}
-                  onActivate={activateGuest}
-                  onHome={goHome}
-                  live={feed.live}
-                />
               )}
             </div>
             <Chart
