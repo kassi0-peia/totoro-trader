@@ -10,7 +10,8 @@ function spxState() {
     source: 'SPX', expiry: '20260706', basis: 20, spxClose: 7490,
     positions: [{ strike: 7500, right: 'C', expiry: '20260706', qty: 1 }],
     trades: [{ id: 1, strike: 7500 }], orders: [],
-    guest: null, guestGreeksMap: new Map(), searchResults: null
+    guest: null, guestGreeksMap: new Map(), searchResults: null,
+    watchlistQuotes: {}
   };
 }
 
@@ -85,4 +86,28 @@ test('symbolSearchResult lands in searchResults', () => {
   assert.equal(s1.searchResults.q, 'SPCX');
   assert.equal(s1.searchResults.matches[0].conId, 42);
   assert.equal(s1.price, s0.price);
+});
+
+test('watchlistQuotes keys the map by symbol without disturbing SPX fields', () => {
+  const s0 = spxState();
+  const s1 = applyMessage(s0, {
+    type: 'watchlistQuotes',
+    quotes: [
+      { symbol: 'AAPL', last: 231.4, bid: 231.3, ask: 231.5, changePct: 1.2, ts: 100 },
+      { symbol: 'NVDA', last: 132.1, bid: 132.0, ask: 132.2, changePct: -0.4, ts: 100 }
+    ]
+  });
+  assert.equal(s1.watchlistQuotes.AAPL.last, 231.4);
+  assert.equal(s1.watchlistQuotes.NVDA.changePct, -0.4);
+  // SPX untouched.
+  assert.equal(s1.price, s0.price);
+  assert.equal(s1.greeksMap, s0.greeksMap);
+  assert.equal(s1.guest, s0.guest);
+});
+
+test('watchlistQuotes rebuilds wholesale so removed symbols drop out', () => {
+  const s0 = { ...spxState(), watchlistQuotes: { AAPL: { symbol: 'AAPL', last: 231 }, NVDA: { symbol: 'NVDA', last: 132 } } };
+  const s1 = applyMessage(s0, { type: 'watchlistQuotes', quotes: [{ symbol: 'AAPL', last: 232, bid: 231.9, ask: 232.1, changePct: 0.5, ts: 200 }] });
+  assert.equal(s1.watchlistQuotes.AAPL.last, 232);
+  assert.equal(s1.watchlistQuotes.NVDA, undefined); // no longer in the list
 });
