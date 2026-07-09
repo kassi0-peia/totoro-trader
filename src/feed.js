@@ -58,7 +58,12 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent } = {}) {
       // guestGreeksMap is SEPARATE from greeksMap — guest greeks never merge in.
       guest: null,           // { symbol, price, candles, expiry, strikeStep, expirations, settlement, live }
       guestGreeksMap: new Map(),
-      searchResults: null    // { q, matches:[{symbol,name,conId,secType,exchange,currency}] } | null
+      searchResults: null,   // { q, matches:[{symbol,name,conId,secType,exchange,currency}] } | null
+      // ── Watchlist layer (multi-symbol Phase B) ──
+      // Quotes-only: the bridge polls a client-owned stock list with one-shot
+      // snapshots. Keyed by symbol for O(1) row lookup; SPX is never here (the
+      // client pins it from the live feed).
+      watchlistQuotes: {}    // symbol -> { symbol, last, bid, ask, changePct, ts }
     };
   });
 
@@ -199,7 +204,17 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent } = {}) {
     return true;
   }, []);
 
-  return { ...snapshot, sendOrder, sendCancel, requestQuote, requestHistory, requestOptHistory, requestReplayDay, requestJournal, searchSymbols, activateSymbol, deactivateSymbol };
+  // Set the watchlist (multi-symbol Phase B). The client owns the list; the
+  // bridge polls it for snapshot quotes. Send it verbatim — the bridge
+  // normalizes (uppercase/dedupe/cap/SPX-excluded). App re-sends on reconnect.
+  const setWatchlist = useCallback((symbols) => {
+    const ws = socketRef.current;
+    if (!ws || ws.readyState !== 1) return false;
+    ws.send(JSON.stringify({ type: 'watchlist', symbols }));
+    return true;
+  }, []);
+
+  return { ...snapshot, sendOrder, sendCancel, requestQuote, requestHistory, requestOptHistory, requestReplayDay, requestJournal, searchSymbols, activateSymbol, deactivateSymbol, setWatchlist };
 }
 
 // Exported for unit testing the reducer (guest merges must not disturb SPX
@@ -363,6 +378,15 @@ export function applyMessage(s, msg) {
 
   if (msg.type === 'symbolSearchResult') {
     return { ...s, searchResults: { q: msg.q, matches: msg.matches || [] } };
+  }
+
+  // A complete watchlist quote set (the bridge sends every cached quote for the
+  // current list on each update). Rebuild the keyed map wholesale so symbols the
+  // client removed drop out; SPX snapshot fields are untouched.
+  if (msg.type === 'watchlistQuotes') {
+    const next = {};
+    for (const q of msg.quotes || []) if (q && q.symbol) next[q.symbol] = q;
+    return { ...s, watchlistQuotes: next };
   }
 
   return s;
