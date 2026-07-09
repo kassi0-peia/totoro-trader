@@ -22,6 +22,7 @@ import { WebSocketServer } from 'ws';
 import { computeSession, etParts, ymd, lastCloseEt, etCloseEpoch } from './session.js';
 import { computeOptionsForward } from './options-forward.js';
 import { pickExpiry, deriveStrikeStep, strikeWindow, validateOrder as validateGuestOrder } from './guest-symbol.js';
+import { normalizeWatchlist, shapeWatchQuote } from './watchlist.js';
 
 // Last-resort backstop: an unexpected throw in one handler must not kill the whole
 // bridge while working orders/brackets are live at IBKR. Log loudly and stay up —
@@ -164,6 +165,23 @@ function newGuestSeries() {
   return { candles: [], edge: nextCandleEdge(Date.now()), recentBars: [], lastTick: 0 };
 }
 
+// ── Watchlist layer (multi-symbol Phase B) ───────────────────────────────────
+// A client-owned list of US stock tickers polled for QUOTES ONLY — no chart, no
+// chain, no orders. The bridge never streams these: it fires one-shot snapshot
+// reqMktData on a slow, staggered cycle, because kisa's market-data line budget
+// is already spent on the SPXW (or guest) chain. The client is the source of
+// truth for the list and re-sends it on (re)connect; the bridge does NOT persist
+// it. SPX is excluded (home instrument, already streaming — the client pins it
+// from the live feed). See server/watchlist.js and spec-multi-symbol.md.
+const WATCH_POLL_MS = 25_000;     // full refresh cycle per symbol (slow, budget-friendly)
+const WATCH_STAGGER_MS = 350;     // spacing between the symbols' snapshots within a cycle
+const WATCH_SNAP_TIMEOUT_MS = 8_000; // finalize a snapshot even if tickSnapshotEnd never lands
+let watchlist = [];               // normalized symbol list (client-owned)
+const watchContracts = new Map(); // symbol -> resolved STK contract (conId cached for the session)
+const watchQuotes = new Map();    // symbol -> last good shaped quote { symbol, last, bid, ask, changePct, ts }
+const watchResolving = new Set(); // symbols with a reqContractDetails in flight (dedupe)
+const watchInFlight = new Map();  // symbol -> reqId of the snapshot currently on the wire
+
 // Account safety + order execution state.
 let account = null;             // e.g. "DU1234567"
 let accountType = null;         // 'paper' | 'live' | null (unknown)
@@ -224,6 +242,9 @@ function createServer() {
 wss.on('connection', (ws) => {
   ws.send(JSON.stringify(snapshotMsg()));
   if (guest) ws.send(JSON.stringify(guestMsg())); // a guest active on another client
+  // Cached watchlist quotes (a list set by another client) paint immediately.
+  const wq = watchQuotesMsg();
+  if (wq.quotes.length) ws.send(JSON.stringify(wq));
   ws.on('message', (data) => {
     let msg;
     try { msg = JSON.parse(data); } catch { return; }
@@ -239,6 +260,7 @@ wss.on('connection', (ws) => {
     else if (msg.type === 'symbolSearch') handleSymbolSearch(ws, msg);
     else if (msg.type === 'activateSymbol') handleActivateSymbol(ws, msg);
     else if (msg.type === 'deactivateSymbol') handleDeactivateSymbol(ws, msg);
+    else if (msg.type === 'watchlist') handleWatchlist(ws, msg);
   });
 });
 
@@ -401,6 +423,7 @@ function wireHandlers(api) {
 
   api.on(EventName.tickSnapshotEnd, (reqId) => {
     finishQuoteSnap(reqId);
+    finishWatchSnap(reqId);
   });
 
   // Account list arrives on connect; the first account drives the safety gate.
@@ -569,6 +592,16 @@ function wireHandlers(api) {
       else if (field === 7 || field === 73) s.low = value;   // day low / delayed
       return;
     }
+    // Watchlist one-shot stock snapshot (Phase B): collect fields until the
+    // snapshot ends; close (9/75) feeds the day-change %.
+    if (s.kind === 'watch-snap') {
+      if (!(value > 0)) return;
+      if (field === 1 || field === 66) s.bid = value;
+      else if (field === 2 || field === 67) s.ask = value;
+      else if (field === 4 || field === 68) s.last = value;
+      else if (field === 9 || field === 75) s.close = value;
+      return;
+    }
     if (s.kind === 'spx') {
       if (!(value > 0)) return;
       if (field === 4 || field === 68) feedSpxTick(value);
@@ -637,6 +670,7 @@ function wireHandlers(api) {
     const s = subs.get(reqId);
     if (!s) return;
     if (s.kind === 'guest-cd') { onGuestContractDetails(s, details); return; }
+    if (s.kind === 'watch-cd') { subs.delete(reqId); onWatchContractDetails(s, details); return; }
     if (s.kind !== 'es-cd' || esContract) return;
     const c = details.contract;
     esContract = {
@@ -1811,6 +1845,116 @@ function guestMsg() {
   };
 }
 
+// ── Watchlist lifecycle (multi-symbol Phase B) ───────────────────────────────
+
+// {type:'watchlist', symbols:[...]} → the client sets the full list. Normalize,
+// resolve any newly added contracts, drop anything no longer listed, and paint
+// whatever quotes are already cached so the requesting client isn't blank while
+// the next poll cycle runs. Empty list → no requests at all.
+function handleWatchlist(ws, msg) {
+  const next = normalizeWatchlist(msg.symbols);
+  watchlist = next;
+  const want = new Set(next);
+  // Drop state for symbols the client removed; cancel nothing (snapshots are
+  // one-shot, they finalize on their own timer).
+  for (const sym of [...watchContracts.keys()]) if (!want.has(sym)) watchContracts.delete(sym);
+  for (const sym of [...watchQuotes.keys()]) if (!want.has(sym)) watchQuotes.delete(sym);
+  for (const sym of [...watchResolving]) if (!want.has(sym)) watchResolving.delete(sym);
+  for (const sym of [...watchInFlight.keys()]) if (!want.has(sym)) watchInFlight.delete(sym);
+  // Resolve contracts for the newcomers (conId cached for the session).
+  if (ib && connected) for (const sym of next) resolveWatchContract(sym);
+  // Immediate paint from cache; a fresh cycle will follow within WATCH_POLL_MS.
+  if (ws.readyState === 1) ws.send(JSON.stringify(watchQuotesMsg()));
+}
+
+function resolveWatchContract(symbol) {
+  if (!ib || !connected) return;
+  if (watchContracts.has(symbol) || watchResolving.has(symbol)) return;
+  const reqId = reqSeq++;
+  watchResolving.add(symbol);
+  subs.set(reqId, { kind: 'watch-cd', symbol });
+  try {
+    ib.reqContractDetails(reqId, { symbol, secType: 'STK', exchange: 'SMART', currency: 'USD' });
+  } catch (e) {
+    console.log(`[ibkr] watchlist reqContractDetails ${symbol} failed:`, e.message);
+    subs.delete(reqId);
+    watchResolving.delete(symbol);
+  }
+}
+
+function onWatchContractDetails(s, details) {
+  watchResolving.delete(s.symbol);
+  if (!watchlist.includes(s.symbol)) return; // removed while resolving
+  const c = details?.contract;
+  if (!c || watchContracts.has(s.symbol)) return; // first row wins (SMART collapses exchanges)
+  watchContracts.set(s.symbol, {
+    conId: c.conId,
+    symbol: c.symbol || s.symbol,
+    secType: 'STK',
+    exchange: 'SMART',
+    primaryExch: c.primaryExch || c.exchange || undefined,
+    currency: c.currency || 'USD'
+  });
+}
+
+// One slow cycle: fire a one-shot snapshot per resolved symbol, staggered so the
+// requests don't burst onto the line. Skip a symbol whose previous snapshot is
+// still in flight (a stuck request must not accumulate). No-op unless connected
+// and the list is non-empty — so an empty watchlist costs nothing.
+function pollWatchlist() {
+  if (!ib || !connected || watchlist.length === 0) return;
+  let i = 0;
+  for (const sym of watchlist) {
+    if (!watchContracts.has(sym)) { resolveWatchContract(sym); continue; }
+    if (watchInFlight.has(sym)) continue; // last snapshot never finalized; try next cycle
+    const delay = i++ * WATCH_STAGGER_MS;
+    setTimeout(() => snapshotWatchSymbol(sym), delay);
+  }
+}
+
+function snapshotWatchSymbol(symbol) {
+  if (!ib || !connected) return;
+  if (!watchlist.includes(symbol)) return; // removed since the cycle was scheduled
+  const contract = watchContracts.get(symbol);
+  if (!contract || watchInFlight.has(symbol)) return;
+  const reqId = reqSeq++;
+  watchInFlight.set(symbol, reqId);
+  subs.set(reqId, { kind: 'watch-snap', symbol, bid: null, ask: null, last: null, close: null });
+  try {
+    ib.reqMktData(reqId, contract, '', true, false, []); // snapshot=true → one-shot
+  } catch (e) {
+    console.log(`[ibkr] watchlist snapshot ${symbol} failed:`, e.message);
+    subs.delete(reqId);
+    watchInFlight.delete(symbol);
+    return;
+  }
+  // Belt and braces: finalize even if tickSnapshotEnd never arrives.
+  setTimeout(() => finishWatchSnap(reqId), WATCH_SNAP_TIMEOUT_MS);
+}
+
+function finishWatchSnap(reqId) {
+  const s = subs.get(reqId);
+  if (!s || s.kind !== 'watch-snap') return;
+  subs.delete(reqId);
+  if (watchInFlight.get(s.symbol) === reqId) watchInFlight.delete(s.symbol);
+  const quote = shapeWatchQuote(s);
+  if (!quote) return; // nothing quoted — keep the previous good quote
+  if (!watchlist.includes(s.symbol)) return; // removed mid-flight
+  watchQuotes.set(s.symbol, quote);
+  broadcast(watchQuotesMsg());
+}
+
+// Broadcast payload: quotes ordered by the current watchlist so the client can
+// paint rows in list order. Symbols without a quote yet are simply absent.
+function watchQuotesMsg() {
+  const quotes = [];
+  for (const sym of watchlist) {
+    const q = watchQuotes.get(sym);
+    if (q) quotes.push(q);
+  }
+  return { type: 'watchlistQuotes', quotes };
+}
+
 // ── Session evaluation ──────────────────────────────────────────────────────
 
 function evaluateSession() {
@@ -1844,6 +1988,10 @@ setInterval(evaluateSession, 5000);
 // current). Catches the case where HMDS was still blocked at seed time.
 setInterval(maybeBackfillBasis, 300_000);
 
+// Poll the watchlist with one-shot snapshots on a slow cycle. No-op when the
+// list is empty or disconnected, so it costs nothing until kisa stars a symbol.
+setInterval(pollWatchlist, WATCH_POLL_MS);
+
 // While DELAYED, re-subscribe SPX every 2 min: TWS only re-evaluates the data
 // line on a fresh request, so without this the badge stays stuck after the
 // competing session logs out. A live verdict (marketDataType 1) flips the flag
@@ -1872,6 +2020,14 @@ function resetSubscriptions() {
   // stale guest can't drive the order path against contracts we no longer track.
   guestChain.clear();
   guest = null;
+  // Watchlist state is not persisted across a reconnect either — its resolved
+  // contracts/reqIds were just cleared with everyone else's. Drop the runtime
+  // maps and the list; the client re-sends `watchlist` on reconnect from memory.
+  watchlist = [];
+  watchContracts.clear();
+  watchQuotes.clear();
+  watchResolving.clear();
+  watchInFlight.clear();
 }
 
 function setStatus(s) {
