@@ -36,6 +36,7 @@ const IVOL = 0.18;
 // Chain strikes tick every few seconds when the book is alive; the far-strike
 // snapshot poller refreshes every 30 s — 60 s covers both without flapping.
 const MID_FRESH_MS = 60_000;
+const SPXW_STRIKE_STEP = 5; // SPXW strikes are every 5 points (used to walk money-ward)
 
 function timeToExpiryYearsAt(now) {
   const d = new Date(now);
@@ -426,6 +427,30 @@ export default function App() {
 
   const T = useMemo(() => timeToExpiryYearsAt(replayActive ? replayNow : now), [now, replayActive, replayNow]);
 
+  // Upper bound for an OTM option that has no fresh quote of its own. Option
+  // value is monotonic in strike, so an OTM call can't be worth more than a
+  // lower (closer-to-money) quoted call, nor an OTM put more than a higher quoted
+  // put. Returns the nearest money-ward fresh-quoted mid, or null if none is in
+  // the map. This keeps the flat-IV model — which overprices far wings — from
+  // inventing phantom P/L on unquoted positions (e.g. a deep-OTM call overnight,
+  // where the market disseminates no bid/ask at all for that strike).
+  const wingCapMid = (strike, type, greeksMap, S) => {
+    if (!greeksMap || S == null) return null;
+    const otm = type === 'call' ? strike > S : strike < S;
+    if (!otm) return null; // ITM: intrinsic dominates, the model is fine there
+    let best = null; // the nearest money-ward strike with a live mid
+    for (const g of greeksMap.values()) {
+      if (g.type !== type) continue;
+      const moneyWard = type === 'call' ? g.strike < strike : g.strike > strike;
+      if (!moneyWard) continue;
+      const ts = g.tickTs ?? g.snapshotTs;
+      if (!(g.bid > 0 && g.ask >= g.bid && ts != null && now - ts < MID_FRESH_MS)) continue;
+      const closer = best == null || (type === 'call' ? g.strike > best.strike : g.strike < best.strike);
+      if (closer) best = g;
+    }
+    return best ? (best.bid + best.ask) / 2 : null;
+  };
+
   // `symbol` marks WHICH instrument this strike belongs to (default: the active
   // cockpit). A guest position is only marked against the guest chain when the
   // guest is currently active AND the position is that guest's — an SPX position
@@ -492,6 +517,18 @@ export default function App() {
     const g = bsGreeks({ S: feed.price, K: strike, T, sigma: IVOL, type });
     if (q && q.bid != null && q.ask != null) {
       return { ...g, premium: (q.bid + q.ask) / 2, source: 'quote' };
+    }
+    // No quote at all for this strike (a far wing the market isn't disseminating
+    // overnight). The flat-IV model overprices such wings — measured ~$0.9 on a
+    // 7600 call worth ~$0.1, i.e. phantom P/L. Bound an OTM mark by the nearest
+    // money-ward quoted strike (monotonicity); with no neighbor quote either,
+    // fall to intrinsic. Never surface a model-only gain on an unquoted position.
+    const cap = wingCapMid(strike, type, feed.greeksMap, feed.price);
+    if (cap != null) return { ...g, premium: Math.min(g.premium, cap), source: 'bs-capped' };
+    const otm = type === 'call' ? strike > feed.price : strike < feed.price;
+    if (otm) {
+      const intrinsic = Math.max(0, type === 'call' ? feed.price - strike : strike - feed.price);
+      return { ...g, premium: intrinsic, source: 'intrinsic' };
     }
     return { ...g, source: 'bs' };
   };
@@ -588,9 +625,19 @@ export default function App() {
   // far-strike poller hits the SPXW chain, so quoting a guest strike there would
   // resolve the wrong contract and poison the SPX greeks map. Guest positions
   // stay fresh via the guest chain's own streaming window.
+  //
+  // Quote each position's OWN strike at its OWN expiry (threading the expiry —
+  // else a non-current-expiry leg would be quoted against the wrong contract),
+  // plus the two money-ward neighbors. Those neighbors give wingCapMid a live
+  // bound when the position strike itself is a wing the market won't quote, so
+  // an unquoted deep-OTM leg can't fall back to the phantom flat-IV model.
   openStrikesRef.current = replayActive ? [] : positionsLive
     .filter((p) => p.status === 'open' && (p.symbol ?? 'SPX') === 'SPX')
-    .map((p) => ({ strike: p.strike, right: rightOf(p.type) }));
+    .flatMap((p) => {
+      const right = rightOf(p.type);
+      const stepToMoney = p.type === 'call' ? -SPXW_STRIKE_STEP : SPXW_STRIKE_STEP;
+      return [0, 1, 2].map((n) => ({ strike: p.strike + n * stepToMoney, right, expiry: p.expiry }));
+    });
 
   // Chart shows only positions for the CURRENT session's expiry (these are 0DTE —
   // a prior day's position has a past expiry and is already settled, so its lines
