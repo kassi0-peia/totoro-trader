@@ -11,7 +11,7 @@ import React, { useEffect, useRef, useState } from 'react';
 // lookup; results arrive on feed.searchResults. Activation/home are the parent's
 // senders. This component owns only the input text, expansion, the open/closed
 // dropdown, and the debounce timer.
-export default function SymbolSearch({ activeSymbol, guestPending, results, onSearch, onActivate, onHome, live }) {
+export default function SymbolSearch({ activeSymbol, guestPending, results, onSearch, onActivate, onAddWatch, onHome, live }) {
   const [text, setText] = useState('');
   const [open, setOpen] = useState(false);
   const [expanded, setExpanded] = useState(false);
@@ -118,11 +118,23 @@ export default function SymbolSearch({ activeSymbol, guestPending, results, onSe
             <div className="sym-empty">no matches</div>
           ) : (
             matches.map((m) => (
-              <button className="sym-opt" key={`${m.conId}-${m.symbol}`} onClick={() => pick(m)} role="option">
-                <span className="sym-opt-tkr">{m.symbol}</span>
-                <span className="sym-opt-name">{m.name}</span>
-                <span className="sym-opt-exch">{m.exchange}</span>
-              </button>
+              <div className="sym-opt" key={`${m.conId}-${m.symbol}`} role="option">
+                <button className="sym-opt-main" onClick={() => pick(m)}>
+                  <span className="sym-opt-tkr">{m.symbol}</span>
+                  <span className="sym-opt-name">{m.name}</span>
+                  <span className="sym-opt-exch">{m.exchange}</span>
+                </button>
+                {onAddWatch && (
+                  <button
+                    className="sym-opt-star"
+                    onClick={(e) => { e.stopPropagation(); onAddWatch(m.symbol); }}
+                    data-tip={`Add ${m.symbol} to the watchlist`}
+                    aria-label={`Add ${m.symbol} to the watchlist`}
+                  >
+                    ☆
+                  </button>
+                )}
+              </div>
             ))
           )}
         </div>

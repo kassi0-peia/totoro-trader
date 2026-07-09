@@ -10,6 +10,7 @@ import ThemePanel from './ThemePanel.jsx';
 import TimeframeBar from './TimeframeBar.jsx';
 import QuoteStrip from './QuoteStrip.jsx';
 import SymbolSearch from './SymbolSearch.jsx';
+import Watchlist from './Watchlist.jsx';
 import { useIbkrFeed, liveGreeks, liveQuote } from './feed.js';
 import { greeks as bsGreeks, nearestOtmStrike } from './options.js';
 import { expiryCutoffMs, suggestTimetable, displayRows, scanTouch } from './busstop.js';
@@ -309,6 +310,36 @@ export default function App() {
     if (feed.guest && feed.guest.symbol === activeSymbol) return;
     feed.activateSymbol(activeSymbol, activeConIdRef.current);
   }, [feed.socketOpen, activeSymbol]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Watchlist (multi-symbol Phase B) ──
+  // Client-owned list of stock tickers, quotes-only. Persisted to localStorage;
+  // re-sent to the bridge whenever the socket (re)connects or the list changes
+  // (the bridge doesn't persist it — same contract as guest activation).
+  const WATCHLIST_MAX = 12;
+  const [watchlist, setWatchlist] = useState(() => {
+    try {
+      const raw = localStorage.getItem('tt.watchlist');
+      const a = raw ? JSON.parse(raw) : null;
+      if (Array.isArray(a)) return a.filter((x) => typeof x === 'string' && x && x !== 'SPX').slice(0, WATCHLIST_MAX);
+    } catch {}
+    return [];
+  });
+  useEffect(() => {
+    try { localStorage.setItem('tt.watchlist', JSON.stringify(watchlist)); } catch {}
+  }, [watchlist]);
+  useEffect(() => {
+    if (feed.socketOpen) feed.setWatchlist(watchlist);
+  }, [feed.socketOpen, watchlist]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const addWatch = useCallback((sym) => {
+    const s = String(sym || '').trim().toUpperCase();
+    if (!s || s === 'SPX') return;
+    setWatchlist((w) => (w.includes(s) || w.length >= WATCHLIST_MAX ? w : [...w, s]));
+  }, []);
+  const removeWatch = useCallback((sym) => {
+    const s = String(sym || '').toUpperCase();
+    setWatchlist((w) => w.filter((x) => x !== s));
+  }, []);
 
   // Keep marks honest for open positions outside the streamed chain: nudge a
   // snapshot quote every 30 s (server caches + dedupes) so P/L reflects the
@@ -1140,12 +1171,29 @@ export default function App() {
               collapsed to a 🔍 that expands on click (kisa's placement, 07-07). */}
           {!replayActive && (
             <div className="symbol-search-row">
+              <Watchlist
+                symbols={watchlist}
+                quotes={feed.watchlistQuotes || {}}
+                activeSymbol={activeSymbol}
+                spxQuote={{
+                  last: feed.price,
+                  changePct: feed.price != null && feed.spxClose ? ((feed.price - feed.spxClose) / feed.spxClose) * 100 : null
+                }}
+                onActivate={activateGuest}
+                onHome={goHome}
+                onRemove={removeWatch}
+                onAddActive={() => addWatch(activeSymbol)}
+                canAddActive={guestActive && !watchlist.includes(activeSymbol)}
+                live={feed.live}
+                now={now}
+              />
               <SymbolSearch
                 activeSymbol={activeSymbol}
                 guestPending={activeSymbol !== 'SPX' && !guestActive}
                 results={feed.searchResults}
                 onSearch={feed.searchSymbols}
                 onActivate={activateGuest}
+                onAddWatch={addWatch}
                 onHome={goHome}
                 live={feed.live}
               />
