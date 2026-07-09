@@ -782,7 +782,7 @@ function wireHandlers(api) {
         subs.delete(reqId);
         optHistInFlight.delete(s.key);
         optHistCache.set(s.key, { candles: s.candles, ts: Date.now() });
-        broadcast({ type: 'optHistoryResult', strike: s.strike, right: s.right, expiry: s.expiry, candles: s.candles });
+        broadcast({ type: 'optHistoryResult', symbol: s.symbol ?? 'SPX', strike: s.strike, right: s.right, expiry: s.expiry, candles: s.candles });
         return;
       }
       const t = parseHistTime(time);
@@ -2330,21 +2330,39 @@ const optHistInFlight = new Set();
 function handleOptHistoryRequest(_ws, msg) {
   const strike = Number(msg.strike);
   const right = msg.right === 'P' ? 'P' : 'C';
-  const expiry = String(msg.expiry || currentExpiry || session.expiry);
   if (!Number.isFinite(strike) || !ib || !connected) return;
-  const key = `${strike}|${right}|${expiry}`;
+  // A guest premium graph resolves the guest OPT contract from the discovered
+  // secdef (same validation the guest order path uses) — never spxwContract.
+  // Absent/`SPX` symbol keeps the SPXW path exactly as before.
+  const guestSym = typeof msg.symbol === 'string' && msg.symbol && msg.symbol !== 'SPX'
+    ? msg.symbol.toUpperCase() : null;
+  let expiry, contract, symbol;
+  if (guestSym) {
+    if (!guest || guest.symbol !== guestSym) return; // guest not active → no graph
+    expiry = /^\d{8}$/.test(String(msg.expiry || '')) ? String(msg.expiry) : guest.expiry;
+    const v = validateGuestOrder({ strike, right, expiry }, { strikes: guest.strikes, expirations: guest.expirations });
+    if (!v.ok) return;
+    symbol = guestSym;
+    contract = guestOptContract(strike, right, expiry);
+  } else {
+    expiry = String(msg.expiry || currentExpiry || session.expiry);
+    symbol = 'SPX';
+    contract = spxwContract(strike, right, expiry);
+  }
+  const key = `${symbol}|${strike}|${right}|${expiry}`;
   const cached = optHistCache.get(key);
   if (cached && Date.now() - cached.ts < 60_000) {
-    broadcast({ type: 'optHistoryResult', strike, right, expiry, candles: cached.candles });
+    broadcast({ type: 'optHistoryResult', symbol, strike, right, expiry, candles: cached.candles });
     return;
   }
   if (optHistInFlight.has(key)) return;
   optHistInFlight.add(key);
   const reqId = reqSeq++;
-  subs.set(reqId, { kind: 'opt-hist', key, strike, right, expiry, candles: [] });
+  subs.set(reqId, { kind: 'opt-hist', key, symbol, strike, right, expiry, candles: [] });
   try {
-    // useRTH=0: include the GTH overnight session in the premium graph.
-    ib.reqHistoricalData(reqId, spxwContract(strike, right, expiry), '', '1 D', '1 min', 'MIDPOINT', 0, 2, false);
+    // useRTH=0: include the GTH overnight session in the premium graph (SPXW);
+    // equity options have no GTH, so this is a harmless no-op for guests.
+    ib.reqHistoricalData(reqId, contract, '', '1 D', '1 min', 'MIDPOINT', 0, 2, false);
   } catch (e) {
     console.log('[ibkr] opt-hist request failed:', e.message);
     optHistInFlight.delete(key);

@@ -326,7 +326,10 @@ export function applyMessage(s, msg) {
   }
 
   if (msg.type === 'optHistoryResult') {
-    const k = key(msg.strike, msg.right === 'C' ? 'call' : 'put');
+    // Key by symbol so a guest's 500C premium graph can't collide with SPXW's.
+    // SPX keys stay bare (symbol absent or 'SPX') for back-compat with old rows.
+    const base = key(msg.strike, msg.right === 'C' ? 'call' : 'put');
+    const k = msg.symbol && msg.symbol !== 'SPX' ? `${msg.symbol}:${base}` : base;
     return { ...s, optHist: { ...s.optHist, [k]: { candles: msg.candles || [], ts: Date.now() } } };
   }
 

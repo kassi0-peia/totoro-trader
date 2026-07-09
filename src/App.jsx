@@ -50,6 +50,10 @@ function timeToExpiryYearsAt(now) {
 const rightOf = (type) => (type === 'call' ? 'C' : 'P');
 const EMPTY_GREEKS = new Map(); // replay mode shows no live chain
 const posKey = (strike, right, expiry) => `${strike}${right}:${expiry}`;
+// Premium-history key: guest series are symbol-prefixed so they never collide
+// with SPXW's; SPX stays bare (matches the bridge's optHistoryResult keying).
+const optHistKey = (symbol, strike, right) =>
+  (symbol && symbol !== 'SPX' ? `${symbol}:${strike}${right}` : `${strike}${right}`);
 
 let posSeq = 1;
 
@@ -1377,8 +1381,8 @@ export default function App() {
       <TradeModal
         pending={pending}
         theme={theme}
-        series={pending && !replayActive && !guestActive ? feed.optHist[`${pending.strike}${rightOf(pending.type)}`] : null}
-        onRefresh={replayActive || guestActive ? null : (p) => feed.requestOptHistory({ strike: p.strike, right: rightOf(p.type), expiry: feed.expiry })}
+        series={pending && !replayActive ? feed.optHist[optHistKey(activeSymbol, pending.strike, rightOf(pending.type))] : null}
+        onRefresh={replayActive ? null : (p) => feed.requestOptHistory({ ...(guestActive ? { symbol: activeSymbol } : {}), strike: p.strike, right: rightOf(p.type), expiry: cockpitExpiry })}
         onCancel={() => setPending(null)}
         onExecute={handleExecute}
         executionEnabled={replayActive ? true : feed.executionEnabled}
@@ -1398,10 +1402,10 @@ export default function App() {
             fills={fills}
             theme={theme}
             anchor={ip ? null : { x: hoverPos.x, y: hoverPos.y }}
-            series={feed.optHist[`${shown.strike}${rightOf(shown.type)}`]}
-            quote={liveQuote(feed.greeksMap, shown.strike, shown.type)}
+            series={feed.optHist[optHistKey(shown.symbol ?? 'SPX', shown.strike, rightOf(shown.type))]}
+            quote={liveQuote((shown.symbol ?? 'SPX') === 'SPX' ? feed.greeksMap : feed.guestGreeksMap, shown.strike, shown.type)}
             onClose={() => setInspectId(null)}
-            onRefresh={(p) => feed.requestOptHistory({ strike: p.strike, right: rightOf(p.type), expiry: p.expiry })}
+            onRefresh={(p) => feed.requestOptHistory({ ...((shown.symbol ?? 'SPX') !== 'SPX' ? { symbol: shown.symbol } : {}), strike: p.strike, right: rightOf(p.type), expiry: p.expiry })}
             onAttachExit={attachExit}
             executionEnabled={feed.executionEnabled}
             onActivate={() => {
