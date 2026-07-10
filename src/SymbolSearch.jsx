@@ -24,7 +24,8 @@ export const searchPopover = { isOpen: () => false, close: () => {} };
 // expansion, the open/closed dropdown, and the debounce timer.
 export default function SymbolSearch({
   activeSymbol, guestPending, results, onSearch, onActivate, onHome, live,
-  watchSymbols, watchQuotes, spxQuote, onAddWatch, onRemoveWatch, canAddActive, now
+  watchSymbols, watchQuotes, spxQuote, onAddWatch, onRemoveWatch, canAddActive,
+  openGuestSymbols = [], now
 }) {
   const [text, setText] = useState('');
   const [open, setOpen] = useState(false);
@@ -108,6 +109,19 @@ export default function SymbolSearch({
           </span>
         </>
       )}
+      {/* Tabs for symbols holding an open position (kisa 2026-07-10): a TSLA
+          leg must never strand its cockpit behind a fresh search — one click
+          returns to it, and its marks only stream while it's active. */}
+      {openGuestSymbols.filter((s) => s !== activeSymbol).map((s) => (
+        <button
+          key={s}
+          className="sym-chip sym-chip-pos"
+          onClick={() => onActivate(s)}
+          data-tip={`${s} — open position; switch to its cockpit for live marks`}
+        >
+          {s}
+        </button>
+      ))}
       {!expanded ? (
         <button
           className="sym-glass"

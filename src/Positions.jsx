@@ -2,6 +2,8 @@ import React from 'react';
 import { plDollars, plSign } from './pl.js';
 
 function plOf(pos) {
+  // No live feed for this symbol right now (inactive guest) → no honest mark.
+  if (pos.greeksLive?.source === 'nodata') return { live: null, dollars: null, pct: null };
   const live = pos.greeksLive?.premium ?? pos.entryPremium ?? 0;
   const entry = pos.entryPremium ?? 0;
   const dollars = plDollars(pos, live, entry);
@@ -38,7 +40,7 @@ export default function Positions({ positions, theme, onClose, onReverse, onCanc
 
   const openPL = positions
     .filter((p) => p.status === 'open' && p.entryPremium != null)
-    .reduce((s, p) => s + plOf(p).dollars, 0);
+    .reduce((s, p) => s + (plOf(p).dollars ?? 0), 0);
   const closedPL = done.reduce((s, p) => s + (p.closedPL || 0), 0);
 
   // Net greeks of the open book (roadmap #6, kisa's clutter rule: one line in
@@ -138,6 +140,7 @@ export default function Positions({ positions, theme, onClose, onReverse, onCanc
               <span className="pos-type" style={{ background: color, color: '#0a0c12' }}>
                 {p.type === 'call' ? 'C' : 'P'}
               </span>
+              {(p.symbol ?? 'SPX') !== 'SPX' && <span className="pos-sym">{p.symbol}</span>}
               <span className="pos-strike">{p.strike}</span>
               <span className="pos-cell"><span className="cell-label">QTY</span>×{p.qty}</span>
               <span className="pos-cell">
@@ -146,16 +149,22 @@ export default function Positions({ positions, theme, onClose, onReverse, onCanc
               </span>
               {p.status === 'open' ? (
                 <>
-                  <span className="pos-cell"><span className="cell-label">MARK</span>${live.toFixed(2)}</span>
+                  <span className="pos-cell"><span className="cell-label">MARK</span>{live != null ? `$${live.toFixed(2)}` : '—'}</span>
                   <span className="pos-cell">
                     <span className="cell-label">L/H</span>
                     <span style={{ whiteSpace: 'nowrap' }}>
                       {p.dayQuote?.dayLow != null ? p.dayQuote.dayLow.toFixed(2) : '—'}<span style={{ color: theme.muted }}> – </span>{p.dayQuote?.dayHigh != null ? p.dayQuote.dayHigh.toFixed(2) : '—'}
                     </span>
                   </span>
-                  <span className="pos-cell pos-pl" style={{ color: dollars >= 0 ? theme.profit : theme.loss }}>
-                    {dollars >= 0 ? '+' : '−'}${Math.abs(dollars).toFixed(2)}
-                    <span className="pl-pct">({pct >= 0 ? '+' : ''}{pct.toFixed(1)}%)</span>
+                  <span className="pos-cell pos-pl" style={{ color: dollars == null ? theme.muted : dollars >= 0 ? theme.profit : theme.loss }}>
+                    {dollars == null ? (
+                      <span data-tip={`No live feed for ${p.symbol ?? 'this symbol'} — open its tab for live marks`}>—</span>
+                    ) : (
+                      <>
+                        {dollars >= 0 ? '+' : '−'}${Math.abs(dollars).toFixed(2)}
+                        <span className="pl-pct">({pct >= 0 ? '+' : ''}{pct.toFixed(1)}%)</span>
+                      </>
+                    )}
                   </span>
                 </>
               ) : (

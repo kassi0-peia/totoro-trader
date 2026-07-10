@@ -656,6 +656,14 @@ export default function App() {
       const g = bsGreeks({ S: dispPrice, K: strike, T, sigma: IVOL, type });
       return { ...g, source: 'replay' };
     }
+    // A position on a symbol with NO live feed (a guest that isn't the active
+    // cockpit) cannot be marked honestly. The old fallthrough priced it on the
+    // SPX path — a TSLA ~315C "marked" against SPX ≈ 7500 → comedy P/L (kisa,
+    // 2026-07-10). No data → no mark: premium null, the row shows —, P/L
+    // contributions freeze at entry until the symbol's cockpit is active again.
+    if (symbol !== 'SPX' && !(guestActive && symbol === activeSymbol)) {
+      return { premium: null, delta: 0, gamma: 0, theta: 0, vega: 0, source: 'nodata' };
+    }
     // Guest mode: mark against the guest chain with the SAME ladder SPX uses —
     // fresh bid/ask mid first, then the model tick, then flat-IV BS. No 16:15
     // roll / cash-settlement intrinsic (stocks don't PM-settle to an index).
@@ -855,6 +863,17 @@ export default function App() {
     if (feed.live && timeframe > 1) feed.requestHistory(timeframe);
   }, [timeframe, feed.live, feed.requestHistory]);
 
+  // Symbols (beyond SPX) currently holding an open/in-flight position keep a
+  // one-click tab in the control line (kisa 2026-07-10: a TSLA position must
+  // never strand its cockpit behind a fresh search).
+  const openGuestSymbols = useMemo(() => {
+    const s = new Set();
+    for (const p of positionsLive) {
+      if ((p.status === 'open' || p.status === 'pending' || p.status === 'closing') && p.symbol && p.symbol !== 'SPX') s.add(p.symbol);
+    }
+    return [...s];
+  }, [positionsLive]);
+
   // Expected move = ATM straddle price (call mid + put mid), anchored at the
   // previous 4:00 PM cash close: the band the options market prices for expiry.
   // A guest gets the SAME formula from its own chain, anchored at the stock's
@@ -971,7 +990,7 @@ export default function App() {
     const cash = (feed.trades || []).reduce((s, t) => s + (t.action === 'SELL' ? 1 : -1) * t.price * 100 * t.qty, 0);
     const open = positionsLive
       .filter((p) => p.status === 'open')
-      .reduce((s, p) => s + (p.greeksLive?.premium ?? 0) * 100 * p.qty * (p.side === 'long' ? 1 : -1), 0);
+      .reduce((s, p) => s + (p.greeksLive?.premium ?? p.entryPremium ?? 0) * 100 * p.qty * (p.side === 'long' ? 1 : -1), 0);
     return cash + open;
   }, [feed.trades, positionsLive, replayActive]);
 
@@ -1517,6 +1536,7 @@ export default function App() {
                 onAddWatch={addWatch}
                 onRemoveWatch={removeWatch}
                 canAddActive={guestActive && !watchlist.includes(activeSymbol)}
+                openGuestSymbols={openGuestSymbols}
                 now={now}
               />
             )}
