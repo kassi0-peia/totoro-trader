@@ -131,6 +131,28 @@ export default function App() {
     const t = setTimeout(() => setDrawerMounted(false), 300);
     return () => clearTimeout(t);
   }, [tradesPeek, drawerMounted]);
+  // ── Bottom drawer (kisa 2026-07-10: "hide everything below the chart") ──
+  // At rest the chart runs edge-to-edge; an invisible band along the bottom
+  // edge hover-opens the panel (tf-bar + positions) OVER the chart, clicking
+  // the band pins it, and a landing fill auto-peeks it ~5s so money is never
+  // invisible. Pinned state is layout memory. Mobile keeps the always-visible
+  // layout (styles.css — hover doesn't exist on touch, and positions must not
+  // hide behind a gesture on the phone).
+  const [bottomPinned, setBottomPinned] = useState(() => {
+    try { return localStorage.getItem('tt.bottomPinned') === '1'; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('tt.bottomPinned', bottomPinned ? '1' : '0'); } catch {}
+  }, [bottomPinned]);
+  const [bottomHover, setBottomHover] = useState(false);
+  const [bottomPeek, setBottomPeek] = useState(false);
+  const bottomPeekTimer = useRef(null);
+  const peekBottom = useCallback(() => {
+    setBottomPeek(true);
+    clearTimeout(bottomPeekTimer.current);
+    bottomPeekTimer.current = setTimeout(() => setBottomPeek(false), 5000);
+  }, []);
+  const bottomOpen = bottomPinned || bottomHover || bottomPeek;
   // ── Trades-drawer view: today's blotter ↔ multi-day journal (history) ──
   // The history view (equity curve + daily P/L) renders INSIDE the drawer;
   // the toggle lives in the drawer header — zero new cockpit chrome.
@@ -219,7 +241,8 @@ export default function App() {
   const [fillFlash, setFillFlash] = useState(null);
   const markFillFlash = useCallback((msg) => {
     setFillFlash({ strike: msg.strike, right: msg.right, expiry: msg.expiry, symbol: msg.symbol ?? 'SPX', action: msg.action, ts: Date.now() });
-  }, []);
+    peekBottom(); // a fill always shows itself: auto-peek the bottom drawer
+  }, [peekBottom]);
 
   // Apply IBKR order lifecycle events to local positions. Entry/exit prices come
   // from IBKR's reported avgFillPrice — never local estimates.
@@ -1599,29 +1622,45 @@ export default function App() {
               </div>
             )}
           </div>
-          <TimeframeBar
-            value={timeframe}
-            onChange={setTimeframe}
-            theme={theme}
-            onCloseAll={closeAllPositions}
-            canCloseAll={(replayActive || feed.executionEnabled) && positionsLive.some((p) => p.status === 'open')}
-          />
-
-          <Positions
-            positions={positionsLive}
-            theme={theme}
-            onClose={closePosition}
-            onReverse={reversePosition}
-            onCancelOrder={cancelOrder}
-            onCancelWorkingOrder={cancelWorkingOrder}
-            onInspect={(p) => setInspectId(p.id)}
-            onHoverPos={(p, x, y) => setHoverPos(p ? { id: p.id, x, y } : null)}
-            workingOrders={replayActive ? [] : feed.orders}
-            executionEnabled={replayActive ? true : feed.executionEnabled}
-            funds={feed.funds}
-            dayPL={dayPL}
-            fillFlash={replayActive ? null : fillFlashFresh}
-          />
+          {/* Bottom drawer: everything below the chart, folded (kisa 2026-07-10).
+              The band is invisible chrome — hover peeks, click pins, fills
+              auto-peek via markFillFlash. Mobile: statically open (styles.css). */}
+          <div
+            className={`bottom-zone${bottomOpen ? ' open' : ''}${bottomPinned ? ' pinned' : ''}`}
+            onMouseEnter={() => setBottomHover(true)}
+            onMouseLeave={() => setBottomHover(false)}
+          >
+            <button
+              className="bottom-grab"
+              onClick={() => setBottomPinned((v) => !v)}
+              aria-label={bottomPinned ? 'Unpin the bottom panel' : 'Pin the bottom panel open'}
+              data-tip={bottomPinned ? 'Pinned open — click to unpin (back to hover-to-peek)' : 'Positions & timeframes — hover to peek, click to pin'}
+            />
+            <div className="bottom-panel">
+              <TimeframeBar
+                value={timeframe}
+                onChange={setTimeframe}
+                theme={theme}
+                onCloseAll={closeAllPositions}
+                canCloseAll={(replayActive || feed.executionEnabled) && positionsLive.some((p) => p.status === 'open')}
+              />
+              <Positions
+                positions={positionsLive}
+                theme={theme}
+                onClose={closePosition}
+                onReverse={reversePosition}
+                onCancelOrder={cancelOrder}
+                onCancelWorkingOrder={cancelWorkingOrder}
+                onInspect={(p) => setInspectId(p.id)}
+                onHoverPos={(p, x, y) => setHoverPos(p ? { id: p.id, x, y } : null)}
+                workingOrders={replayActive ? [] : feed.orders}
+                executionEnabled={replayActive ? true : feed.executionEnabled}
+                funds={feed.funds}
+                dayPL={dayPL}
+                fillFlash={replayActive ? null : fillFlashFresh}
+              />
+            </div>
+          </div>
         </div>
       </main>
 
