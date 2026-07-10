@@ -63,7 +63,8 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent } = {}) {
       // Quotes-only: the bridge polls a client-owned stock list with one-shot
       // snapshots. Keyed by symbol for O(1) row lookup; SPX is never here (the
       // client pins it from the live feed).
-      watchlistQuotes: {}    // symbol -> { symbol, last, bid, ask, changePct, ts }
+      watchlistQuotes: {},   // symbol -> { symbol, last, bid, ask, changePct, ts }
+      posQuotes: {}          // inactive-guest position quotes: 'SYM|strike|right|expiry' -> { bid, ask, last, ts }
     };
   });
 
@@ -311,6 +312,13 @@ export function applyMessage(s, msg) {
   // One-shot snapshot quote for a strike outside the streamed chain — merge it
   // into the greeks map so tooltips/modals find it via the normal lookup.
   if (msg.type === 'quoteResult') {
+    // A guest-position snapshot quote lives in its own map, keyed by the full
+    // contract — never merged into the SPX greeks map (a TSLA 315C must not
+    // collide with SPX strikes, and the expiry guard below is SPX-specific).
+    if (msg.symbol && msg.symbol !== 'SPX') {
+      const k = `${msg.symbol}|${msg.strike}|${msg.right}|${msg.expiry}`;
+      return { ...s, posQuotes: { ...s.posQuotes, [k]: { bid: msg.bid ?? null, ask: msg.ask ?? null, last: msg.last ?? null, ts: msg.ts ?? Date.now() } } };
+    }
     if (msg.expiry && s.expiry && msg.expiry !== s.expiry) return s;
     const type = msg.right === 'C' ? 'call' : 'put';
     const k = key(msg.strike, type);
