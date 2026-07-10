@@ -519,6 +519,7 @@ button {
   .bottom-zone { position: static; }
   .bottom-grab { display: none; }
   .bottom-panel { max-height: none; overflow: visible; opacity: 1; }
+
 }
 
 .tf-bar {
@@ -2382,6 +2383,16 @@ button {
 
   .acct-quick-btn { display: none; }   /* quick mode is right-click → desktop only */
   .acct-bus-btn { display: none; }     /* bus stop is desktop-only (spec-bus-stop.md) */
+  /* Mobile de-busying (kisa 2026-07-10, "very busy"): pinch already zooms so
+     the ± buttons go; screen recording and axis premiums are desktop tools;
+     the TIMEFRAME word is self-evident from its buttons; the header dot
+     already tells the connection story, so of the action row only the panic
+     button survives — full width, phone-thumb sized. The chart keeps just
+     volume + fullscreen. */
+  .cw-btn, .rec-btn, .axis-prem-btn { display: none; }
+  .tf-label { display: none; }
+  .tf-panic:not(.tf-replay) { display: none; }
+  .symbol-search-row { padding: 0 10px; }
   /* The control line slims to just the acct badge on mobile: multi-symbol
      search is desktop-first (Phase A), quick/bus hidden above. */
   .symbol-search-row .symbol-search { display: none; }
