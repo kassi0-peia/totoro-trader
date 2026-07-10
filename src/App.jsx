@@ -132,27 +132,31 @@ export default function App() {
     return () => clearTimeout(t);
   }, [tradesPeek, drawerMounted]);
   // ── Bottom drawer (kisa 2026-07-10: "hide everything below the chart") ──
-  // At rest the chart runs edge-to-edge; an invisible band along the bottom
-  // edge hover-opens the panel (tf-bar + positions) OVER the chart, clicking
-  // the band pins it, and a landing fill auto-peeks it ~5s so money is never
-  // invisible. Pinned state is layout memory. Mobile keeps the always-visible
-  // layout (styles.css — hover doesn't exist on touch, and positions must not
-  // hide behind a gesture on the phone).
-  const [bottomPinned, setBottomPinned] = useState(() => {
-    try { return localStorage.getItem('tt.bottomPinned') === '1'; } catch { return false; }
-  });
-  useEffect(() => {
-    try { localStorage.setItem('tt.bottomPinned', bottomPinned ? '1' : '0'); } catch {}
-  }, [bottomPinned]);
-  const [bottomHover, setBottomHover] = useState(false);
-  const [bottomPeek, setBottomPeek] = useState(false);
+  // At rest the chart runs edge-to-edge. The invisible band along the bottom
+  // edge materializes the panel (tf-bar + positions) after a 1.5s hover —
+  // same rhythm as the left trades drawer — or instantly on click; it FADES
+  // in ("for drama"). Once open it stays until she clicks off it or hits Esc
+  // (never on mouse-away). A landing fill auto-peeks it ~5s unless she
+  // engages. Mobile keeps the always-visible layout (styles.css — touch has
+  // no hover, and positions must not hide behind a gesture on the phone).
+  const [bottomOpen, setBottomOpen] = useState(false);
+  const bottomZoneRef = useRef(null);
   const bottomPeekTimer = useRef(null);
+  const bottomHoverTimer = useRef(null);
   const peekBottom = useCallback(() => {
-    setBottomPeek(true);
+    setBottomOpen(true);
     clearTimeout(bottomPeekTimer.current);
-    bottomPeekTimer.current = setTimeout(() => setBottomPeek(false), 5000);
+    bottomPeekTimer.current = setTimeout(() => setBottomOpen(false), 5000);
   }, []);
-  const bottomOpen = bottomPinned || bottomHover || bottomPeek;
+  useEffect(() => {
+    if (!bottomOpen) return;
+    const onDoc = (e) => {
+      if (bottomZoneRef.current && !bottomZoneRef.current.contains(e.target)) setBottomOpen(false);
+    };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [bottomOpen]);
+  const bottomShown = bottomOpen;
   // ── Trades-drawer view: today's blotter ↔ multi-day journal (history) ──
   // The history view (equity curve + daily P/L) renders INSIDE the drawer;
   // the toggle lives in the drawer header — zero new cockpit chrome.
@@ -1327,6 +1331,7 @@ export default function App() {
       if (inspectId != null) { setInspectId(null); return; }
       if (busPanelId != null) { setBusPanelId(null); return; }
       if (searchPopover.isOpen()) { searchPopover.close(); return; }
+      if (bottomOpen) { setBottomOpen(false); return; }
       if (tradesPeek) { closeTrades(); return; }
       // The replay BAR closes only while idle (picking a day) — Esc must never
       // dump an active practice session's progress.
@@ -1626,15 +1631,20 @@ export default function App() {
               The band is invisible chrome — hover peeks, click pins, fills
               auto-peek via markFillFlash. Mobile: statically open (styles.css). */}
           <div
-            className={`bottom-zone${bottomOpen ? ' open' : ''}${bottomPinned ? ' pinned' : ''}`}
-            onMouseEnter={() => setBottomHover(true)}
-            onMouseLeave={() => setBottomHover(false)}
+            ref={bottomZoneRef}
+            className={`bottom-zone${bottomShown ? ' open' : ''}`}
+            onMouseEnter={() => clearTimeout(bottomPeekTimer.current)}
           >
             <button
               className="bottom-grab"
-              onClick={() => setBottomPinned((v) => !v)}
-              aria-label={bottomPinned ? 'Unpin the bottom panel' : 'Pin the bottom panel open'}
-              data-tip={bottomPinned ? 'Pinned open — click to unpin (back to hover-to-peek)' : 'Positions & timeframes — hover to peek, click to pin'}
+              onMouseEnter={() => {
+                clearTimeout(bottomHoverTimer.current);
+                if (!bottomOpen) bottomHoverTimer.current = setTimeout(() => setBottomOpen(true), 1500);
+              }}
+              onMouseLeave={() => clearTimeout(bottomHoverTimer.current)}
+              onClick={() => { clearTimeout(bottomHoverTimer.current); setBottomOpen((v) => !v); }}
+              aria-label="Positions and timeframes"
+              data-tip="Positions & timeframes — rest here a moment, or click"
             />
             <div className="bottom-panel">
               <TimeframeBar
