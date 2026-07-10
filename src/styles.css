@@ -1861,6 +1861,15 @@ button {
   transition: color 160ms, border-color 160ms, background 160ms;
 }
 .sym-chip:hover { border-color: var(--c-accent); color: var(--c-accent); }
+/* A symbol holding an open position keeps a tab; the dot says "money here". */
+.sym-chip-pos::before { content: '•'; margin-right: 4px; color: var(--c-accent); }
+.pos-sym {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--c-muted);
+  font-family: 'JetBrains Mono', monospace;
+}
 .sym-chip.active {
   color: #0a0c12;
   background: var(--c-accent);
