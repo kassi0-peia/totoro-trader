@@ -411,6 +411,16 @@ function wireHandlers(api) {
       }
       return;
     }
+    // A failed watchlist contract lookup must not stick its symbol in the
+    // resolving set forever (error 200 on a bad ticker, a transient farm
+    // hiccup on a good one) — clear it so the next poll cycle retries.
+    const wsub = subs.get(reqId);
+    if (wsub && wsub.kind === 'watch-cd') {
+      subs.delete(reqId);
+      watchResolving.delete(wsub.symbol);
+      console.log(`[ibkr] watchlist resolve ${wsub.symbol} failed ${code}: ${err?.message ?? err}`);
+      return;
+    }
     console.log(`[ibkr] code=${code} req=${reqId}: ${err?.message ?? err}`);
     if (code === 502 || code === 504 || code === 1100 || code === 1300) {
       setStatus(false);
