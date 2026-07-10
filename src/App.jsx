@@ -11,8 +11,8 @@ import TimeframeBar, { TF_OPTIONS } from './TimeframeBar.jsx';
 import QuoteStrip from './QuoteStrip.jsx';
 import SymbolSearch, { searchPopover } from './SymbolSearch.jsx';
 import useHotkeys from './useHotkeys.js';
+import useAlerts from './useAlerts.js';
 import ChartMenu from './ChartMenu.jsx';
-import { crossed } from './alerts.js';
 import { useIbkrFeed, liveGreeks, liveQuote } from './feed.js';
 import { greeks as bsGreeks, nearestOtmStrike } from './options.js';
 import { expiryCutoffMs, suggestTimetable, displayRows, scanTouch } from './busstop.js';
@@ -20,7 +20,7 @@ import BusStopPanel from './BusStopPanel.jsx';
 import { THEMES } from './themes.js';
 import { plDollars } from './pl.js';
 import { buildOpenOrder, buildQuickOrder } from './order-payload.js';
-import { chimeFill, chimeAlert } from './sounds.js';
+import { chimeFill } from './sounds.js';
 
 // Blind-replay day picker: a random weekday 3–60 days back (LOCAL date parts —
 // the UTC fence eats days after 8 PM ET). Holidays aren't modeled here; they
@@ -207,21 +207,10 @@ export default function App() {
   useEffect(() => {
     try { localStorage.setItem('tt.busStops', JSON.stringify(busStops)); } catch {}
   }, [busStops]);
-  // ⏰ one-shot price alerts (kisa, 2026-07-09): armed from the chart's
-  // right-click menu, drawn as dashed lines only while armed, removed the
-  // moment the live tape crosses (toast + chime). Zero resting chrome — the
-  // line IS the feature. Persisted so a reload doesn't disarm the night's
-  // levels; SPX alerts watch the SPX-equiv price, so they work overnight too.
-  const [alerts, setAlerts] = useState(() => {
-    try {
-      const v = JSON.parse(localStorage.getItem('tt.alerts') || '[]');
-      if (Array.isArray(v)) return v.filter((a) => a && typeof a.symbol === 'string' && Number.isFinite(a.price));
-    } catch {}
-    return [];
-  });
-  useEffect(() => {
-    try { localStorage.setItem('tt.alerts', JSON.stringify(alerts)); } catch {}
-  }, [alerts]);
+  // ⏰ one-shot price alerts live in useAlerts (state + persistence + the live
+  // crossing effect); [alerts, setAlerts] come back so the cockpit draws them
+  // and the chart menu arms/disarms. Hook is called below, once its live-tape
+  // and guest inputs (feed/guest/activeSymbol/showToast) are in scope.
   const [chartMenu, setChartMenu] = useState(null); // {x, y, price, alertId, alertPrice}
   useEffect(() => {
     try {
@@ -248,7 +237,8 @@ export default function App() {
   }, []);
 
   // Sounds live in src/sounds.js now: chimeFill (the original two-note fill
-  // chime, moved verbatim) and chimeAlert (a single soft blip for ⏰ alerts).
+  // chime, moved verbatim) here, and chimeAlert (a single soft blip for ⏰
+  // alerts) inside useAlerts.
 
   // Micro fill animation: when a fill lands, the affected position row (and
   // the strike line on the active chart) glow once, ~400ms, no layout shift.
@@ -351,26 +341,8 @@ export default function App() {
   const guestActive = activeSymbol !== 'SPX' && !!feed.guest && feed.guest.symbol === activeSymbol;
   const guest = guestActive ? feed.guest : null;
 
-  // Fire ⏰ alerts on a live crossing. SPX alerts check feed.price (the
-  // SPX-equiv proxy overnight — "ping when SPX-equiv crosses X"); a guest's
-  // alerts can only fire while that guest is active (its price only streams
-  // then). First tick after load primes the previous price without firing.
-  const alertPrevRef = useRef({});
-  useEffect(() => {
-    const tapes = [['SPX', feed.price]];
-    if (guestActive && guest?.price != null) tapes.push([activeSymbol, guest.price]);
-    for (const [sym, px] of tapes) {
-      if (px == null) continue;
-      const prev = alertPrevRef.current[sym];
-      alertPrevRef.current[sym] = px;
-      if (prev == null || prev === px) continue;
-      const hits = alerts.filter((a) => a.symbol === sym && crossed(prev, px, a.price));
-      if (!hits.length) continue;
-      setAlerts((list) => list.filter((a) => !hits.some((h) => h.id === a.id)));
-      for (const h of hits) showToast(`⏰ ${sym} crossed ${h.price.toFixed(2)}`, 'ok');
-      chimeAlert(); // the dedicated alert blip — one soft low note, not the fill chime
-    }
-  }, [feed.price, guest?.price, guestActive, activeSymbol, alerts]); // eslint-disable-line react-hooks/exhaustive-deps
+  // ⏰ price alerts: state + persistence + the live-crossing effect (see useAlerts).
+  const [alerts, setAlerts] = useAlerts({ feedPrice: feed.price, guestPrice: guest?.price, guestActive, activeSymbol, showToast });
   // The cockpit's data source. In guest mode price/candles/greeksMap/expiry/
   // strikeStep come from feed.guest; otherwise the SPX feed, untouched. Replay is
   // disabled in guest mode, so these never collide with replay's own price/time.
