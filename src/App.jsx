@@ -148,14 +148,24 @@ export default function App() {
     clearTimeout(bottomPeekTimer.current);
     bottomPeekTimer.current = setTimeout(() => setBottomOpen(false), 5000);
   }, []);
+  const footerRef = useRef(null); // the whole footer is a trigger too (kisa: the 14px band was "v small")
   useEffect(() => {
     if (!bottomOpen) return;
     const onDoc = (e) => {
-      if (bottomZoneRef.current && !bottomZoneRef.current.contains(e.target)) setBottomOpen(false);
+      if (bottomZoneRef.current?.contains(e.target)) return;
+      if (footerRef.current?.contains(e.target)) return; // footer clicks toggle, not close-then-reopen
+      setBottomOpen(false);
     };
     document.addEventListener('mousedown', onDoc);
     return () => document.removeEventListener('mousedown', onDoc);
   }, [bottomOpen]);
+  // Shared by the band and the footer: dwell 1.5s to arm, click to toggle.
+  const armBottom = () => {
+    clearTimeout(bottomHoverTimer.current);
+    if (!bottomOpen) bottomHoverTimer.current = setTimeout(() => setBottomOpen(true), 1500);
+  };
+  const disarmBottom = () => clearTimeout(bottomHoverTimer.current);
+  const toggleBottom = () => { clearTimeout(bottomHoverTimer.current); setBottomOpen((v) => !v); };
   const bottomShown = bottomOpen;
   // ── Trades-drawer view: today's blotter ↔ multi-day journal (history) ──
   // The history view (equity curve + daily P/L) renders INSIDE the drawer;
@@ -1637,12 +1647,9 @@ export default function App() {
           >
             <button
               className="bottom-grab"
-              onMouseEnter={() => {
-                clearTimeout(bottomHoverTimer.current);
-                if (!bottomOpen) bottomHoverTimer.current = setTimeout(() => setBottomOpen(true), 1500);
-              }}
-              onMouseLeave={() => clearTimeout(bottomHoverTimer.current)}
-              onClick={() => { clearTimeout(bottomHoverTimer.current); setBottomOpen((v) => !v); }}
+              onMouseEnter={armBottom}
+              onMouseLeave={disarmBottom}
+              onClick={toggleBottom}
               aria-label="Positions and timeframes"
               data-tip="Positions & timeframes — rest here a moment, or click"
             />
@@ -1779,7 +1786,15 @@ export default function App() {
         </div>
       )}
 
-      <footer className="footer">
+      {/* The footer doubles as the bottom-drawer trigger — same dwell/click
+          as the band, and the click-away listener treats it as inside. */}
+      <footer
+        className="footer"
+        ref={footerRef}
+        onMouseEnter={armBottom}
+        onMouseLeave={disarmBottom}
+        onClick={toggleBottom}
+      >
         <span>{feed.live ? 'IBKR LIVE DATA' : 'OFFLINE — NO CONNECTION'}</span>
         <span>TotoroTrader v0.5</span>
       </footer>
