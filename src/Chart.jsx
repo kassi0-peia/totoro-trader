@@ -60,7 +60,8 @@ export default function Chart({
   quickMode = false,
   onToggleAxisChain = null,
   alerts = [],
-  onMenu = null
+  onMenu = null,
+  apiRef = null
 }) {
   const wrapRef = useRef(null);
   const canvasRef = useRef(null);
@@ -811,6 +812,17 @@ export default function Chart({
     const chgPct = base ? (chg / base) * 100 : 0;
     return { c, chg, chgPct, up: c.close >= c.open };
   })();
+
+  // Imperative surface for App's keyboard layer: Space = snapToNow, C/P read
+  // the hovered strike (only the tradeable live-edge hover counts — history
+  // hovers are read-only, same rule as clicks). Re-assigned every render so
+  // the snapshot never goes stale.
+  if (apiRef) {
+    apiRef.current = {
+      snapToNow,
+      hover: hover && hover.future ? { strike: hover.strike, type: hover.type } : null
+    };
+  }
 
   return (
     <div className={`chart-wrap${fullscreen ? ' fullscreen' : ''}`} ref={wrapRef}>

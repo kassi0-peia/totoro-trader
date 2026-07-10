@@ -1,6 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
 import WatchPanel from './Watchlist.jsx';
 
+// Module-level handle for the keyboard layer: App's global Esc chain closes
+// the popover when it's open but NOT focused (the input's own onKeyDown
+// handles the focused case). A singleton is fine — the app renders exactly
+// one SymbolSearch.
+export const searchPopover = { isOpen: () => false, close: () => {} };
+
 // Multi-symbol Phase A+B: symbol search, right-aligned under the ATM quote
 // strip. Collapsed to a bare 🔍 by default (kisa's placement, 2026-07-07);
 // clicking it expands the input AND opens the popover. While the input is
@@ -60,6 +66,14 @@ export default function SymbolSearch({
     setTimeout(() => inputRef.current?.focus(), 0);
   };
   const collapse = () => { setOpen(false); setExpanded(false); setText(''); };
+
+  // Keep the keyboard layer's handle fresh (every render — closures go stale
+  // otherwise) and inert after unmount.
+  useEffect(() => {
+    searchPopover.isOpen = () => open || expanded;
+    searchPopover.close = collapse;
+    return () => { searchPopover.isOpen = () => false; searchPopover.close = () => {}; };
+  });
 
   const matches = results && results.matches ? results.matches : [];
   // Only show results for the current query text (a stale result set for a prior
