@@ -19,6 +19,7 @@ import { expiryCutoffMs, suggestTimetable, displayRows, scanTouch } from './buss
 import BusStopPanel from './BusStopPanel.jsx';
 import { THEMES } from './themes.js';
 import { plDollars } from './pl.js';
+import { buildOpenOrder, buildQuickOrder } from './order-payload.js';
 import { chimeFill, chimeAlert } from './sounds.js';
 
 // Blind-replay day picker: a random weekday 3–60 days back (LOCAL date parts —
@@ -1036,21 +1037,14 @@ export default function App() {
       return;
     }
     if (!feed.executionEnabled) { showToast('Execution disabled', 'err'); return; }
-    // Guest orders MUST be a marketable limit — the bridge rejects a guest MKT.
-    if (guestActive && limit == null) { showToast('Guest orders need a limit price', 'err'); return; }
-    // Sell-to-open is limit-only, same rule as guests: with no limit the bridge
-    // routes a real MKT, and a market SELL into the thin overnight book is a
-    // blank check in the worst direction. The modal enforces this; belt here.
     const sell = pending.side === 'sell';
-    if (sell && limit == null) { showToast('Sell orders need a limit price', 'err'); return; }
-    const ref = feed.sendOrder({
-      intent: 'open', action: sell ? 'SELL' : 'BUY', strike: pending.strike, right: rightOf(pending.type), qty, expiry: cockpitExpiry,
-      ...(guestActive ? { symbol: activeSymbol } : {}),
-      ...(limit != null ? { limit } : {}),
-      // Brackets are BUY-to-open only (the bridge ignores them on a SELL).
-      ...(!sell && takeProfit != null ? { takeProfit } : {}),
-      ...(!sell && stopLoss != null ? { stopLoss } : {})
+    // Payload + guest/sell limit guards live in buildOpenOrder (order-payload.js).
+    const built = buildOpenOrder({
+      side: pending.side, strike: pending.strike, type: pending.type, qty, limit, takeProfit, stopLoss,
+      guestActive, activeSymbol, cockpitExpiry
     });
+    if (!built.ok) { showToast(built.reason, 'err'); return; }
+    const ref = feed.sendOrder(built.payload);
     if (!ref) { showToast('Order not sent — not connected', 'err'); return; }
     setPositions((prev) => [...prev, {
       id: posSeq++, symbol: activeSymbol, type: pending.type, side: sell ? 'short' : 'long', strike: pending.strike, qty, expiry: cockpitExpiry,
@@ -1084,16 +1078,12 @@ export default function App() {
       return;
     }
     if (!feed.executionEnabled) { showToast('Execution disabled', 'err'); return; }
-    // A live ask is still required even in MARKET mode — it's the guard against
-    // firing blind into a strike with no streaming quote (where MKT slippage is worst).
-    if (ask == null || !(ask > 0)) { showToast(`No live ask for ${strike}${rightOf(type)} — hover until a quote loads`, 'err'); return; }
-    // The ⚡ red MKT arm is SPX-only in Phase A. In guest mode it degrades to the
-    // amber marketable limit (a guest MKT would be rejected by the bridge anyway).
-    const market = quickMode === 'market' && !guestActive;
-    const tick = ask < 3 ? 0.05 : 0.10;
-    const limit = market ? null : Math.round((ask + tick) * 100) / 100;
-    // MARKET mode omits the limit → the bridge routes a real MKT (never naked elsewhere).
-    const ref = feed.sendOrder({ intent: 'open', action: 'BUY', strike, right: rightOf(type), qty: 1, expiry: cockpitExpiry, ...(guestActive ? { symbol: activeSymbol } : {}), ...(market ? {} : { limit }) });
+    // Payload, the live-ask guard, and the amber-tick math live in buildQuickOrder
+    // (order-payload.js). It returns `market`/`limit` for the position + toast below.
+    const built = buildQuickOrder({ strike, type, ask, quickMode, guestActive, activeSymbol, cockpitExpiry });
+    if (!built.ok) { showToast(built.reason, 'err'); return; }
+    const { payload, market, limit } = built;
+    const ref = feed.sendOrder(payload);
     if (!ref) { showToast('Order not sent — not connected', 'err'); return; }
     const g = resolveGreeks(strike, type);
     setPositions((prev) => [...prev, {
