@@ -178,3 +178,16 @@ It runs the bridge with `Restart=always` (don't add a cron keepalive — they'll
 fight over the port), logs to `/tmp/totoro-bridge.log`, and needs a build
 first (`npm run build`) since the bridge serves `dist/`. Manage with
 `systemctl --user status|restart totoro-bridge`.
+
+### Backups
+
+The trade journal (`server/.journal.json`) and basis cache
+(`server/.basis-cache.json`) aren't in git, so a lost laptop loses them.
+`scripts/backup-journal.sh` copies both to `~/totoro-backups/` (timestamped,
+newest 30 kept). Reference units are in `deploy/totoro-backup.{service,timer}`
+(edit the paths). To enable the daily run:
+
+```bash
+cp deploy/totoro-backup.service deploy/totoro-backup.timer ~/.config/systemd/user/
+systemctl --user enable --now totoro-backup.timer
+```
