@@ -7,9 +7,10 @@ import TradeModal from './TradeModal.jsx';
 import PositionModal from './PositionModal.jsx';
 import ReplayBar from './ReplayBar.jsx';
 import ThemePanel from './ThemePanel.jsx';
-import TimeframeBar from './TimeframeBar.jsx';
+import TimeframeBar, { TF_OPTIONS } from './TimeframeBar.jsx';
 import QuoteStrip from './QuoteStrip.jsx';
-import SymbolSearch from './SymbolSearch.jsx';
+import SymbolSearch, { searchPopover } from './SymbolSearch.jsx';
+import useHotkeys from './useHotkeys.js';
 import ChartMenu from './ChartMenu.jsx';
 import { crossed } from './alerts.js';
 import { useIbkrFeed, liveGreeks, liveQuote } from './feed.js';
@@ -18,7 +19,7 @@ import { expiryCutoffMs, suggestTimetable, displayRows, scanTouch } from './buss
 import BusStopPanel from './BusStopPanel.jsx';
 import { THEMES } from './themes.js';
 import { plDollars } from './pl.js';
-import Journal from './Journal.jsx';
+import { chimeFill, chimeAlert } from './sounds.js';
 
 // Blind-replay day picker: a random weekday 3–60 days back (LOCAL date parts —
 // the UTC fence eats days after 8 PM ET). Holidays aren't modeled here; they
@@ -74,7 +75,15 @@ export default function App() {
     () => (neutralChrome ? { ...theme, bg: '#0a0a0c', grid: '#17171a' } : theme),
     [theme, neutralChrome]
   );
-  const [timeframe, setTimeframe] = useState(1);
+  // Timeframe — restored per symbol (tt.tf:SPX here; guests restore in the
+  // layout-memory effect below). First-ever visit keeps the 1m default.
+  const [timeframe, setTimeframe] = useState(() => {
+    try {
+      const v = parseInt(localStorage.getItem('tt.tf:SPX'), 10);
+      if (TF_OPTIONS.some((o) => o.value === v)) return v;
+    } catch {}
+    return 1;
+  });
   const [positions, setPositions] = useState([]);
   const [pending, setPending] = useState(null);
   const [inspectId, setInspectId] = useState(null); // position id shown in the inspect modal (click/touch)
@@ -86,15 +95,22 @@ export default function App() {
   // ── Replay mode (desktop practice): play back a past day's 1-min session ──
   // and trade it with simulated fills at Black–Scholes prices. No real orders.
   const [replayBarOpen, setReplayBarOpen] = useState(false);
-  const [journalOpen, setJournalOpen] = useState(false);
   const [replay, setReplay] = useState(null); // { date, candles, idx, speed, playing }
   const [replayPositions, setReplayPositions] = useState([]);
   const replayActive = replay != null && replay.candles.length > 0;
   const replayLoading = replay != null && replay.candles.length === 0;
   const replayPrice = replayActive ? replay.candles[replay.idx].close : null;
   const replayNow = replayActive ? replay.candles[replay.idx].t : null;
-  const [tradesPeek, setTradesPeek] = useState(false); // slide-in drawer: today's fills over the chart
-  const [drawerMounted, setDrawerMounted] = useState(false); // kept true through the slide-out animation
+  // Slide-in drawer: today's fills over the chart. Open/closed state is
+  // layout memory (tt.drawerOpen) — if she trades with it pinned open, it
+  // greets her open on the next load.
+  const [tradesPeek, setTradesPeek] = useState(() => {
+    try { return localStorage.getItem('tt.drawerOpen') === '1'; } catch { return false; }
+  });
+  const [drawerMounted, setDrawerMounted] = useState(tradesPeek); // kept true through the slide-out animation
+  useEffect(() => {
+    try { localStorage.setItem('tt.drawerOpen', tradesPeek ? '1' : '0'); } catch {}
+  }, [tradesPeek]);
   const hoverOpenRef = useRef(null); // 2s left-edge hover-to-open timer
   const openTrades = useCallback(() => { clearTimeout(hoverOpenRef.current); setDrawerMounted(true); setTradesPeek(true); }, []);
   const closeTrades = useCallback(() => { clearTimeout(hoverOpenRef.current); setTradesPeek(false); }, []);
@@ -105,19 +121,23 @@ export default function App() {
     hoverOpenRef.current = setTimeout(openTrades, 1500);
   }, [tradesPeek, openTrades]);
   const disarmHoverOpen = useCallback(() => clearTimeout(hoverOpenRef.current), []);
-  // Esc closes the trades peek drawer.
-  useEffect(() => {
-    if (!tradesPeek) return;
-    const onKey = (e) => { if (e.key === 'Escape') closeTrades(); };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-  }, [tradesPeek, closeTrades]);
+  // (Esc-closes-the-drawer moved into the keyboard layer's single prioritized
+  // Esc chain below — one close per press, top-most surface first.)
   // Unmount the drawer after its slide-out animation finishes (deterministic).
   useEffect(() => {
     if (tradesPeek || !drawerMounted) return;
     const t = setTimeout(() => setDrawerMounted(false), 300);
     return () => clearTimeout(t);
   }, [tradesPeek, drawerMounted]);
+  // ── Trades-drawer view: today's blotter ↔ multi-day journal (history) ──
+  // The history view (equity curve + daily P/L) renders INSIDE the drawer;
+  // the toggle lives in the drawer header — zero new cockpit chrome.
+  const [drawerView, setDrawerView] = useState(() => {
+    try { return localStorage.getItem('tt.drawerView') === 'history' ? 'history' : 'today'; } catch { return 'today'; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('tt.drawerView', drawerView); } catch {}
+  }, [drawerView]);
   // Opt-in tools (kisa's rule: dormant until toggled, in the gear panel).
   const [axisChain, setAxisChain] = useState(() => {
     try { return localStorage.getItem('tt.axischain') === '1'; } catch { return false; }
@@ -188,25 +208,15 @@ export default function App() {
     toastTimer.current = setTimeout(() => setToast(null), 4500);
   }, []);
 
-  // Soft two-note chime on fills — money should be audible. Best-effort: the
-  // browser may block audio before the first user interaction; we just skip.
-  const chime = useCallback(() => {
-    try {
-      const Ctx = window.AudioContext || window.webkitAudioContext;
-      const ctx = new Ctx();
-      const o = ctx.createOscillator();
-      const g = ctx.createGain();
-      o.type = 'sine';
-      o.connect(g);
-      g.connect(ctx.destination);
-      o.frequency.setValueAtTime(880, ctx.currentTime);
-      o.frequency.setValueAtTime(1318.5, ctx.currentTime + 0.09); // E6 — a happy fifth-ish hop
-      g.gain.setValueAtTime(0.07, ctx.currentTime);
-      g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.35);
-      o.start();
-      o.stop(ctx.currentTime + 0.4);
-      setTimeout(() => ctx.close().catch(() => {}), 600);
-    } catch {}
+  // Sounds live in src/sounds.js now: chimeFill (the original two-note fill
+  // chime, moved verbatim) and chimeAlert (a single soft blip for ⏰ alerts).
+
+  // Micro fill animation: when a fill lands, the affected position row (and
+  // the strike line on the active chart) glow once, ~400ms, no layout shift.
+  // { strike, right, expiry, symbol, action, ts } — cleared by freshness below.
+  const [fillFlash, setFillFlash] = useState(null);
+  const markFillFlash = useCallback((msg) => {
+    setFillFlash({ strike: msg.strike, right: msg.right, expiry: msg.expiry, symbol: msg.symbol ?? 'SPX', action: msg.action, ts: Date.now() });
   }, []);
 
   // Apply IBKR order lifecycle events to local positions. Entry/exit prices come
@@ -250,7 +260,8 @@ export default function App() {
           return p;
         }));
         showToast(`BRACKET ${childMatch[2].toUpperCase()} FILLED ${msg.strike}${msg.right} @ $${Number(msg.avgFillPrice).toFixed(2)}`, 'ok');
-        chime();
+        chimeFill();
+        markFillFlash(msg);
         return;
       }
       if (msg.status === 'Cancelled' || msg.status === 'ApiCancelled') {
@@ -278,11 +289,18 @@ export default function App() {
         return p;
       }));
       showToast(`FILLED ${msg.action} ${msg.strike}${msg.right} ×? @ $${Number(msg.avgFillPrice).toFixed(2)}`.replace('×?', `×${msg.filled}`), 'ok');
-      chime();
+      chimeFill();
+      markFillFlash(msg);
     }
-  }, [showToast, chime]);
+  }, [showToast, markFillFlash]);
 
   const feed = useIbkrFeed({ onOrderEvent: handleOrderEvent });
+
+  // Journal fetch for the drawer's history view: whenever it's showing and the
+  // socket is up — covers the first open AND a reconnect (the bridge re-serves it).
+  useEffect(() => {
+    if (drawerMounted && drawerView === 'history' && feed.socketOpen) feed.requestJournal();
+  }, [drawerMounted, drawerView, feed.socketOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Multi-symbol Phase A: the active instrument ──
   // 'SPX' (default, home) or a guest equity symbol. A guest is only truly active
@@ -310,7 +328,7 @@ export default function App() {
       if (!hits.length) continue;
       setAlerts((list) => list.filter((a) => !hits.some((h) => h.id === a.id)));
       for (const h of hits) showToast(`⏰ ${sym} crossed ${h.price.toFixed(2)}`, 'ok');
-      chime(); // swap to the dedicated alert tone when sounds.js lands
+      chimeAlert(); // the dedicated alert blip — one soft low note, not the fill chime
     }
   }, [feed.price, guest?.price, guestActive, activeSymbol, alerts]); // eslint-disable-line react-hooks/exhaustive-deps
   // The cockpit's data source. In guest mode price/candles/greeksMap/expiry/
@@ -389,6 +407,49 @@ export default function App() {
     const s = String(sym || '').toUpperCase();
     setWatchlist((w) => w.filter((x) => x !== s));
   }, []);
+
+  // ── Layout memory (invisible — localStorage tt.* keys, matching the pattern
+  // above): last timeframe PER SYMBOL, and the active symbol itself. ──
+  //
+  // Timeframe: one effect does both directions. On a symbol switch it RESTORES
+  // that symbol's saved timeframe (and skips saving, so the old symbol's value
+  // can't leak under the new key); on a timeframe change it persists under the
+  // current symbol. First-ever visit to a symbol: no saved value → unchanged.
+  const tfSymRef = useRef('SPX'); // symbol whose timeframe the state currently reflects
+  useEffect(() => {
+    if (tfSymRef.current !== activeSymbol) {
+      tfSymRef.current = activeSymbol;
+      try {
+        const v = parseInt(localStorage.getItem(`tt.tf:${activeSymbol}`), 10);
+        if (TF_OPTIONS.some((o) => o.value === v)) setTimeframe(v);
+      } catch {}
+      return;
+    }
+    try { localStorage.setItem(`tt.tf:${activeSymbol}`, String(timeframe)); } catch {}
+  }, [activeSymbol, timeframe]);
+
+  // Active symbol: read the saved value ONCE before the persist effect below
+  // can overwrite it with the boot default ('SPX'), then re-activate it a
+  // single time after the feed first reports live — through the same
+  // symbol-only activateGuest path the watchlist uses. One shot per page
+  // load; anything she does afterwards wins.
+  const [savedSymbol] = useState(() => {
+    try { return localStorage.getItem('tt.activeSymbol'); } catch { return null; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('tt.activeSymbol', activeSymbol); } catch {}
+  }, [activeSymbol]);
+  const symRestoredRef = useRef(false);
+  useEffect(() => {
+    if (symRestoredRef.current || !feed.socketOpen || !feed.live) return;
+    symRestoredRef.current = true;
+    if (
+      savedSymbol && savedSymbol !== 'SPX' && activeSymbol === 'SPX' &&
+      /^[A-Z][A-Z0-9.]{0,11}$/.test(savedSymbol)
+    ) {
+      activateGuest(savedSymbol, null);
+    }
+  }, [feed.socketOpen, feed.live]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Keep marks honest for open positions outside the streamed chain: nudge a
   // snapshot quote every 30 s (server caches + dedupes) so P/L reflects the
@@ -1196,6 +1257,61 @@ export default function App() {
     triggerPulse();
   };
 
+  // ── Keyboard layer (invisible cockpit controls — src/useHotkeys.js) ──
+  // 1..N timeframes · Esc closes the top-most transient · Space snaps the
+  // chart to now · C/P arm a confirm ticket (never sends an order directly).
+  const chartApiRef = useRef(null); // Chart's imperative surface: { snapToNow, hover }
+  const hotkeysLive = feed.live || replayActive; // everything but Esc needs a tape
+  useHotkeys({
+    onEscape: () => {
+      // ONE close per press, top-most first. TradeModal and ChartMenu already
+      // close THEMSELVES on Esc (their own window listeners), as does the
+      // replay calendar popover and the focused search input — when any of
+      // those is up we only consume the press so nothing below also closes.
+      if (pending) return;
+      if (chartMenu) return;
+      if (document.querySelector('.replay-cal-pop')) return;
+      if (inspectId != null) { setInspectId(null); return; }
+      if (busPanelId != null) { setBusPanelId(null); return; }
+      if (searchPopover.isOpen()) { searchPopover.close(); return; }
+      if (tradesPeek) { closeTrades(); return; }
+      // The replay BAR closes only while idle (picking a day) — Esc must never
+      // dump an active practice session's progress.
+      if (replayBarOpen && replay == null) setReplayBarOpen(false);
+    },
+    onDigit: (n) => {
+      if (!hotkeysLive) return false;
+      const o = TF_OPTIONS[n - 1];
+      if (!o) return false;
+      setTimeframe(o.value);
+      return true;
+    },
+    onSpace: () => {
+      if (!hotkeysLive) return false;
+      chartApiRef.current?.snapToNow?.();
+      return true;
+    },
+    onTicket: (type) => {
+      // C/P work in replay too — practice tickets are the point of replay.
+      if (!hotkeysLive) return false;
+      if (pending || chartMenu) return false; // a ticket/menu is already up
+      const hov = chartApiRef.current?.hover;
+      const S = replayActive ? dispPrice : cockpitPrice;
+      const strike = hov ? hov.strike : (Number.isFinite(S) ? nearestOtmStrike(S, type, strikeStep) : null);
+      if (!Number.isFinite(strike)) return false;
+      handleRequestTrade({ strike, type }); // same confirm-modal path as a chart click
+      return true;
+    }
+  });
+
+  // Fill flash, fresh-gated: the `now` tick (800ms) clears the prop shortly
+  // after the ~400ms CSS animation ends; the ts retriggers it on a same-leg
+  // refill. The chart only pulses its OWN symbol's fills, and never in replay
+  // (a real overnight fill has no place on a replayed tape).
+  const fillFlashFresh = fillFlash && now - fillFlash.ts < 900 ? fillFlash : null;
+  const chartFillFlash = fillFlashFresh && !replayActive && (fillFlashFresh.symbol ?? 'SPX') === activeSymbol
+    ? fillFlashFresh : null;
+
   // Informational banner: green LIVE TRADING when the connected account is live.
   const banner = feed.accountType === 'live'
     ? { text: 'LIVE TRADING', kind: 'live' }
@@ -1404,6 +1520,8 @@ export default function App() {
               quickMode={guestActive && quickMode === 'market' ? 'limit' : quickMode}
               alerts={chartAlerts}
               onMenu={setChartMenu}
+              apiRef={chartApiRef}
+              fillFlash={chartFillFlash}
               source={replayActive || guestActive ? 'SPX' : feed.live ? feed.source : 'SPX'}
             />
             {toast && (
@@ -1441,7 +1559,11 @@ export default function App() {
                   <TradeHistory
                     trades={feed.trades}
                     theme={theme}
-                    onOpenJournal={() => { feed.requestJournal(); setJournalOpen(true); }}
+                    view={drawerView}
+                    onSetView={setDrawerView}
+                    journal={feed.journal}
+                    today={feed.live ? feed.expiry : null}
+                    connected={feed.socketOpen}
                   />
                 </div>
               </div>
@@ -1468,6 +1590,7 @@ export default function App() {
             executionEnabled={replayActive ? true : feed.executionEnabled}
             funds={feed.funds}
             dayPL={dayPL}
+            fillFlash={replayActive ? null : fillFlashFresh}
           />
         </div>
       </main>
@@ -1543,10 +1666,6 @@ export default function App() {
           />
         );
       })()}
-
-      {journalOpen && (
-        <Journal days={feed.journal} theme={theme} onClose={() => setJournalOpen(false)} />
-      )}
 
       {busPanelId != null && !replayActive && (() => {
         const stop = busStops.find((s) => s.id === busPanelId);
