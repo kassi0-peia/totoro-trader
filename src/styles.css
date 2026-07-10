@@ -2267,13 +2267,6 @@ button {
   color: var(--c-muted);
   border-bottom: 1px solid var(--c-border);
 }
-.th-count {
-  background: var(--c-surfaceAlt);
-  border-radius: 10px;
-  padding: 1px 7px;
-  font-size: 10px;
-}
-.th-net { margin-left: auto; letter-spacing: 0.04em; font-variant-numeric: tabular-nums; }
 .th-list { max-height: 180px; overflow-y: auto; }
 .th-empty { padding: 14px; font-size: 12px; color: var(--c-muted); }
 .th-row {
@@ -2373,7 +2366,7 @@ button {
   justify-content: center;
   width: 22px;
   height: 22px;
-  margin-left: 10px;
+  margin-left: auto;
   padding: 0;
   border-radius: 50%;
   border: 1px solid var(--c-border);
@@ -2383,7 +2376,6 @@ button {
   flex: none;
   transition: color 160ms, border-color 160ms;
 }
-.th-hist.solo { margin-left: auto; }
 .th-hist:hover, .th-hist.on { color: var(--c-accent); border-color: var(--c-accent); }
 
 .jh-body {
