@@ -2154,9 +2154,14 @@ button {
      float cleared it with right:72px; the row merge lost that — kisa
      2026-07-10). The 🔍 alone stays at the edge, her 07-07 placement. */
   margin-right: 28px;
+  transition: margin-right 160ms;
   font-size: 10px;
   letter-spacing: 0.08em;
 }
+/* Axis premiums add a second number column to the right gutter — slide the
+   cluster further left so PAPER/🚏/⚡ never sit over it (the old float's
+   right:110px, in row terms). */
+.chart-acct--axis { margin-right: 64px; }
 .chart-acct-id {
   color: var(--c-muted);
   font-variant-numeric: tabular-nums;
