@@ -228,13 +228,11 @@ export default function Chart({
       }
     }
     if (!anyReal) return null;
-    if (showPositions) {
-      for (const p of positions) {
-        if (p.status !== 'open') continue;
-        if (p.strike > hi) hi = p.strike;
-        if (p.strike < lo) lo = p.strike;
-      }
-    }
+    // Open-position strikes deliberately do NOT stretch the price scale
+    // (kisa, 2026-07-10): entering a far-OTM wing used to yank the range out
+    // to its strike and squash the tape into a sliver. The view stays on the
+    // candles; a strike line beyond the range simply isn't visible until you
+    // zoom out yourself (the positions drawer always carries the P/L).
     const pad = (hi - lo) * 0.12 + 1;
     // priceScale zooms the price axis around its centre; priceOffset pans it up/down.
     const top = hi + pad;
