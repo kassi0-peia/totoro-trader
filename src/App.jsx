@@ -74,7 +74,15 @@ export default function App() {
     () => (neutralChrome ? { ...theme, bg: '#0a0a0c', grid: '#17171a' } : theme),
     [theme, neutralChrome]
   );
-  const [timeframe, setTimeframe] = useState(1);
+  // Timeframe — restored per symbol (tt.tf:SPX here; guests restore in the
+  // layout-memory effect below). First-ever visit keeps the 1m default.
+  const [timeframe, setTimeframe] = useState(() => {
+    try {
+      const v = parseInt(localStorage.getItem('tt.tf:SPX'), 10);
+      if (TF_OPTIONS.some((o) => o.value === v)) return v;
+    } catch {}
+    return 1;
+  });
   const [positions, setPositions] = useState([]);
   const [pending, setPending] = useState(null);
   const [inspectId, setInspectId] = useState(null); // position id shown in the inspect modal (click/touch)
@@ -92,8 +100,16 @@ export default function App() {
   const replayLoading = replay != null && replay.candles.length === 0;
   const replayPrice = replayActive ? replay.candles[replay.idx].close : null;
   const replayNow = replayActive ? replay.candles[replay.idx].t : null;
-  const [tradesPeek, setTradesPeek] = useState(false); // slide-in drawer: today's fills over the chart
-  const [drawerMounted, setDrawerMounted] = useState(false); // kept true through the slide-out animation
+  // Slide-in drawer: today's fills over the chart. Open/closed state is
+  // layout memory (tt.drawerOpen) — if she trades with it pinned open, it
+  // greets her open on the next load.
+  const [tradesPeek, setTradesPeek] = useState(() => {
+    try { return localStorage.getItem('tt.drawerOpen') === '1'; } catch { return false; }
+  });
+  const [drawerMounted, setDrawerMounted] = useState(tradesPeek); // kept true through the slide-out animation
+  useEffect(() => {
+    try { localStorage.setItem('tt.drawerOpen', tradesPeek ? '1' : '0'); } catch {}
+  }, [tradesPeek]);
   const hoverOpenRef = useRef(null); // 2s left-edge hover-to-open timer
   const openTrades = useCallback(() => { clearTimeout(hoverOpenRef.current); setDrawerMounted(true); setTradesPeek(true); }, []);
   const closeTrades = useCallback(() => { clearTimeout(hoverOpenRef.current); setTradesPeek(false); }, []);
@@ -115,7 +131,12 @@ export default function App() {
   // ── Trades-drawer view: today's blotter ↔ multi-day journal (history) ──
   // The history view (equity curve + daily P/L) renders INSIDE the drawer;
   // the toggle lives in the drawer header — zero new cockpit chrome.
-  const [drawerView, setDrawerView] = useState('today');
+  const [drawerView, setDrawerView] = useState(() => {
+    try { return localStorage.getItem('tt.drawerView') === 'history' ? 'history' : 'today'; } catch { return 'today'; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('tt.drawerView', drawerView); } catch {}
+  }, [drawerView]);
   // Opt-in tools (kisa's rule: dormant until toggled, in the gear panel).
   const [axisChain, setAxisChain] = useState(() => {
     try { return localStorage.getItem('tt.axischain') === '1'; } catch { return false; }
@@ -393,6 +414,49 @@ export default function App() {
     const s = String(sym || '').toUpperCase();
     setWatchlist((w) => w.filter((x) => x !== s));
   }, []);
+
+  // ── Layout memory (invisible — localStorage tt.* keys, matching the pattern
+  // above): last timeframe PER SYMBOL, and the active symbol itself. ──
+  //
+  // Timeframe: one effect does both directions. On a symbol switch it RESTORES
+  // that symbol's saved timeframe (and skips saving, so the old symbol's value
+  // can't leak under the new key); on a timeframe change it persists under the
+  // current symbol. First-ever visit to a symbol: no saved value → unchanged.
+  const tfSymRef = useRef('SPX'); // symbol whose timeframe the state currently reflects
+  useEffect(() => {
+    if (tfSymRef.current !== activeSymbol) {
+      tfSymRef.current = activeSymbol;
+      try {
+        const v = parseInt(localStorage.getItem(`tt.tf:${activeSymbol}`), 10);
+        if (TF_OPTIONS.some((o) => o.value === v)) setTimeframe(v);
+      } catch {}
+      return;
+    }
+    try { localStorage.setItem(`tt.tf:${activeSymbol}`, String(timeframe)); } catch {}
+  }, [activeSymbol, timeframe]);
+
+  // Active symbol: read the saved value ONCE before the persist effect below
+  // can overwrite it with the boot default ('SPX'), then re-activate it a
+  // single time after the feed first reports live — through the same
+  // symbol-only activateGuest path the watchlist uses. One shot per page
+  // load; anything she does afterwards wins.
+  const [savedSymbol] = useState(() => {
+    try { return localStorage.getItem('tt.activeSymbol'); } catch { return null; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('tt.activeSymbol', activeSymbol); } catch {}
+  }, [activeSymbol]);
+  const symRestoredRef = useRef(false);
+  useEffect(() => {
+    if (symRestoredRef.current || !feed.socketOpen || !feed.live) return;
+    symRestoredRef.current = true;
+    if (
+      savedSymbol && savedSymbol !== 'SPX' && activeSymbol === 'SPX' &&
+      /^[A-Z][A-Z0-9.]{0,11}$/.test(savedSymbol)
+    ) {
+      activateGuest(savedSymbol, null);
+    }
+  }, [feed.socketOpen, feed.live]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Keep marks honest for open positions outside the streamed chain: nudge a
   // snapshot quote every 30 s (server caches + dedupes) so P/L reflects the
