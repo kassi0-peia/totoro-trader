@@ -1,280 +1,180 @@
 # TotoroTrader
 
-SPX 0DTE execution practice UI. Connects to Interactive Brokers TWS / IB Gateway
-for real SPX index prices and SPXW option-chain greeks. When the bridge isn't
-connected the UI shows no live price or candles (an **OFFLINE** state) — there is
-no market simulator. Black–Scholes (`src/options.js`) still prices the chart's
-premium overlay and replay-mode practice fills.
+SPX 0DTE options cockpit on Interactive Brokers. A React/Vite frontend + a Node
+bridge (`server/ibkr-server.js`, `@stoqey/ib`) that talks to TWS / IB Gateway:
+live SPX/SPXW prices, the option chain with greeks, a canvas chart, and real
+order execution. The design thesis: **the chart is the chain** — strikes,
+premiums, tickets, and alerts live on the price levels they belong to, so you
+never bounce between a chart and a separate option grid.
+
+Without the bridge there is no simulator — the header reads **OFFLINE** and the
+chart is empty. Black–Scholes (`src/options.js`) prices only the premium
+overlay and replay-mode practice fills.
+
+## The cockpit
+
+- **Chart-as-chain** — hover a level to quote it, click to open a ticket;
+  strike snapping follows the real grid (SPX 5s, a guest symbol's own step).
+- **Right-click menu** (⚡ off) — buy / **sell** CALL/PUT at the snapped strike,
+  or arm a **⏰ price alert** at the cursor. Sells are limit-only by design.
+- **⚡ quick mode** (right-click a strike, armed) — instant 1-lot: **amber** =
+  marketable limit at ask + 1 tick; **red** = a real MKT (opt-in, SPX-only,
+  uncapped slippage — held until ~00:10 outside RTH).
+- **Alerts** — dashed line + axis tag only while armed; one-shot on crossing
+  the live SPX-equiv (works overnight); toast + chime; survives reloads.
+- **Brackets & exits** — optional TP/SL attached at entry (buys), and exits
+  attachable to existing positions; all exits are IBKR-native orders.
+- **Multi-symbol** — 🔍 search any US stock with weekly options → a guest
+  cockpit (chart + near-ATM chain + nearest-weekly tickets, marketable limits
+  only); ★ watchlist with slow snapshot quotes lives inside the same popover.
+- **Journal** — the trades drawer holds today's blotter and the multi-day
+  history: equity curve, win rate, per-day P/L with expandable fills.
+- **Replay** — pick a past day, trade the 1-min tape with simulated fills;
+  separate practice positions; blind "mystery day" mode.
+- **🚏 Bus stops** — call a future (price, time), get contract suggestions,
+  and track how the call resolved.
+- **Keyboard** — `1–9` timeframes · `Space` snap to now · `Esc` closes the
+  top-most layer · `C`/`P` arm a ticket at the hovered strike.
+- **Quiet UI** — everything below the chart lives in a bottom drawer (dwell on
+  the footer or click it); positions show net greeks while open; fills chime
+  and glow. Desktop fits the viewport; the phone build is a PWA.
 
 ## One-time TWS setup
 
-1. Install **TWS** or **IB Gateway** and log in to a paper account.
-2. `File → Global Configuration → API → Settings`:
-   - Enable **ActiveX and Socket Clients**
-   - **Socket port:** `7497` (paper) or `7496` (live)
-   - Untick **Read-Only API** if you plan to send orders later
-   - Add `127.0.0.1` to **Trusted IPs**
-3. Market data: SPX index requires a CBOE index subscription; SPXW options
-   require an OPRA subscription. Without entitlements the server falls back to
-   delayed data (`IBKR_MD_TYPE=3`, already the default).
+1. Install **TWS** or **IB Gateway**, log in (paper or live — that login *is*
+   the account choice).
+2. `Global Configuration → API → Settings`: enable **ActiveX and Socket
+   Clients**, untick **Read-Only API**, add `127.0.0.1` to **Trusted IPs**.
+3. Market data: SPX needs a CBOE index subscription, SPXW needs OPRA, overnight
+   needs CME (ES). Without entitlements the bridge falls back to delayed data
+   (`IBKR_MD_TYPE=3`, the default).
 
 ## Run
 
 ```bash
 npm install
-npm start          # runs IBKR bridge + vite dev server together
+npm start          # bridge + vite dev server → http://localhost:5173
 ```
 
-Or in two terminals:
+Or separately: `npm run server` (bridge only) / `npm run dev` (vite only, /ws
+proxied to the bridge). `npm run build` is the smoke test. The bridge
+auto-detects the IBKR port by probing `7497 → 4002 → 7496 → 4001`; the header
+shows **LIVE** / **DELAYED** / **OFFLINE**.
 
-```bash
-npm run server     # node server/ibkr-server.js  (TWS bridge + websocket)
-npm run dev        # vite, http://localhost:5173
-```
-
-The header subtitle shows **LIVE** when the bridge is connected to TWS (**DELAYED**
-if IBKR is serving delayed data), and **OFFLINE** when it is not — there's no live
-price or candles until the bridge connects. The footer mirrors the same state.
-
-By default the bridge **auto-detects** the connection by probing
-`7497 → 4002 → 7496 → 4001` (TWS paper, Gateway paper, TWS live, Gateway live)
-and uses whichever is listening. Set `IBKR_PORT` to pin one explicitly.
-
-## Environment overrides
-
-| Var               | Default                | Notes                                            |
-| ----------------- | ---------------------- | ------------------------------------------------ |
-| `IBKR_HOST`       | `127.0.0.1`            | TWS / Gateway host                               |
-| `IBKR_PORT`       | auto-detect            | Pin to skip probing (e.g. `4002` for Gateway)    |
-| `IBKR_CLIENT_ID`  | `17`                   | Must be unique per TWS connection                |
-| `IBKR_MD_TYPE`    | `3`                    | 1=live, 2=frozen, 3=delayed, 4=delayed-frozen    |
-| `WS_PORT`         | `8787`                 | Browser websocket port                           |
+| Env var          | Default     | Notes                                         |
+| ---------------- | ----------- | --------------------------------------------- |
+| `IBKR_HOST`      | `127.0.0.1` | TWS / Gateway host                            |
+| `IBKR_PORT`      | auto-detect | Pin to skip probing (e.g. `4002` for Gateway) |
+| `IBKR_CLIENT_ID` | `17`        | Unique per TWS connection                     |
+| `IBKR_MD_TYPE`   | `3`         | 1=live, 2=frozen, 3=delayed, 4=delayed-frozen |
+| `WS_PORT`        | `8787`      | App + WebSocket port                          |
+| `TLS=1`          | off         | HTTPS/wss (certs: `TLS_CERT` / `TLS_KEY`)     |
 
 ## Architecture
 
 ```
-TWS/IB Gateway (:7497, TCP)
-     │   @stoqey/ib
+TWS / IB Gateway (TCP)
+     │  @stoqey/ib
      ▼
-server/ibkr-server.js  ── 1-min candles from SPX + ES ticks,
-     │                     ES-SPX basis (live RTH / frozen overnight),
-     │                     session-driven source + SPXW expiry (server/session.js),
-     │                     ±10 SPXW strikes (calls + puts) → IBKR model greeks,
-     │                     serves built dist/ + WebSocket on one port (:8787)
-     │   WebSocket /ws   (dev: Vite proxies /ws → bridge)
+server/ibkr-server.js ── 1-min candles (SPX cash / ES overnight), ES↔SPX basis,
+     │                   SPXW chain ±10 strikes with greeks, guest symbols +
+     │                   watchlist snapshots, order routing, multi-day journal;
+     │                   serves built dist/ + WebSocket /ws on one port (:8787)
      ▼
-src/feed.js (useIbkrFeed hook)  ── connects to same-origin /ws
-     │   live={true}  → IBKR price + candles + greeks + source/expiry/basis
-     │   live={false} → OFFLINE: no live price/candles (options.js still prices overlay + replay)
+src/feed.js (useIbkrFeed) ── one snapshot stream + senders (orders, quotes,
+     │                       history, replay, journal, search, watchlist)
      ▼
-src/App.jsx / Header.jsx (SPX vs ES/SPX label + target expiry date)
+src/App.jsx ── cockpit state · src/Chart.jsx ── canvas engine
 ```
 
-Black–Scholes greeks (`src/options.js`) price the chart's premium overlay and
-replay-mode practice fills. There is **no offline market simulator** — without the
-bridge there is simply no live price or candles (the UI shows **OFFLINE**).
+## Market sessions & the ES↔SPX basis
 
-## Market sessions: SPX cash vs ES futures
+The bridge tracks the session in US/Eastern (`server/session.js`):
 
-The bridge tracks the trading session in **US/Eastern** (`server/session.js`,
-unit-testable with an injected clock) and switches data source + option expiry:
+| ET window                      | Source   | Label    | Option expiry    |
+| ------------------------------ | -------- | -------- | ---------------- |
+| 09:30–16:15 weekdays (RTH)     | SPX cash | `SPX`    | today            |
+| 16:15 → next 09:30 (overnight) | ES front | `ES/SPX` | next trading day |
 
-| ET window                     | Chart source | Header price        | Header label | Option expiry        |
-| ----------------------------- | ------------ | ------------------- | ------------ | -------------------- |
-| 09:30–16:15 (weekday, RTH)    | SPX cash     | SPX                 | `SPX`        | today                |
-| 16:15 → next 09:30 (overnight)| ES futures   | ES − basis (≈SPX)   | `ES/SPX`     | next trading day     |
+At 16:15 ET the SPXW chain rolls to the next expiry. Overnight, SPX cash stops
+printing, so the chart shows front-month ES shifted to an SPX-equivalent scale
+(`SPX-equiv = ES − basis`); the y-axis and strikes still read in SPX points.
 
-- **Expiry roll:** at 16:15 ET the SPXW chain subscription rolls from today's
-  expiry to the next trading day's (weekends skip to Monday; holidays are not
-  modelled). The target expiry date shows in the header next to the countdown.
-- **ES source overnight:** SPX cash stops printing after the close, so overnight
-  the chart shows the front-month **ES** future (resolved via `reqContractDetails`
-  on a CONTFUT — currently ESM6). ES candles are shifted to an SPX-equivalent
-  scale by subtracting the basis, so the y-axis and strikes still read in SPX
-  points. The header shows `ES/SPX` to indicate ES data on an SPX scale.
-- **Basis:** overnight the primary source is **options-implied**: every ~2 s the
-  bridge computes the SPX forward from the live SPXW chain via put-call parity
-  (`fwd = K + Cmid − Pmid`, median across quality-gated near-ATM strikes — see
-  `server/options-forward.js` and `spec-options-implied-basis.md`) and applies
-  `basis = ES − fwd`. This self-corrects: no single bad tick can skew the whole
-  night, and genuine carry drift is tracked. When the chain doesn't qualify
-  (quotes crossed/stale/wide, quorum unmet — e.g. before the ~8:15 PM GTH open),
-  it falls back to the **frozen 4:00 PM capture**: a *simultaneous* snapshot of
-  live ES minus live SPX (`basis = ES@16:00 − SPX@16:00`), persisted to
-  `server/.basis-cache.json` across restarts. Caveat: on a violent close the SPX
-  cash *print* can lag the tradable market (Russell recon 2026-06-26, quarter
-  turn 2026-07-01), so the frozen capture alone can be points off — that's what
-  the options anchor exists to override. The snapshot reports which basis is in
-  force via `basisSource: 'options' | 'frozen' | 'estimated'`. On a cold start
-  with nothing better, a fixed `COLD_START_BASIS` (default **+20**) seeds the
-  fallback until the next capture.
+**Basis ladder** (which is in force is reported as `basisSource`):
 
-> Both feeds need market data from TWS/Gateway. If another IBKR session is logged
-> in from a different IP, the data farm returns `10197` / `162` and blocks live +
-> historical data for this session — close the other session (mobile/web/live TWS)
-> for data to flow. The app shows **OFFLINE** (no live price/candles) while data is
-> unavailable.
+1. **Options-implied** (primary overnight): every ~2 s the SPX forward is
+   computed from the live SPXW chain via put-call parity (median across
+   quality-gated near-ATM strikes — `server/options-forward.js`), and
+   `basis = ES − fwd`. Self-correcting; immune to a single bad print.
+2. **Frozen 4:00 PM capture** (fallback): a simultaneous live-ES − live-SPX
+   snapshot, persisted to `server/.basis-cache.json`. Kept because the options
+   anchor needs a qualifying chain (GTH opens ~8:15 PM).
+3. **Cold-start seed** (last resort): derived from the most recent persisted
+   capture, env-overridable.
 
-## Order execution & account safety
+> If another IBKR session logs in from a different IP, the data farm blocks
+> this one (codes `10197`/`162`) — the app shows **DELAYED**/**OFFLINE** until
+> the competing session closes. One login at a time.
 
-EXECUTE / CLOSE / REVERSE place **real marketable-limit orders** through IBKR for the
-SPXW contract (same expiry/strike/right as the chain subscription) — a limit that
-crosses ~1 tick, never a naked market order. Positions are
-tracked from IBKR's reported fills — the entry/exit prices shown are the actual
-`avgFillPrice`, not the model estimate. A fill confirmation toast appears over
-the chart.
+## Orders & account safety
 
-**Paper or live is chosen at the IBKR Gateway login** — there's no secondary
-env-var gate. On connect the bridge reads the account id and execution is
-enabled as soon as an account is identified:
-
-| Account | Badge | Banner |
-| ------- | ----- | ------ |
-| `DU…` (paper) | green **PAPER** | (none) |
-| live (non-`DU`) | green **LIVE** | green **"LIVE TRADING"** across the top |
-
-The account id (e.g. `DU1234567` / `U…`) is shown next to the badge. Execution
-fails safe — it stays disabled until an account is confirmed, and drops if the
-connection is lost.
+- EXECUTE / CLOSE / REVERSE and amber ⚡ send **marketable limits** (cross ~1
+  tick), never naked MKT, and refuse without a live quote. The red ⚡ arm is
+  the *one* deliberate MKT path. **Sell-to-open is limit-only** (a market sell
+  into a thin book is a blank check), as are all guest-symbol orders.
+- Positions and fills are **IBKR-authoritative**: real `avgFillPrice`, dedupe
+  by `execId`, and a reconnect backfills anything missed via `reqExecutions`.
+- Orders use `outsideRth: true` so they work the SPXW overnight (GTH) session;
+  IBKR's code-399 "held until open" notice is informational, not a rejection.
+- Paper vs live is the Gateway login. `DU…` shows a green **PAPER** badge;
+  anything else shows **LIVE** plus a banner. Execution stays disabled until
+  an account is confirmed, and drops with the connection.
 
 ### Security boundary (network layer, not app layer)
 
-There is deliberately **no app-layer auth** on the order socket: anyone who can
-reach the port can place real orders. An earlier shared-secret gate
-(`TOTORO_TOKEN`) was removed because it was hollow — the token had to be baked
-into the built JS, and this same server serves that JS unauthenticated, so
-anyone who could reach the port could also read the token out of the bundle.
+There is deliberately **no app-layer auth** on the order socket: the server
+serves its own frontend bundle unauthenticated, so any baked-in secret could be
+read out of that bundle by anyone who can already reach the port (which is why
+the old `TOTORO_TOKEN` gate was removed). The boundary is the network:
 
-The security boundary is the **network layer**:
+- Single machine → keep `:8787` on localhost (default posture).
+- Phone / other devices → a trusted overlay (**Tailscale/VPN**) or private LAN.
+- **Never expose the port raw to the internet.** Nothing at the app layer
+  stops an order.
 
-- Single machine: keep the port bound to localhost (the default posture).
-- Phone / other devices: reach the port over a trusted overlay network
-  (**Tailscale or a VPN**), or at minimum a trusted private LAN.
-- **Never expose the port raw** to the internet (no port-forwarding, no
-  `0.0.0.0` on an untrusted network). There is nothing at the app layer to
-  stop an order being placed.
+## Phone (PWA)
 
-**Prerequisites / behavior:**
-- IB Gateway must have **Read-Only API disabled** (Configure → Settings → API →
-  Settings) or orders are rejected with code 321.
-- Orders use `outsideRth: true`, so they fill in the SPXW **overnight (GTH)
-  session** too. IBKR may attach an informational warning (code 399, "will not be
-  placed until the open") — it's non-fatal and the order still fills in GTH; the
-  UI surfaces it as a note, not a rejection.
-- A verified paper round-trip: BUY 1 SPXW 7515C filled @ 18.40, SELL @ 17.70.
-
-## Progressive Web App (install to home screen)
-
-The app ships a web manifest (`public/manifest.json`), a service worker
-(`public/sw.js`, registered in production builds only), and a Totoro app icon
-set. Icons are generated from `scripts/make-icons.py` — re-run it if you change
-the mascot:
-
-```bash
-python3 scripts/make-icons.py   # writes public/icon-*.png, apple-touch-icon, favicon
-```
-
-To install on a phone, serve the production build from the bridge. The bridge
-serves the built `dist/` **and** hosts the data WebSocket at `/ws` on the same
-port, so the app is a single origin — one port to open, one origin to whitelist,
-and the socket is same-origin (no insecure-WebSocket mixed-content block):
-
-```bash
-npm run serve          # = vite build && node server/ibkr-server.js
-# app + live feed at http://<host-ip>:8787/
-```
-
-Open port `8787` on the host firewall so the phone can reach it
-(`sudo ufw allow 8787/tcp`). Remember the port carries the **order path with no
-app-layer auth** — only do this on a trusted network (see "Security boundary"
-above; prefer Tailscale/VPN over opening it on a shared LAN).
-
-- **iPhone (Safari):** browse to `http://<host-ip>:8787/`, then Share →
-  *Add to Home Screen*. Launches fullscreen standalone (driven by the
-  `apple-mobile-web-app-*` meta tags). Works over plain HTTP on the LAN;
-  safe-area insets keep the header/footer clear of the notch and home indicator.
-- **Android (Chrome):** the *Install app* prompt and the service worker require
-  a **secure context**. The recommended path is local HTTPS via mkcert (below).
-  A no-cert alternative is to whitelist the HTTP origin in
-  `chrome://flags/#unsafely-treat-insecure-origin-as-secure` (add
-  `http://<host-ip>:8787`, Enabled, relaunch) — but that's a per-device dev
-  workaround, whereas the cert gives a real install on any device that trusts it.
-
-### Local HTTPS with mkcert (recommended for Android)
-
-The bridge serves HTTPS + `wss` on the same port when TLS is enabled. A cert for
-`10.0.0.136` (+ `localhost`) is already generated at `server/certs/`; regenerate
-for a different LAN IP with:
+The bridge serves the built app and the WebSocket on one origin, so install is
+one port: `npm run serve` (HTTP) or `npm run serve:https` (TLS) →
+`http(s)://<host-ip>:8787/`. iPhone installs from Safari's *Add to Home
+Screen* over plain HTTP; Android's install prompt needs a secure context — use
+mkcert:
 
 ```bash
 mkcert -cert-file server/certs/totoro-cert.pem -key-file server/certs/totoro-key.pem <host-ip> localhost 127.0.0.1
+npm run serve:https
 ```
 
-Run the HTTPS server:
-
-```bash
-npm run serve:https     # = vite build && TLS=1 node server/ibkr-server.js
-# app + live feed at https://<host-ip>:8787/
-```
-
-(`TLS_CERT` / `TLS_KEY` env vars override the cert paths.)
-
-**Install the mkcert root CA on the phone** so it trusts the cert:
-
-1. Download the CA — browse to `https://<host-ip>:8787/rootCA.pem` (tap through
-   the one-time "not private" warning to download), or transfer the file at
-   `~/.local/share/mkcert/rootCA.pem` by USB/email. The root CA *private key*
-   (`rootCA-key.pem`) stays on the host and is never served.
-2. Android: **Settings → Security → Encryption & credentials → Install a
-   certificate → CA certificate** → pick the downloaded file. (Exact path varies
-   by Android version; search settings for "CA certificate".)
-3. Reopen `https://<host-ip>:8787/` — no warning. Then menu → **Install app**.
-
-To also trust the cert on this Linux host's own browsers, run `mkcert -install`
-(needs sudo + `libnss3-tools`). Not required for the phone.
-
-> Note: HTTPS mode and the dev `/ws` proxy don't mix — use `npm start` /
-> `npm run dev` (plain HTTP bridge) for desktop development, and
-> `npm run serve:https` for the installable HTTPS build.
-
-For desktop development, `npm run dev` (or `npm start` for bridge + dev
-together) serves on `:5173` and proxies `/ws` to the bridge, so the same
-same-origin frontend code works without a build.
-
-The service worker uses network-first for navigations (so a fresh deploy is
-picked up online) with the cached shell as the offline fallback, and
-cache-first for hashed static assets. Bump `VERSION` in `public/sw.js` to
-invalidate old caches.
+Then install the mkcert root CA on the phone (download it from
+`https://<host-ip>:8787/rootCA.pem`; Android: Settings → search "CA
+certificate"). The CA *private key* never leaves the host. Icons regenerate
+with `python3 scripts/make-icons.py`; bump `VERSION` in `public/sw.js` to
+invalidate the service-worker cache. Remember the port carries the order path
+— see the security boundary above before opening the firewall.
 
 ## Run as a service (systemd)
 
-To keep the bridge running across logouts/reboots (and auto-restart on crash),
-install it as a **systemd user service**. A reference unit is in
-`deploy/totoro-bridge.service` (absolute paths assume user `youruser` and repo at
-`/home/youruser/totoro-trader` — edit for your machine):
+A reference user unit is in `deploy/totoro-bridge.service` (edit the paths):
 
 ```bash
 mkdir -p ~/.config/systemd/user
 cp deploy/totoro-bridge.service ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now totoro-bridge   # start now + on login
-loginctl enable-linger "$USER"                # also start on boot, before login
+systemctl --user enable --now totoro-bridge
+loginctl enable-linger "$USER"     # start on boot, before login
 ```
 
-The unit runs `TLS=1 IBKR_MD_TYPE=1 node server/ibkr-server.js` with
-`Restart=always`, so it supervises the bridge itself — no cron keepalive needed
-(and don't run one alongside it; they'll fight over port 8787). It logs to
-`/tmp/totoro-bridge.log`.
-
-Manage it:
-
-```bash
-systemctl --user status totoro-bridge
-systemctl --user restart totoro-bridge
-systemctl --user disable --now totoro-bridge   # stop + remove auto-start
-journalctl --user -u totoro-bridge -f          # live logs
-```
-
-> Requires a build first (`npm run build`) since the bridge serves `dist/`.
-> `Environment=IBKR_MD_TYPE=1` uses live data; change to `3` (delayed) in the
-> unit if your account isn't entitled to live CME data.
+It runs the bridge with `Restart=always` (don't add a cron keepalive — they'll
+fight over the port), logs to `/tmp/totoro-bridge.log`, and needs a build
+first (`npm run build`) since the bridge serves `dist/`. Manage with
+`systemctl --user status|restart totoro-bridge`.
