@@ -2357,3 +2357,121 @@ button {
 
   .chart-tooltip { display: none; }
 }
+
+/* ============ TRADES DRAWER — HISTORY VIEW (multi-day journal) ============ */
+
+/* Today ↔ History segmented toggle in the drawer header. `.solo` = no net-cash
+   chip to its left, so it pushes itself to the right edge. */
+.th-toggle {
+  display: inline-flex;
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  overflow: hidden;
+  flex: none;
+}
+.th-toggle.solo { margin-left: auto; }
+.th-toggle button {
+  background: transparent;
+  border: none;
+  color: var(--c-muted);
+  font-family: inherit;
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+.th-toggle button + button { border-left: 1px solid var(--c-border); }
+.th-toggle button.on { background: var(--c-surfaceAlt); color: var(--c-text); }
+
+.jh-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.jh-curve {
+  width: 100%;
+  height: 78px;
+  flex: none;
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  background: var(--c-bg);
+}
+
+.jh-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+.jh-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 5px 7px;
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  background: var(--c-surfaceAlt);
+}
+.jh-stat span {
+  font-size: 8px;
+  letter-spacing: 0.12em;
+  color: var(--c-muted);
+}
+.jh-stat b {
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.jh-sub {
+  font-style: normal;
+  font-weight: 500;
+  font-size: 9px;
+  color: var(--c-muted);
+  margin-left: 4px;
+}
+
+.jh-days { display: flex; flex-direction: column; }
+.jh-day {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--c-grid);
+  color: var(--c-text);
+  font-family: inherit;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  padding: 7px 2px;
+  cursor: pointer;
+  text-align: left;
+}
+.jh-day:hover, .jh-day.expanded { background: var(--c-surfaceAlt); }
+.jh-date { flex: 1; }
+.jh-count { color: var(--c-muted); font-size: 11px; }
+.jh-openleg {
+  color: var(--c-muted);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  border: 1px solid var(--c-border);
+  border-radius: 8px;
+  padding: 0 6px;
+}
+.jh-pl { font-weight: 700; }
+.jh-fills {
+  border-bottom: 1px solid var(--c-grid);
+  background: var(--c-bg);
+}
+.jh-fills .th-row { padding: 5px 10px; font-size: 11px; }
+.jh-note {
+  color: var(--c-muted);
+  font-size: 9px;
+  line-height: 1.5;
+  flex: none;
+}
