@@ -2343,15 +2343,51 @@ button {
 .th-empty { padding: 14px; font-size: 12px; color: var(--c-muted); }
 .th-row {
   display: grid;
-  grid-template-columns: 84px 48px 1fr 48px auto;
+  grid-template-columns: 84px 48px 1fr 48px auto 18px;
   align-items: center;
   gap: 10px;
   padding: 7px 14px;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
-  border-bottom: 1px solid var(--c-grid);
 }
-.th-row:last-child { border-bottom: none; }
+.th-rowwrap { border-bottom: 1px solid var(--c-grid); }
+.th-rowwrap:last-child { border-bottom: none; }
+/* Fill notes: the ✎ earns pixels only on hover (accent when a note exists);
+   the note is a quiet italic line under its fill. */
+.th-note-btn {
+  opacity: 0;
+  border: none;
+  background: none;
+  color: var(--c-muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 2px;
+  transition: opacity 140ms;
+}
+.th-rowwrap:hover .th-note-btn { opacity: 1; }
+.th-note-btn.has { opacity: 0.75; color: var(--c-accent); }
+.th-note {
+  padding: 0 14px 7px 108px;
+  font-size: 11px;
+  font-style: italic;
+  color: var(--c-muted);
+  cursor: text;
+  overflow-wrap: anywhere;
+}
+.th-note-input {
+  display: block;
+  width: calc(100% - 122px);
+  margin: 0 14px 7px 108px;
+  font: inherit;
+  font-size: 11px;
+  padding: 3px 8px;
+  background: var(--c-surfaceAlt);
+  border: 1px solid var(--c-border);
+  border-radius: 4px;
+  color: var(--c-text);
+  outline: none;
+}
+.th-note-input:focus { border-color: var(--c-accent); }
 .th-time { color: var(--c-muted); }
 .th-side { font-weight: 700; letter-spacing: 0.06em; }
 .th-contract { font-weight: 600; }

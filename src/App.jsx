@@ -145,6 +145,10 @@ export default function App() {
   const [drawerView, setDrawerView] = useState(() => {
     try { return localStorage.getItem('tt.drawerView') === 'history' ? 'history' : 'today'; } catch { return 'today'; }
   });
+  // N hotkey → annotate the latest fill: opens the drawer on today's view with
+  // that row's note editor focused (the "note to self" moment, right after a
+  // fill). The nonce re-triggers even for the same fill id.
+  const [noteReq, setNoteReq] = useState(null);
   useEffect(() => {
     try { localStorage.setItem('tt.drawerView', drawerView); } catch {}
   }, [drawerView]);
@@ -1301,6 +1305,17 @@ export default function App() {
       chartApiRef.current?.snapToNow?.();
       return true;
     },
+    onNote: () => {
+      // Annotate the latest fill. Needs the bridge (the note persists there)
+      // and a fill to annotate; replay practice fills keep no journal.
+      if (replayActive || !feed.socketOpen) return false;
+      const last = feed.trades[feed.trades.length - 1];
+      if (!last) return false;
+      openTrades();
+      setDrawerView('today');
+      setNoteReq({ id: last.id, n: Date.now() });
+      return true;
+    },
     onTicket: (type) => {
       // C/P work in replay too — practice tickets are the point of replay.
       if (!hotkeysLive) return false;
@@ -1575,6 +1590,8 @@ export default function App() {
                     journal={feed.journal}
                     today={feed.live ? feed.expiry : null}
                     connected={feed.socketOpen}
+                    noteRequest={noteReq}
+                    onSaveNote={feed.sendFillNote}
                   />
                 </div>
               </div>

@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { journalStats, mergeToday } from './journal-stats.js';
 
 function fmtTime(ts) {
@@ -32,16 +32,50 @@ function etToday() {
 
 // One blotter fill row — shared by the today list and an expanded history day.
 // Guest rows carry a symbol (absent = SPXW) and show it before the strike.
-function TradeRow({ t, theme }) {
+// Notes (kisa 2026-07-10: "the journal had numbers, not whys"): a ✎ appears on
+// hover (accent-lit when a note exists); the note itself is a quiet italic line
+// under the fill, click-to-edit. Enter saves (empty clears), Esc/blur cancels.
+function TradeRow({ t, theme, editing = false, onEdit = null, onSave = null }) {
   const buy = t.action === 'BUY';
   const c = t.right === 'C' ? theme.callLine : theme.putLine;
   return (
-    <div className="th-row">
-      <span className="th-time">{fmtTime(t.ts)}</span>
-      <span className="th-side" style={{ color: buy ? theme.profit : theme.loss }}>{buy ? 'BUY' : 'SELL'}</span>
-      <span className="th-contract" style={{ color: c }}>{t.symbol && t.symbol !== 'SPX' ? `${t.symbol} ` : ''}{t.strike}{t.right}</span>
-      <span className="th-qty">×{t.qty}</span>
-      <span className="th-price">@ ${Number(t.price).toFixed(2)}</span>
+    <div className="th-rowwrap">
+      <div className="th-row">
+        <span className="th-time">{fmtTime(t.ts)}</span>
+        <span className="th-side" style={{ color: buy ? theme.profit : theme.loss }}>{buy ? 'BUY' : 'SELL'}</span>
+        <span className="th-contract" style={{ color: c }}>{t.symbol && t.symbol !== 'SPX' ? `${t.symbol} ` : ''}{t.strike}{t.right}</span>
+        <span className="th-qty">×{t.qty}</span>
+        <span className="th-price">@ ${Number(t.price).toFixed(2)}</span>
+        {onEdit && (
+          <button
+            className={`th-note-btn${t.note ? ' has' : ''}`}
+            onClick={(e) => { e.stopPropagation(); onEdit(t.id); }}
+            data-tip={t.note ? 'Edit note' : 'Add a note — why this trade?'}
+            aria-label="Note"
+          >
+            ✎
+          </button>
+        )}
+      </div>
+      {editing ? (
+        <input
+          className="th-note-input"
+          type="text"
+          maxLength={240}
+          defaultValue={t.note || ''}
+          placeholder="why? · Enter saves, Esc cancels"
+          autoFocus
+          spellCheck={false}
+          onKeyDown={(e) => {
+            e.stopPropagation();
+            if (e.key === 'Enter') onSave?.(t.id, e.currentTarget.value);
+            else if (e.key === 'Escape') onSave?.(null);
+          }}
+          onBlur={() => onSave?.(null)}
+        />
+      ) : (
+        t.note && <div className="th-note" onClick={onEdit ? () => onEdit(t.id) : undefined}>{t.note}</div>
+      )}
     </div>
   );
 }
@@ -85,7 +119,7 @@ function EquityCurve({ rows, theme }) {
 // History view: equity curve + stats row + per-day list (newest first; click a
 // day to expand its fills). All math lives in journal-stats.js (unit-tested);
 // the P/L convention is the blotter's own cash-flow accounting.
-function JournalHistory({ trades, journal, today, theme, connected = false }) {
+function JournalHistory({ trades, journal, today, theme, connected = false, noteEdit = null, onNoteEdit = null, onNoteSave = null }) {
   const [expanded, setExpanded] = useState(null);
   const openDay = today || etToday();
   const { days, stats } = useMemo(() => {
@@ -157,7 +191,7 @@ function JournalHistory({ trades, journal, today, theme, connected = false }) {
             {expanded === d.date && (
               <div className="jh-fills">
                 {[...(days[d.date] || [])].reverse().map((t) => (
-                  <TradeRow key={t.id} t={t} theme={theme} />
+                  <TradeRow key={t.id} t={t} theme={theme} editing={noteEdit === t.id} onEdit={onNoteEdit} onSave={onNoteSave} />
                 ))}
               </div>
             )}
@@ -176,9 +210,20 @@ function JournalHistory({ trades, journal, today, theme, connected = false }) {
 // server-recorded, so it survives reloads and shows every device's fills).
 // HISTORY = the multi-day journal (equity curve + daily P/L). The view toggle
 // lives here in the drawer header — no new cockpit chrome.
-export default function TradeHistory({ trades = [], theme, view = 'today', onSetView = null, journal, today = null, connected = false }) {
+export default function TradeHistory({ trades = [], theme, view = 'today', onSetView = null, journal, today = null, connected = false, noteRequest = null, onSaveNote = null }) {
   const rows = [...trades].reverse();
   const history = view === 'history';
+  // Fill-note editor: one row at a time. App's N hotkey requests the latest
+  // fill via noteRequest; the ✎ on any row (today or an expanded history day)
+  // opens it by hand. Saving with empty text clears the note.
+  const [noteEdit, setNoteEdit] = useState(null);
+  useEffect(() => {
+    if (noteRequest) setNoteEdit(noteRequest.id);
+  }, [noteRequest]);
+  const saveNote = (id, text) => {
+    if (id != null && onSaveNote) onSaveNote(id, String(text ?? '').trim());
+    setNoteEdit(null);
+  };
 
   return (
     <div className="trade-history">
@@ -201,13 +246,13 @@ export default function TradeHistory({ trades = [], theme, view = 'today', onSet
         )}
       </div>
       {history ? (
-        <JournalHistory trades={trades} journal={journal} today={today} theme={theme} connected={connected} />
+        <JournalHistory trades={trades} journal={journal} today={today} theme={theme} connected={connected} noteEdit={noteEdit} onNoteEdit={onSaveNote ? setNoteEdit : null} onNoteSave={saveNote} />
       ) : (
         <div className="th-list">
           {rows.length === 0 ? (
             <div className="th-empty">No fills yet today.</div>
           ) : (
-            rows.map((t) => <TradeRow key={t.id} t={t} theme={theme} />)
+            rows.map((t) => <TradeRow key={t.id} t={t} theme={theme} editing={noteEdit === t.id} onEdit={onSaveNote ? setNoteEdit : null} onSave={saveNote} />)
           )}
         </div>
       )}

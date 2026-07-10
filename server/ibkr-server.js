@@ -261,6 +261,7 @@ wss.on('connection', (ws) => {
     else if (msg.type === 'activateSymbol') handleActivateSymbol(ws, msg);
     else if (msg.type === 'deactivateSymbol') handleDeactivateSymbol(ws, msg);
     else if (msg.type === 'watchlist') handleWatchlist(ws, msg);
+    else if (msg.type === 'fillNote') handleFillNote(ws, msg);
   });
 });
 
@@ -2765,6 +2766,34 @@ function loadJournal() {
       console.log(`[ibkr] journal: ${Object.keys(journal).length} day(s) loaded`);
     }
   } catch {}
+}
+
+// {type:'fillNote', id, text} → attach/edit/clear a one-line note on a fill
+// row (kisa 2026-07-10: the journal had all the numbers and none of the WHY).
+// The note lives ON the row, so it rides the blotter broadcast, the journal,
+// the backups, and every device for free. Today's blotter first, then the
+// archive; row ids are unique across days (tradeSeq seeds above persisted ids).
+function handleFillNote(_ws, msg) {
+  const id = Number(msg.id);
+  if (!Number.isFinite(id)) return;
+  const text = String(msg.text ?? '').trim().slice(0, 240);
+  const apply = (row) => { if (text) row.note = text; else delete row.note; };
+  const t = trades.find((r) => r.id === id);
+  if (t) {
+    apply(t);
+    saveTrades();
+    broadcast({ type: 'noteResult', id, note: text || null, day: tradesDate });
+    return;
+  }
+  for (const [day, rows] of Object.entries(journal)) {
+    const r = (rows || []).find((x) => x.id === id);
+    if (r) {
+      apply(r);
+      saveJournal();
+      broadcast({ type: 'noteResult', id, note: text || null, day });
+      return;
+    }
+  }
 }
 
 function saveJournal() {
