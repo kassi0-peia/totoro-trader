@@ -497,24 +497,28 @@ button {
   cursor: pointer;
 }
 .bottom-grab[data-tip]::after { left: 50%; }
-.bottom-zone.pinned .bottom-grab { height: 8px; }
 .bottom-panel {
   max-height: 0;
   overflow: hidden;
+  opacity: 0;
   background: var(--c-bg);
-  border-top: 1px solid var(--c-border);
-  transition: max-height 200ms ease;
+  border-top: none; /* border only while open — a resting 1px edge is chrome */
+  /* Materialize: the height snaps under cover of the fade (kisa: "for drama").
+     Closing snaps away — click-off should feel instant. */
+  transition: opacity 320ms ease;
 }
 .bottom-zone.open .bottom-panel {
   max-height: 46vh;
   overflow-y: auto;
+  opacity: 1;
+  border-top: 1px solid var(--c-border);
 }
 @media (max-width: 720px) {
   /* Touch has no hover, and positions must never hide behind a gesture on
      the phone — the drawer is statically open, exactly the old layout. */
   .bottom-zone { position: static; }
   .bottom-grab { display: none; }
-  .bottom-panel { max-height: none; overflow: visible; }
+  .bottom-panel { max-height: none; overflow: visible; opacity: 1; }
 }
 
 .tf-bar {
