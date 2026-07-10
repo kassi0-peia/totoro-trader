@@ -192,10 +192,18 @@ export default function TradeHistory({ trades = [], theme, view = 'today', onSet
           </span>
         )}
         {onSetView && (
-          <span className={`th-toggle${history || trades.length === 0 ? ' solo' : ''}`}>
-            <button className={history ? '' : 'on'} onClick={() => onSetView('today')} data-tip="Today's fills (live blotter)">TODAY</button>
-            <button className={history ? 'on' : ''} onClick={() => onSetView('history')} data-tip="Multi-day journal — equity curve + daily P/L">HISTORY</button>
-          </span>
+          <button
+            className={`th-hist${history ? ' on' : ''}${history || trades.length === 0 ? ' solo' : ''}`}
+            onClick={() => onSetView(history ? 'today' : 'history')}
+            aria-label={history ? "Back to today's fills" : 'Journal history'}
+            data-tip={history ? "Back to today's fills (live blotter)" : 'Journal — equity curve + daily P/L'}
+          >
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M3 12a9 9 0 1 0 3-6.7" />
+              <path d="M3 4v5h5" />
+              <path d="M12 7v5l3.5 2" />
+            </svg>
+          </button>
         )}
       </div>
       {history ? (

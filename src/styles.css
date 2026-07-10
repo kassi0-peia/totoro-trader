@@ -2360,28 +2360,27 @@ button {
 
 /* ============ TRADES DRAWER — HISTORY VIEW (multi-day journal) ============ */
 
-/* Today ↔ History segmented toggle in the drawer header. `.solo` = no net-cash
-   chip to its left, so it pushes itself to the right edge. */
-.th-toggle {
+/* One history glyph flips today ↔ journal (kisa 2026-07-10: the two-word
+   toggle was chrome; the header text already names the view). `.solo` = no
+   net-cash chip to its left, so it pushes itself to the right edge. */
+.th-hist {
   display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-left: 10px;
+  padding: 0;
+  border-radius: 50%;
   border: 1px solid var(--c-border);
-  border-radius: 6px;
-  overflow: hidden;
-  flex: none;
-}
-.th-toggle.solo { margin-left: auto; }
-.th-toggle button {
-  background: transparent;
-  border: none;
+  background: none;
   color: var(--c-muted);
-  font-family: inherit;
-  font-size: 9px;
-  letter-spacing: 0.12em;
-  padding: 3px 8px;
   cursor: pointer;
+  flex: none;
+  transition: color 160ms, border-color 160ms;
 }
-.th-toggle button + button { border-left: 1px solid var(--c-border); }
-.th-toggle button.on { background: var(--c-surfaceAlt); color: var(--c-text); }
+.th-hist.solo { margin-left: auto; }
+.th-hist:hover, .th-hist.on { color: var(--c-accent); border-color: var(--c-accent); }
 
 .jh-body {
   flex: 1;
