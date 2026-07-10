@@ -183,6 +183,14 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent } = {}) {
     return true;
   }, []);
 
+  // Attach/edit/clear a one-line note on a fill row (today or any journal day).
+  const sendFillNote = useCallback((id, text) => {
+    const ws = socketRef.current;
+    if (!ws || ws.readyState !== 1) return false;
+    ws.send(JSON.stringify({ type: 'fillNote', id, text }));
+    return true;
+  }, []);
+
   // ── Guest-symbol senders (multi-symbol Phase A) ──
   const searchSymbols = useCallback((q) => {
     const ws = socketRef.current;
@@ -215,7 +223,7 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent } = {}) {
     return true;
   }, []);
 
-  return { ...snapshot, sendOrder, sendCancel, requestQuote, requestHistory, requestOptHistory, requestReplayDay, requestJournal, searchSymbols, activateSymbol, deactivateSymbol, setWatchlist };
+  return { ...snapshot, sendOrder, sendCancel, requestQuote, requestHistory, requestOptHistory, requestReplayDay, requestJournal, sendFillNote, searchSymbols, activateSymbol, deactivateSymbol, setWatchlist };
 }
 
 // Exported for unit testing the reducer (guest merges must not disturb SPX
@@ -266,6 +274,23 @@ export function applyMessage(s, msg) {
 
   if (msg.type === 'historyResult') {
     return { ...s, histSeries: { ...s.histSeries, [msg.tf]: msg.candles || [] } };
+  }
+
+  // A note landed on a fill row — patch it wherever that row is visible
+  // (today's blotter and/or the fetched journal day).
+  if (msg.type === 'noteResult') {
+    const patch = (rows) => rows.map((r) => {
+      if (r.id !== msg.id) return r;
+      if (msg.note) return { ...r, note: msg.note };
+      const { note, ...rest } = r;
+      return rest;
+    });
+    const trades = s.trades.some((r) => r.id === msg.id) ? patch(s.trades) : s.trades;
+    let journal = s.journal;
+    if (journal && msg.day && (journal[msg.day] || []).some((r) => r.id === msg.id)) {
+      journal = { ...journal, [msg.day]: patch(journal[msg.day]) };
+    }
+    return { ...s, trades, journal };
   }
 
   if (msg.type === 'journalResult') {
