@@ -10,7 +10,6 @@ import ThemePanel from './ThemePanel.jsx';
 import TimeframeBar from './TimeframeBar.jsx';
 import QuoteStrip from './QuoteStrip.jsx';
 import SymbolSearch from './SymbolSearch.jsx';
-import Watchlist from './Watchlist.jsx';
 import { useIbkrFeed, liveGreeks, liveQuote } from './feed.js';
 import { greeks as bsGreeks, nearestOtmStrike } from './options.js';
 import { expiryCutoffMs, suggestTimetable, displayRows, scanTouch } from './busstop.js';
@@ -1222,31 +1221,24 @@ export default function App() {
               collapsed to a 🔍 that expands on click (kisa's placement, 07-07). */}
           {!replayActive && (
             <div className="symbol-search-row">
-              <Watchlist
-                symbols={watchlist}
-                quotes={feed.watchlistQuotes || {}}
-                activeSymbol={activeSymbol}
-                spxQuote={{
-                  last: feed.price,
-                  changePct: feed.price != null && feed.spxClose ? ((feed.price - feed.spxClose) / feed.spxClose) * 100 : null
-                }}
-                onActivate={activateGuest}
-                onHome={goHome}
-                onRemove={removeWatch}
-                onAddActive={() => addWatch(activeSymbol)}
-                canAddActive={guestActive && !watchlist.includes(activeSymbol)}
-                live={feed.live}
-                now={now}
-              />
               <SymbolSearch
                 activeSymbol={activeSymbol}
                 guestPending={activeSymbol !== 'SPX' && !guestActive}
                 results={feed.searchResults}
                 onSearch={feed.searchSymbols}
                 onActivate={activateGuest}
-                onAddWatch={addWatch}
                 onHome={goHome}
                 live={feed.live}
+                watchSymbols={watchlist}
+                watchQuotes={feed.watchlistQuotes || {}}
+                spxQuote={{
+                  last: feed.price,
+                  changePct: feed.price != null && feed.spxClose ? ((feed.price - feed.spxClose) / feed.spxClose) * 100 : null
+                }}
+                onAddWatch={addWatch}
+                onRemoveWatch={removeWatch}
+                canAddActive={guestActive && !watchlist.includes(activeSymbol)}
+                now={now}
               />
             </div>
           )}

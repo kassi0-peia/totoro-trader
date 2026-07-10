@@ -1,17 +1,25 @@
 import React, { useEffect, useRef, useState } from 'react';
+import WatchPanel from './Watchlist.jsx';
 
-// Multi-symbol Phase A: symbol search, right-aligned under the ATM quote strip.
-// Collapsed to a bare 🔍 by default (kisa's placement, 2026-07-07); clicking it
-// expands the input. Type a ticker → debounced symbolSearch → dropdown of US
-// stock matches → pick = activate a guest cockpit. When a guest is active the
-// [SPX] home chip + guest chip stay visible even collapsed. Desktop-first —
-// hidden below 720px alongside quick/bus (styles.css).
+// Multi-symbol Phase A+B: symbol search, right-aligned under the ATM quote
+// strip. Collapsed to a bare 🔍 by default (kisa's placement, 2026-07-07);
+// clicking it expands the input AND opens the popover. While the input is
+// empty the popover is the watchlist panel (SPX home + starred stocks with
+// quotes — folded in here 2026-07-09 so the row stays a lone magnifier);
+// typing swaps it for the debounced symbolSearch results, where ☆/★ toggles
+// a symbol in and out of the watchlist. Pick a result (or a watch row) =
+// activate a guest cockpit. When a guest is active the [SPX] home chip +
+// guest chip stay visible even collapsed. Desktop-first — hidden below 720px
+// alongside quick/bus (styles.css).
 //
 // The search itself is a pure UI shell: the bridge does the reqMatchingSymbols
-// lookup; results arrive on feed.searchResults. Activation/home are the parent's
-// senders. This component owns only the input text, expansion, the open/closed
-// dropdown, and the debounce timer.
-export default function SymbolSearch({ activeSymbol, guestPending, results, onSearch, onActivate, onAddWatch, onHome, live }) {
+// lookup; results arrive on feed.searchResults. Activation/home/watchlist are
+// the parent's senders + state. This component owns only the input text,
+// expansion, the open/closed dropdown, and the debounce timer.
+export default function SymbolSearch({
+  activeSymbol, guestPending, results, onSearch, onActivate, onHome, live,
+  watchSymbols, watchQuotes, spxQuote, onAddWatch, onRemoveWatch, canAddActive, now
+}) {
   const [text, setText] = useState('');
   const [open, setOpen] = useState(false);
   const [expanded, setExpanded] = useState(false);
@@ -60,10 +68,12 @@ export default function SymbolSearch({ activeSymbol, guestPending, results, onSe
 
   const pick = (m) => {
     onActivate(m.symbol, m.conId);
-    setText('');
-    setOpen(false);
-    setExpanded(false);
+    collapse();
   };
+
+  // Empty query → the watchlist panel; typing → the search results.
+  const showPanel = expanded && text.trim().length === 0;
+  const showResults = open && fresh && text.trim().length > 0;
 
   return (
     <div className="symbol-search" ref={boxRef}>
@@ -88,8 +98,8 @@ export default function SymbolSearch({ activeSymbol, guestPending, results, onSe
         <button
           className="sym-glass"
           onClick={expand}
-          data-tip={live ? 'Search a symbol (open any US stock chart + weekly chain)' : 'Search needs the bridge connection'}
-          aria-label="Search a symbol"
+          data-tip={live ? 'Symbols — search & watchlist' : 'Search needs the bridge connection'}
+          aria-label="Symbols — search & watchlist"
         >
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
             <circle cx="10.5" cy="10.5" r="6.5" />
@@ -112,30 +122,45 @@ export default function SymbolSearch({ activeSymbol, guestPending, results, onSe
         autoComplete="off"
       />
       )}
-      {open && fresh && (
+      {(showPanel || showResults) && (
         <div className="sym-dropdown" role="listbox">
-          {matches.length === 0 ? (
+          {showPanel ? (
+            <WatchPanel
+              symbols={watchSymbols}
+              quotes={watchQuotes}
+              activeSymbol={activeSymbol}
+              spxQuote={spxQuote}
+              onActivate={(sym) => { onActivate(sym); collapse(); }}
+              onHome={() => { onHome(); collapse(); }}
+              onRemove={onRemoveWatch}
+              onAddActive={() => onAddWatch(activeSymbol)}
+              canAddActive={canAddActive}
+              live={live}
+              now={now}
+            />
+          ) : matches.length === 0 ? (
             <div className="sym-empty">no matches</div>
           ) : (
-            matches.map((m) => (
-              <div className="sym-opt" key={`${m.conId}-${m.symbol}`} role="option">
-                <button className="sym-opt-main" onClick={() => pick(m)}>
-                  <span className="sym-opt-tkr">{m.symbol}</span>
-                  <span className="sym-opt-name">{m.name}</span>
-                  <span className="sym-opt-exch">{m.exchange}</span>
-                </button>
-                {onAddWatch && (
-                  <button
-                    className="sym-opt-star"
-                    onClick={(e) => { e.stopPropagation(); onAddWatch(m.symbol); }}
-                    data-tip={`Add ${m.symbol} to the watchlist`}
-                    aria-label={`Add ${m.symbol} to the watchlist`}
-                  >
-                    ☆
+            matches.map((m) => {
+              const starred = watchSymbols.includes(m.symbol);
+              return (
+                <div className="sym-opt" key={`${m.conId}-${m.symbol}`} role="option">
+                  <button className="sym-opt-main" onClick={() => pick(m)}>
+                    <span className="sym-opt-tkr">{m.symbol}</span>
+                    <span className="sym-opt-name">{m.name}</span>
+                    <span className="sym-opt-exch">{m.exchange}</span>
                   </button>
-                )}
-              </div>
-            ))
+                  <button
+                    className={`sym-opt-star${starred ? ' on' : ''}`}
+                    onClick={(e) => { e.stopPropagation(); (starred ? onRemoveWatch : onAddWatch)(m.symbol); }}
+                    data-tip={starred ? `Remove ${m.symbol} from the watchlist` : `Add ${m.symbol} to the watchlist`}
+                    aria-label={starred ? `Remove ${m.symbol} from the watchlist` : `Add ${m.symbol} to the watchlist`}
+                  >
+                    {starred ? '★' : '☆'}
+                  </button>
+                </div>
+              );
+            })
           )}
         </div>
       )}

@@ -1839,7 +1839,7 @@ button {
   right: 0;
   margin-top: 4px;
   min-width: 220px;
-  max-height: 240px;
+  max-height: 300px;
   overflow-y: auto;
   background: var(--c-surface);
   border: 1px solid var(--c-border);
@@ -1882,6 +1882,7 @@ button {
   font-size: 13px;
 }
 .sym-opt-star:hover { color: var(--c-accent); }
+.sym-opt-star.on { color: var(--c-accent); }
 .sym-opt-tkr {
   font-size: 12px;
   font-weight: 700;
@@ -1902,44 +1903,9 @@ button {
   letter-spacing: 0.08em;
 }
 
-/* ── Watchlist (multi-symbol Phase B) ── a ★ button that opens a compact quote
-   panel, sitting left of the 🔍 in the same right-aligned row. */
-.watchlist {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-}
-.watch-star {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  height: 24px;
-  padding: 0 7px;
-  border-radius: 12px;
-  border: 1px solid var(--c-border);
-  background: var(--c-surface);
-  color: var(--c-muted);
-  cursor: pointer;
-  transition: color 160ms, border-color 160ms;
-}
-.watch-star:hover { color: var(--c-accent); border-color: var(--c-accent); }
-.watch-star.filled { color: var(--c-accent); }
-.watch-star-ico { font-size: 13px; line-height: 1; }
-.watch-count { font-size: 10px; font-weight: 700; letter-spacing: 0.04em; }
-.watch-dropdown {
-  position: absolute;
-  top: 100%;
-  right: 0;
-  margin-top: 4px;
-  min-width: 200px;
-  max-height: 300px;
-  overflow-y: auto;
-  background: var(--c-surface);
-  border: 1px solid var(--c-border);
-  border-radius: 6px;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
-  z-index: 40;
-}
+/* ── Watchlist (multi-symbol Phase B) ── the starred-symbols panel, rendered
+   inside the 🔍 popover (.sym-dropdown) while the query is empty — no chrome
+   of its own on the cockpit (kisa, 2026-07-09). */
 .watch-add {
   display: block;
   width: 100%;

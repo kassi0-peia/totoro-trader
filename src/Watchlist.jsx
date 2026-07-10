@@ -1,12 +1,12 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React from 'react';
 
-// Multi-symbol Phase B: a compact watchlist, co-located with the 🔍 search under
-// the ATM quote strip. Collapsed to a ★ button (mirrors the search's collapse);
-// clicking opens a dropdown of rows — SPX pinned at top (goes home), then the
-// starred stocks with last · change%, refreshed from the bridge's snapshot-quote
-// poll. Click a row to activate that symbol's guest cockpit; × removes it. A
-// stale quote (>90 s) dims. Quotes-only — buying still goes through activation +
-// the trade modal. Desktop-first (hidden below 720px, styles.css).
+// Multi-symbol Phase B: the starred-symbols panel, folded INSIDE the 🔍 search
+// popover (kisa's call, 2026-07-09 — the separate ★ button crowded her row).
+// SymbolSearch shows it while the query is empty: SPX pinned at top (goes
+// home), then the starred stocks with last · change% from the bridge's
+// snapshot-quote poll. Click a row to activate that symbol's guest cockpit;
+// × removes it. A stale quote (>90 s) dims. Quotes-only — buying still goes
+// through activation + the trade modal.
 //
 // The parent (App) owns the list + persistence + the bridge sender; this is a
 // pure UI shell over `symbols` / `quotes` / `activeSymbol`.
@@ -24,21 +24,10 @@ function fmtPct(v) {
   return `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`;
 }
 
-export default function Watchlist({
+export default function WatchPanel({
   symbols, quotes, activeSymbol, spxQuote,
   onActivate, onHome, onRemove, onAddActive, canAddActive, live, now
 }) {
-  const [open, setOpen] = useState(false);
-  const boxRef = useRef(null);
-
-  // Click-away folds the panel back to the ★.
-  useEffect(() => {
-    if (!open) return;
-    const onDoc = (e) => { if (boxRef.current && !boxRef.current.contains(e.target)) setOpen(false); };
-    document.addEventListener('mousedown', onDoc);
-    return () => document.removeEventListener('mousedown', onDoc);
-  }, [open]);
-
   const row = (sym, q, { pinned = false } = {}) => {
     const active = activeSymbol === sym;
     const stale = !pinned && (!q || q.ts == null || now - q.ts > STALE_MS);
@@ -48,7 +37,7 @@ export default function Watchlist({
       <div className={`watch-row${active ? ' active' : ''}${stale ? ' stale' : ''}`} key={sym}>
         <button
           className="watch-row-main"
-          onClick={() => { (pinned ? onHome() : onActivate(sym)); setOpen(false); }}
+          onClick={() => (pinned ? onHome() : onActivate(sym))}
           data-tip={pinned ? 'Return to SPX (home)' : `Open ${sym}`}
         >
           <span className="watch-tkr">{sym}</span>
@@ -62,37 +51,22 @@ export default function Watchlist({
     );
   };
 
-  const count = symbols.length;
-
   return (
-    <div className="watchlist" ref={boxRef}>
-      <button
-        className={`watch-star${count ? ' filled' : ''}`}
-        onClick={() => setOpen((v) => !v)}
-        data-tip="Watchlist"
-        aria-label="Watchlist"
-      >
-        <span className="watch-star-ico">{count ? '★' : '☆'}</span>
-        {count > 0 && <span className="watch-count">{count}</span>}
-      </button>
-      {open && (
-        <div className="watch-dropdown" role="listbox">
-          {canAddActive && (
-            <button
-              className="watch-add"
-              onClick={() => { onAddActive(); }}
-              data-tip={`Add ${activeSymbol} to the watchlist`}
-            >
-              ＋ Add <b>{activeSymbol}</b>
-            </button>
-          )}
-          {row('SPX', null, { pinned: true })}
-          {count === 0 ? (
-            <div className="watch-empty">{live ? 'no symbols — ★ a stock to watch it' : 'offline'}</div>
-          ) : (
-            symbols.map((sym) => row(sym, quotes[sym]))
-          )}
-        </div>
+    <div className="watch-panel" role="listbox">
+      {canAddActive && (
+        <button
+          className="watch-add"
+          onClick={() => { onAddActive(); }}
+          data-tip={`Add ${activeSymbol} to the watchlist`}
+        >
+          ＋ Add <b>{activeSymbol}</b>
+        </button>
+      )}
+      {row('SPX', null, { pinned: true })}
+      {symbols.length === 0 ? (
+        <div className="watch-empty">{live ? 'no symbols — ★ a search result to watch it' : 'offline'}</div>
+      ) : (
+        symbols.map((sym) => row(sym, quotes[sym]))
       )}
     </div>
   );
