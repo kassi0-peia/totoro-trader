@@ -1,0 +1,11 @@
+# Reference copy of the systemd USER service that backs up the bridge's journal
+# + basis cache. Oneshot, driven by totoro-backup.timer (daily). Deployed at
+# ~/.config/systemd/user/totoro-backup.service (see README "Backups"). Absolute
+# paths assume user `youruser` and repo at /home/youruser/totoro-trader; adjust
+# for other machines/users (same convention as totoro-bridge.service).
+[Unit]
+Description=TotoroTrader journal + basis-cache backup (copies to ~/totoro-backups)
+
+[Service]
+Type=oneshot
+ExecStart=/home/youruser/totoro-trader/scripts/backup-journal.sh

@@ -1,0 +1,12 @@
+# Reference copy of the systemd USER timer that runs totoro-backup.service once
+# a day. Deployed at ~/.config/systemd/user/totoro-backup.timer (see README
+# "Backups"). Persistent=true catches up a missed run if the laptop was off.
+[Unit]
+Description=Run TotoroTrader backup daily
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
