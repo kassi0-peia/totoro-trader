@@ -178,22 +178,16 @@ function JournalHistory({ trades, journal, today, theme, connected = false }) {
 // lives here in the drawer header — no new cockpit chrome.
 export default function TradeHistory({ trades = [], theme, view = 'today', onSetView = null, journal, today = null, connected = false }) {
   const rows = [...trades].reverse();
-  const realized = trades.reduce((s, t) => s + (t.action === 'SELL' ? 1 : -1) * t.price * 100 * t.qty, 0);
   const history = view === 'history';
 
   return (
     <div className="trade-history">
       <div className="th-head">
         <span>{history ? 'JOURNAL' : "TODAY'S TRADES"}</span>
-        {!history && <span className="th-count">{trades.length}</span>}
-        {!history && trades.length > 0 && (
-          <span className="th-net" style={{ color: realized >= 0 ? theme.profit : theme.loss }}>
-            net cash {realized >= 0 ? '+' : '−'}${Math.abs(realized).toFixed(2)}
-          </span>
-        )}
+        {/* No count / net-cash chips (kisa 2026-07-10): the rows say it all. */}
         {onSetView && (
           <button
-            className={`th-hist${history ? ' on' : ''}${history || trades.length === 0 ? ' solo' : ''}`}
+            className={`th-hist${history ? ' on' : ''}`}
             onClick={() => onSetView(history ? 'today' : 'history')}
             aria-label={history ? "Back to today's fills" : 'Journal history'}
             data-tip={history ? "Back to today's fills (live blotter)" : 'Journal — equity curve + daily P/L'}
