@@ -580,6 +580,13 @@ export default function App() {
     // 2026-07-10). No data → no mark: premium null, the row shows —, P/L
     // contributions freeze at entry until the symbol's cockpit is active again.
     if (symbol !== 'SPX' && !(guestActive && symbol === activeSymbol)) {
+      // The 30s snapshot poller keeps an inactive symbol's marks honest;
+      // greeks need the live chain, so they stay zero — P/L only needs the
+      // premium. Stale (>90s) or missing → the honest no-mark dash.
+      const q = feed.posQuotes?.[`${symbol}|${strike}|${rightOf(type)}|${expiry}`];
+      if (q && q.bid != null && q.ask != null && now - q.ts < 90_000) {
+        return { premium: (q.bid + q.ask) / 2, delta: 0, gamma: 0, theta: 0, vega: 0, source: 'snapshot' };
+      }
       return { premium: null, delta: 0, gamma: 0, theta: 0, vega: 0, source: 'nodata' };
     }
     // Guest mode: mark against the guest chain with the SAME ladder SPX uses —
@@ -752,9 +759,18 @@ export default function App() {
   // bound when the position strike itself is a wing the market won't quote, so
   // an unquoted deep-OTM leg can't fall back to the phantom flat-IV model.
   openStrikesRef.current = replayActive ? [] : positionsLive
-    .filter((p) => p.status === 'open' && (p.symbol ?? 'SPX') === 'SPX')
+    .filter((p) => p.status === 'open')
     .flatMap((p) => {
       const right = rightOf(p.type);
+      const psym = p.symbol ?? 'SPX';
+      if (psym !== 'SPX') {
+        // An inactive guest's leg gets ONE slow snapshot quote for its own
+        // contract, so its mark stays honest without a cockpit switch (kisa
+        // 2026-07-10, the TSLA follow-up). The ACTIVE guest's legs stream
+        // via its chain — don't double-quote them.
+        if (guestActive && psym === activeSymbol) return [];
+        return [{ symbol: psym, strike: p.strike, right, expiry: p.expiry }];
+      }
       const stepToMoney = p.type === 'call' ? -SPXW_STRIKE_STEP : SPXW_STRIKE_STEP;
       return [0, 1, 2].map((n) => ({ strike: p.strike + n * stepToMoney, right, expiry: p.expiry }));
     });

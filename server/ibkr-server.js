@@ -2426,23 +2426,44 @@ const quoteInFlight = new Map(); // same key -> reqId
 function handleQuoteRequest(_ws, msg) {
   const strike = Number(msg.strike);
   const right = msg.right === 'P' ? 'P' : 'C';
-  const expiry = String(msg.expiry || currentExpiry || session.expiry);
   if (!Number.isFinite(strike) || !ib || !connected) return;
-  const key = `${strike}|${right}|${expiry}`;
+  // A guest-symbol quote (read-only; kisa 2026-07-10): the position poller
+  // marks open legs on symbols whose cockpit ISN'T active. There's no
+  // discovered secdef here, so the OPT contract is built directly — SMART
+  // resolves stock weeklies fine, and a failed resolution just means no
+  // quote (the row keeps its honest —). Requires the position's own expiry;
+  // the SPXW roll default would be the wrong contract.
+  const guestSym = typeof msg.symbol === 'string' && msg.symbol && msg.symbol !== 'SPX'
+    ? msg.symbol.toUpperCase() : null;
+  let expiry, symbol, contract;
+  if (guestSym) {
+    if (!/^\d{8}$/.test(String(msg.expiry || ''))) return;
+    expiry = String(msg.expiry);
+    symbol = guestSym;
+    contract = {
+      symbol: guestSym, secType: 'OPT', exchange: 'SMART', currency: 'USD',
+      lastTradeDateOrContractMonth: expiry, strike, right, multiplier: '100'
+    };
+  } else {
+    expiry = String(msg.expiry || currentExpiry || session.expiry);
+    symbol = 'SPX';
+    contract = {
+      symbol: 'SPX', secType: 'OPT', exchange: 'SMART', currency: 'USD', tradingClass: 'SPXW',
+      lastTradeDateOrContractMonth: expiry, strike, right, multiplier: '100'
+    };
+  }
+  const key = `${symbol}|${strike}|${right}|${expiry}`;
   const cached = quoteCache.get(key);
   if (cached && Date.now() - cached.ts < QUOTE_CACHE_MS) {
-    broadcast({ type: 'quoteResult', strike, right, expiry, ...cached });
+    broadcast({ type: 'quoteResult', symbol, strike, right, expiry, ...cached });
     return;
   }
   if (quoteInFlight.has(key)) return; // snapshot already on the wire
   const reqId = reqSeq++;
   quoteInFlight.set(key, reqId);
-  subs.set(reqId, { kind: 'quote-snap', key, strike, right, expiry, bid: null, ask: null, last: null });
+  subs.set(reqId, { kind: 'quote-snap', key, symbol, strike, right, expiry, bid: null, ask: null, last: null });
   try {
-    ib.reqMktData(reqId, {
-      symbol: 'SPX', secType: 'OPT', exchange: 'SMART', currency: 'USD', tradingClass: 'SPXW',
-      lastTradeDateOrContractMonth: expiry, strike, right, multiplier: '100'
-    }, '', true, false, []);
+    ib.reqMktData(reqId, contract, '', true, false, []);
   } catch (e) {
     console.log('[ibkr] quote snapshot failed:', e.message);
     quoteInFlight.delete(key);
@@ -2461,7 +2482,7 @@ function finishQuoteSnap(reqId) {
   if (s.bid == null && s.ask == null && s.last == null) return; // nothing quoted
   const q = { bid: s.bid, ask: s.ask, last: s.last, dayHigh: s.high ?? null, dayLow: s.low ?? null, ts: Date.now() };
   quoteCache.set(s.key, q);
-  broadcast({ type: 'quoteResult', strike: s.strike, right: s.right, expiry: s.expiry, ...q });
+  broadcast({ type: 'quoteResult', symbol: s.symbol ?? 'SPX', strike: s.strike, right: s.right, expiry: s.expiry, ...q });
 }
 
 function handleCancel(ws, msg) {
