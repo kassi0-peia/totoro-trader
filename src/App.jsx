@@ -18,7 +18,6 @@ import { expiryCutoffMs, suggestTimetable, displayRows, scanTouch } from './buss
 import BusStopPanel from './BusStopPanel.jsx';
 import { THEMES } from './themes.js';
 import { plDollars } from './pl.js';
-import Journal from './Journal.jsx';
 
 // Blind-replay day picker: a random weekday 3–60 days back (LOCAL date parts —
 // the UTC fence eats days after 8 PM ET). Holidays aren't modeled here; they
@@ -86,7 +85,6 @@ export default function App() {
   // ── Replay mode (desktop practice): play back a past day's 1-min session ──
   // and trade it with simulated fills at Black–Scholes prices. No real orders.
   const [replayBarOpen, setReplayBarOpen] = useState(false);
-  const [journalOpen, setJournalOpen] = useState(false);
   const [replay, setReplay] = useState(null); // { date, candles, idx, speed, playing }
   const [replayPositions, setReplayPositions] = useState([]);
   const replayActive = replay != null && replay.candles.length > 0;
@@ -118,6 +116,10 @@ export default function App() {
     const t = setTimeout(() => setDrawerMounted(false), 300);
     return () => clearTimeout(t);
   }, [tradesPeek, drawerMounted]);
+  // ── Trades-drawer view: today's blotter ↔ multi-day journal (history) ──
+  // The history view (equity curve + daily P/L) renders INSIDE the drawer;
+  // the toggle lives in the drawer header — zero new cockpit chrome.
+  const [drawerView, setDrawerView] = useState('today');
   // Opt-in tools (kisa's rule: dormant until toggled, in the gear panel).
   const [axisChain, setAxisChain] = useState(() => {
     try { return localStorage.getItem('tt.axischain') === '1'; } catch { return false; }
@@ -283,6 +285,12 @@ export default function App() {
   }, [showToast, chime]);
 
   const feed = useIbkrFeed({ onOrderEvent: handleOrderEvent });
+
+  // Journal fetch for the drawer's history view: whenever it's showing and the
+  // socket is up — covers the first open AND a reconnect (the bridge re-serves it).
+  useEffect(() => {
+    if (drawerMounted && drawerView === 'history' && feed.socketOpen) feed.requestJournal();
+  }, [drawerMounted, drawerView, feed.socketOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Multi-symbol Phase A: the active instrument ──
   // 'SPX' (default, home) or a guest equity symbol. A guest is only truly active
@@ -1441,7 +1449,11 @@ export default function App() {
                   <TradeHistory
                     trades={feed.trades}
                     theme={theme}
-                    onOpenJournal={() => { feed.requestJournal(); setJournalOpen(true); }}
+                    view={drawerView}
+                    onSetView={setDrawerView}
+                    journal={feed.journal}
+                    today={feed.live ? feed.expiry : null}
+                    connected={feed.socketOpen}
                   />
                 </div>
               </div>
@@ -1543,10 +1555,6 @@ export default function App() {
           />
         );
       })()}
-
-      {journalOpen && (
-        <Journal days={feed.journal} theme={theme} onClose={() => setJournalOpen(false)} />
-      )}
 
       {busPanelId != null && !replayActive && (() => {
         const stop = busStops.find((s) => s.id === busPanelId);
