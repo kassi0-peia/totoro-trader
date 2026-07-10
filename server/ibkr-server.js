@@ -634,7 +634,12 @@ function wireHandlers(api) {
     } else if (s.kind === 'guest-stk') {
       if (!guest || value <= 0) return;
       if (field === 4 || field === 68) feedGuestTick(value);
-      else if ((field === 9 || field === 75) && guest.price == null) feedGuestTick(value);
+      else if (field === 9 || field === 75) {
+        // Prior-day close: the guest expected-move band's anchor (same role
+        // spxClose plays for the SPX band). Also the price fallback pre-tick.
+        guest.prevClose = value;
+        if (guest.price == null) feedGuestTick(value);
+      }
     } else if (s.kind === 'guest-opt') {
       if (!guest) return;
       const entry = guestChain.get(s.key);
@@ -1571,6 +1576,7 @@ function handleActivateSymbol(ws, msg) {
     stkReqId: null,
     contract: null,      // resolved STK contract
     price: null,
+    prevClose: null,     // prior-day close (tick field 9/75) — EM band anchor
     series: newGuestSeries(),
     expiry: null,
     strikeStep: null,
@@ -1843,6 +1849,7 @@ function guestMsg() {
     guest: {
       symbol: guest.symbol,
       price: guest.price,
+      prevClose: guest.prevClose,
       candles: guest.series.candles,
       greeks,
       expiry: guest.expiry,

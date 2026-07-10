@@ -803,17 +803,28 @@ export default function App() {
 
   // Expected move = ATM straddle price (call mid + put mid), anchored at the
   // previous 4:00 PM cash close: the band the options market prices for expiry.
+  // A guest gets the SAME formula from its own chain, anchored at the stock's
+  // prior-day close (bridge tick 9 → guest.prevClose). One honest difference:
+  // a guest weekly's straddle prices the move to ITS expiry, not to today —
+  // wider than a 0DTE band by construction.
   const expectedMove = useMemo(() => {
     if (replayActive) return null; // no chain in the past
-    if (guestActive) return null;  // SPX-only band (anchored to the SPX cash close)
+    const mid = (q) => (q && q.bid != null && q.ask != null ? (q.bid + q.ask) / 2 : q?.premium ?? null);
+    if (guestActive) {
+      if (!guest || !Number.isFinite(guest.prevClose) || !Number.isFinite(guest.price) || !strikeStep) return null;
+      const atm = Math.round(guest.price / strikeStep) * strikeStep;
+      const c = mid(liveQuote(feed.guestGreeksMap, atm, 'call'));
+      const p = mid(liveQuote(feed.guestGreeksMap, atm, 'put'));
+      if (c == null || p == null) return null;
+      return { anchor: guest.prevClose, width: c + p };
+    }
     if (!feed.live || !Number.isFinite(feed.spxClose)) return null;
     const atm = Math.round(feed.price / 5) * 5;
-    const mid = (q) => (q && q.bid != null && q.ask != null ? (q.bid + q.ask) / 2 : q?.premium ?? null);
     const c = mid(liveQuote(feed.greeksMap, atm, 'call'));
     const p = mid(liveQuote(feed.greeksMap, atm, 'put'));
     if (c == null || p == null) return null;
     return { anchor: feed.spxClose, width: c + p };
-  }, [feed.live, feed.price, feed.greeksMap, feed.spxClose, guestActive]);
+  }, [feed.live, feed.price, feed.greeksMap, feed.spxClose, guestActive, guest, feed.guestGreeksMap, strikeStep]);
 
   // 🚏 Drop a bus stop: her mind's-eye (price, time) coordinate, snapped to the
   // minute and a quarter point. The timetable (contract suggestions) is computed
@@ -1389,7 +1400,7 @@ export default function App() {
               over the chart, so the chart's top-right corner is clean. The row
               renders in replay too (the badge stays); only the search hides. */}
           <div className="symbol-search-row">
-            <div className="chart-acct">
+            <div className={`chart-acct${axisChain ? ' chart-acct--axis' : ''}`}>
               <span className="acct-badge" style={{ color: '#0a0c12', background: acctColor }} data-tip={feed.account ? `IBKR account ${feed.account}` : 'no account connected'}>{acctLabel}</span>
               <span className="chart-acct-id" data-tip={feed.account ? `IBKR account ${feed.account}` : 'no account connected'}>{feed.account || (feed.live ? '…' : 'no acct')}</span>
               {!replayActive && !guestActive && (
