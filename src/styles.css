@@ -593,6 +593,15 @@ button {
   min-height: 484px;
   background: var(--c-bg);
 }
+/* Desktop: the cockpit fits the viewport — no page scroll to reach the time
+   axis (kisa 2026-07-10, unlocked by the bottom drawer freeing the space
+   below the chart). The chart absorbs whatever the header/strips leave.
+   Mobile keeps natural page flow — it stacks and must scroll. */
+@media (min-width: 721px) {
+  .app { height: 100vh; height: 100dvh; overflow: hidden; }
+  .chart-area { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .chart-wrap { height: auto; flex: 1; min-height: 0; }
+}
 
 .snap-now-btn,
 .fs-btn,
