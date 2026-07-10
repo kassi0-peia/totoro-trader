@@ -11,15 +11,18 @@ import TimeframeBar, { TF_OPTIONS } from './TimeframeBar.jsx';
 import QuoteStrip from './QuoteStrip.jsx';
 import SymbolSearch, { searchPopover } from './SymbolSearch.jsx';
 import useHotkeys from './useHotkeys.js';
+import useAlerts from './useAlerts.js';
+import useWatchlist from './useWatchlist.js';
+import useBottomDrawer from './useBottomDrawer.js';
 import ChartMenu from './ChartMenu.jsx';
-import { crossed } from './alerts.js';
 import { useIbkrFeed, liveGreeks, liveQuote } from './feed.js';
 import { greeks as bsGreeks, nearestOtmStrike } from './options.js';
 import { expiryCutoffMs, suggestTimetable, displayRows, scanTouch } from './busstop.js';
 import BusStopPanel from './BusStopPanel.jsx';
 import { THEMES } from './themes.js';
 import { plDollars } from './pl.js';
-import { chimeFill, chimeAlert } from './sounds.js';
+import { buildOpenOrder, buildQuickOrder } from './order-payload.js';
+import { chimeFill } from './sounds.js';
 
 // Blind-replay day picker: a random weekday 3–60 days back (LOCAL date parts —
 // the UTC fence eats days after 8 PM ET). Holidays aren't modeled here; they
@@ -132,41 +135,10 @@ export default function App() {
     return () => clearTimeout(t);
   }, [tradesPeek, drawerMounted]);
   // ── Bottom drawer (kisa 2026-07-10: "hide everything below the chart") ──
-  // At rest the chart runs edge-to-edge. The invisible band along the bottom
-  // edge materializes the panel (tf-bar + positions) after a 1.5s hover —
-  // same rhythm as the left trades drawer — or instantly on click; it FADES
-  // in ("for drama"). Once open it stays until she clicks off it or hits Esc
-  // (never on mouse-away). A landing fill auto-peeks it ~5s unless she
-  // engages. Mobile keeps the always-visible layout (styles.css — touch has
-  // no hover, and positions must not hide behind a gesture on the phone).
-  const [bottomOpen, setBottomOpen] = useState(false);
-  const bottomZoneRef = useRef(null);
-  const bottomPeekTimer = useRef(null);
-  const bottomHoverTimer = useRef(null);
-  const peekBottom = useCallback(() => {
-    setBottomOpen(true);
-    clearTimeout(bottomPeekTimer.current);
-    bottomPeekTimer.current = setTimeout(() => setBottomOpen(false), 5000);
-  }, []);
-  const footerRef = useRef(null); // the whole footer is a trigger too (kisa: the 14px band was "v small")
-  useEffect(() => {
-    if (!bottomOpen) return;
-    const onDoc = (e) => {
-      if (bottomZoneRef.current?.contains(e.target)) return;
-      if (footerRef.current?.contains(e.target)) return; // footer clicks toggle, not close-then-reopen
-      setBottomOpen(false);
-    };
-    document.addEventListener('mousedown', onDoc);
-    return () => document.removeEventListener('mousedown', onDoc);
-  }, [bottomOpen]);
-  // Shared by the band and the footer: dwell 1.5s to arm, click to toggle.
-  const armBottom = () => {
-    clearTimeout(bottomHoverTimer.current);
-    if (!bottomOpen) bottomHoverTimer.current = setTimeout(() => setBottomOpen(true), 1500);
-  };
-  const disarmBottom = () => clearTimeout(bottomHoverTimer.current);
-  const toggleBottom = () => { clearTimeout(bottomHoverTimer.current); setBottomOpen((v) => !v); };
-  const bottomShown = bottomOpen;
+  // Invisible bottom band + footer: hover 1.5s or click to reveal the panel;
+  // clicks-off/Esc close it; a fill auto-peeks it ~5s. All the state, refs,
+  // timers, click-away and dwell handlers live in useBottomDrawer.
+  const { bottomOpen, setBottomOpen, bottomShown, peekBottom, armBottom, disarmBottom, toggleBottom, bottomZoneRef, bottomPeekTimer, footerRef } = useBottomDrawer();
   // ── Trades-drawer view: today's blotter ↔ multi-day journal (history) ──
   // The history view (equity curve + daily P/L) renders INSIDE the drawer;
   // the toggle lives in the drawer header — zero new cockpit chrome.
@@ -206,21 +178,10 @@ export default function App() {
   useEffect(() => {
     try { localStorage.setItem('tt.busStops', JSON.stringify(busStops)); } catch {}
   }, [busStops]);
-  // ⏰ one-shot price alerts (kisa, 2026-07-09): armed from the chart's
-  // right-click menu, drawn as dashed lines only while armed, removed the
-  // moment the live tape crosses (toast + chime). Zero resting chrome — the
-  // line IS the feature. Persisted so a reload doesn't disarm the night's
-  // levels; SPX alerts watch the SPX-equiv price, so they work overnight too.
-  const [alerts, setAlerts] = useState(() => {
-    try {
-      const v = JSON.parse(localStorage.getItem('tt.alerts') || '[]');
-      if (Array.isArray(v)) return v.filter((a) => a && typeof a.symbol === 'string' && Number.isFinite(a.price));
-    } catch {}
-    return [];
-  });
-  useEffect(() => {
-    try { localStorage.setItem('tt.alerts', JSON.stringify(alerts)); } catch {}
-  }, [alerts]);
+  // ⏰ one-shot price alerts live in useAlerts (state + persistence + the live
+  // crossing effect); [alerts, setAlerts] come back so the cockpit draws them
+  // and the chart menu arms/disarms. Hook is called below, once its live-tape
+  // and guest inputs (feed/guest/activeSymbol/showToast) are in scope.
   const [chartMenu, setChartMenu] = useState(null); // {x, y, price, alertId, alertPrice}
   useEffect(() => {
     try {
@@ -247,7 +208,8 @@ export default function App() {
   }, []);
 
   // Sounds live in src/sounds.js now: chimeFill (the original two-note fill
-  // chime, moved verbatim) and chimeAlert (a single soft blip for ⏰ alerts).
+  // chime, moved verbatim) here, and chimeAlert (a single soft blip for ⏰
+  // alerts) inside useAlerts.
 
   // Micro fill animation: when a fill lands, the affected position row (and
   // the strike line on the active chart) glow once, ~400ms, no layout shift.
@@ -350,26 +312,8 @@ export default function App() {
   const guestActive = activeSymbol !== 'SPX' && !!feed.guest && feed.guest.symbol === activeSymbol;
   const guest = guestActive ? feed.guest : null;
 
-  // Fire ⏰ alerts on a live crossing. SPX alerts check feed.price (the
-  // SPX-equiv proxy overnight — "ping when SPX-equiv crosses X"); a guest's
-  // alerts can only fire while that guest is active (its price only streams
-  // then). First tick after load primes the previous price without firing.
-  const alertPrevRef = useRef({});
-  useEffect(() => {
-    const tapes = [['SPX', feed.price]];
-    if (guestActive && guest?.price != null) tapes.push([activeSymbol, guest.price]);
-    for (const [sym, px] of tapes) {
-      if (px == null) continue;
-      const prev = alertPrevRef.current[sym];
-      alertPrevRef.current[sym] = px;
-      if (prev == null || prev === px) continue;
-      const hits = alerts.filter((a) => a.symbol === sym && crossed(prev, px, a.price));
-      if (!hits.length) continue;
-      setAlerts((list) => list.filter((a) => !hits.some((h) => h.id === a.id)));
-      for (const h of hits) showToast(`⏰ ${sym} crossed ${h.price.toFixed(2)}`, 'ok');
-      chimeAlert(); // the dedicated alert blip — one soft low note, not the fill chime
-    }
-  }, [feed.price, guest?.price, guestActive, activeSymbol, alerts]); // eslint-disable-line react-hooks/exhaustive-deps
+  // ⏰ price alerts: state + persistence + the live-crossing effect (see useAlerts).
+  const [alerts, setAlerts] = useAlerts({ feedPrice: feed.price, guestPrice: guest?.price, guestActive, activeSymbol, showToast });
   // The cockpit's data source. In guest mode price/candles/greeksMap/expiry/
   // strikeStep come from feed.guest; otherwise the SPX feed, untouched. Replay is
   // disabled in guest mode, so these never collide with replay's own price/time.
@@ -426,35 +370,9 @@ export default function App() {
     feed.activateSymbol(activeSymbol, activeConIdRef.current);
   }, [feed.socketOpen, activeSymbol]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Watchlist (multi-symbol Phase B) ──
-  // Client-owned list of stock tickers, quotes-only. Persisted to localStorage;
-  // re-sent to the bridge whenever the socket (re)connects or the list changes
-  // (the bridge doesn't persist it — same contract as guest activation).
-  const WATCHLIST_MAX = 12;
-  const [watchlist, setWatchlist] = useState(() => {
-    try {
-      const raw = localStorage.getItem('tt.watchlist');
-      const a = raw ? JSON.parse(raw) : null;
-      if (Array.isArray(a)) return a.filter((x) => typeof x === 'string' && x && x !== 'SPX').slice(0, WATCHLIST_MAX);
-    } catch {}
-    return [];
-  });
-  useEffect(() => {
-    try { localStorage.setItem('tt.watchlist', JSON.stringify(watchlist)); } catch {}
-  }, [watchlist]);
-  useEffect(() => {
-    if (feed.socketOpen) feed.setWatchlist(watchlist);
-  }, [feed.socketOpen, watchlist]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const addWatch = useCallback((sym) => {
-    const s = String(sym || '').trim().toUpperCase();
-    if (!s || s === 'SPX') return;
-    setWatchlist((w) => (w.includes(s) || w.length >= WATCHLIST_MAX ? w : [...w, s]));
-  }, []);
-  const removeWatch = useCallback((sym) => {
-    const s = String(sym || '').toUpperCase();
-    setWatchlist((w) => w.filter((x) => x !== s));
-  }, []);
+  // Watchlist (multi-symbol Phase B): state + persistence + socket re-send +
+  // add/remove all live in useWatchlist. feed.setWatchlist is the bridge sender.
+  const { watchlist, addWatch, removeWatch } = useWatchlist({ socketOpen: feed.socketOpen, sendWatchlist: feed.setWatchlist });
 
   // ── Layout memory (invisible — localStorage tt.* keys, matching the pattern
   // above): last timeframe PER SYMBOL, and the active symbol itself. ──
@@ -1036,21 +954,14 @@ export default function App() {
       return;
     }
     if (!feed.executionEnabled) { showToast('Execution disabled', 'err'); return; }
-    // Guest orders MUST be a marketable limit — the bridge rejects a guest MKT.
-    if (guestActive && limit == null) { showToast('Guest orders need a limit price', 'err'); return; }
-    // Sell-to-open is limit-only, same rule as guests: with no limit the bridge
-    // routes a real MKT, and a market SELL into the thin overnight book is a
-    // blank check in the worst direction. The modal enforces this; belt here.
     const sell = pending.side === 'sell';
-    if (sell && limit == null) { showToast('Sell orders need a limit price', 'err'); return; }
-    const ref = feed.sendOrder({
-      intent: 'open', action: sell ? 'SELL' : 'BUY', strike: pending.strike, right: rightOf(pending.type), qty, expiry: cockpitExpiry,
-      ...(guestActive ? { symbol: activeSymbol } : {}),
-      ...(limit != null ? { limit } : {}),
-      // Brackets are BUY-to-open only (the bridge ignores them on a SELL).
-      ...(!sell && takeProfit != null ? { takeProfit } : {}),
-      ...(!sell && stopLoss != null ? { stopLoss } : {})
+    // Payload + guest/sell limit guards live in buildOpenOrder (order-payload.js).
+    const built = buildOpenOrder({
+      side: pending.side, strike: pending.strike, type: pending.type, qty, limit, takeProfit, stopLoss,
+      guestActive, activeSymbol, cockpitExpiry
     });
+    if (!built.ok) { showToast(built.reason, 'err'); return; }
+    const ref = feed.sendOrder(built.payload);
     if (!ref) { showToast('Order not sent — not connected', 'err'); return; }
     setPositions((prev) => [...prev, {
       id: posSeq++, symbol: activeSymbol, type: pending.type, side: sell ? 'short' : 'long', strike: pending.strike, qty, expiry: cockpitExpiry,
@@ -1084,16 +995,12 @@ export default function App() {
       return;
     }
     if (!feed.executionEnabled) { showToast('Execution disabled', 'err'); return; }
-    // A live ask is still required even in MARKET mode — it's the guard against
-    // firing blind into a strike with no streaming quote (where MKT slippage is worst).
-    if (ask == null || !(ask > 0)) { showToast(`No live ask for ${strike}${rightOf(type)} — hover until a quote loads`, 'err'); return; }
-    // The ⚡ red MKT arm is SPX-only in Phase A. In guest mode it degrades to the
-    // amber marketable limit (a guest MKT would be rejected by the bridge anyway).
-    const market = quickMode === 'market' && !guestActive;
-    const tick = ask < 3 ? 0.05 : 0.10;
-    const limit = market ? null : Math.round((ask + tick) * 100) / 100;
-    // MARKET mode omits the limit → the bridge routes a real MKT (never naked elsewhere).
-    const ref = feed.sendOrder({ intent: 'open', action: 'BUY', strike, right: rightOf(type), qty: 1, expiry: cockpitExpiry, ...(guestActive ? { symbol: activeSymbol } : {}), ...(market ? {} : { limit }) });
+    // Payload, the live-ask guard, and the amber-tick math live in buildQuickOrder
+    // (order-payload.js). It returns `market`/`limit` for the position + toast below.
+    const built = buildQuickOrder({ strike, type, ask, quickMode, guestActive, activeSymbol, cockpitExpiry });
+    if (!built.ok) { showToast(built.reason, 'err'); return; }
+    const { payload, market, limit } = built;
+    const ref = feed.sendOrder(payload);
     if (!ref) { showToast('Order not sent — not connected', 'err'); return; }
     const g = resolveGreeks(strike, type);
     setPositions((prev) => [...prev, {
