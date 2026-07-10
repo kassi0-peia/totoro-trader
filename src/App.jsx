@@ -13,6 +13,7 @@ import SymbolSearch, { searchPopover } from './SymbolSearch.jsx';
 import useHotkeys from './useHotkeys.js';
 import useAlerts from './useAlerts.js';
 import useWatchlist from './useWatchlist.js';
+import useBottomDrawer from './useBottomDrawer.js';
 import ChartMenu from './ChartMenu.jsx';
 import { useIbkrFeed, liveGreeks, liveQuote } from './feed.js';
 import { greeks as bsGreeks, nearestOtmStrike } from './options.js';
@@ -134,41 +135,10 @@ export default function App() {
     return () => clearTimeout(t);
   }, [tradesPeek, drawerMounted]);
   // ── Bottom drawer (kisa 2026-07-10: "hide everything below the chart") ──
-  // At rest the chart runs edge-to-edge. The invisible band along the bottom
-  // edge materializes the panel (tf-bar + positions) after a 1.5s hover —
-  // same rhythm as the left trades drawer — or instantly on click; it FADES
-  // in ("for drama"). Once open it stays until she clicks off it or hits Esc
-  // (never on mouse-away). A landing fill auto-peeks it ~5s unless she
-  // engages. Mobile keeps the always-visible layout (styles.css — touch has
-  // no hover, and positions must not hide behind a gesture on the phone).
-  const [bottomOpen, setBottomOpen] = useState(false);
-  const bottomZoneRef = useRef(null);
-  const bottomPeekTimer = useRef(null);
-  const bottomHoverTimer = useRef(null);
-  const peekBottom = useCallback(() => {
-    setBottomOpen(true);
-    clearTimeout(bottomPeekTimer.current);
-    bottomPeekTimer.current = setTimeout(() => setBottomOpen(false), 5000);
-  }, []);
-  const footerRef = useRef(null); // the whole footer is a trigger too (kisa: the 14px band was "v small")
-  useEffect(() => {
-    if (!bottomOpen) return;
-    const onDoc = (e) => {
-      if (bottomZoneRef.current?.contains(e.target)) return;
-      if (footerRef.current?.contains(e.target)) return; // footer clicks toggle, not close-then-reopen
-      setBottomOpen(false);
-    };
-    document.addEventListener('mousedown', onDoc);
-    return () => document.removeEventListener('mousedown', onDoc);
-  }, [bottomOpen]);
-  // Shared by the band and the footer: dwell 1.5s to arm, click to toggle.
-  const armBottom = () => {
-    clearTimeout(bottomHoverTimer.current);
-    if (!bottomOpen) bottomHoverTimer.current = setTimeout(() => setBottomOpen(true), 1500);
-  };
-  const disarmBottom = () => clearTimeout(bottomHoverTimer.current);
-  const toggleBottom = () => { clearTimeout(bottomHoverTimer.current); setBottomOpen((v) => !v); };
-  const bottomShown = bottomOpen;
+  // Invisible bottom band + footer: hover 1.5s or click to reveal the panel;
+  // clicks-off/Esc close it; a fill auto-peeks it ~5s. All the state, refs,
+  // timers, click-away and dwell handlers live in useBottomDrawer.
+  const { bottomOpen, setBottomOpen, bottomShown, peekBottom, armBottom, disarmBottom, toggleBottom, bottomZoneRef, bottomPeekTimer, footerRef } = useBottomDrawer();
   // ── Trades-drawer view: today's blotter ↔ multi-day journal (history) ──
   // The history view (equity curve + daily P/L) renders INSIDE the drawer;
   // the toggle lives in the drawer header — zero new cockpit chrome.
