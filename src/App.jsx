@@ -52,6 +52,8 @@ function timeToExpiryYearsAt(now) {
 
 const rightOf = (type) => (type === 'call' ? 'C' : 'P');
 const EMPTY_GREEKS = new Map(); // replay mode shows no live chain
+const EMPTY_ARR = [];           // stable empty ref — an inline [] prop is a fresh
+                                // identity per render and re-fires draw effects
 const posKey = (strike, right, expiry) => `${strike}${right}:${expiry}`;
 // Premium-history key: guest series are symbol-prefixed so they never collide
 // with SPXW's; SPX stays bare (matches the bridge's optHistoryResult keying).
@@ -337,6 +339,15 @@ export default function App() {
   const cockpitPrice = guestActive ? guest.price : feed.price;
   const cockpitCandles = guestActive ? (guest.candles || []) : feed.candles;
   const cockpitGreeksMap = guestActive ? feed.guestGreeksMap : feed.greeksMap;
+  // The chart's candle prop, memoized: the replay path used to .slice() inline —
+  // a fresh array identity per render, i.e. a full canvas repaint every 800ms
+  // tick for the whole replay session. Now it re-slices only when the tape
+  // actually advances (replay state changes), and live mode passes the feed
+  // array through untouched.
+  const chartCandles = useMemo(
+    () => (replayActive ? replay.candles.slice(0, replay.idx + 1) : cockpitCandles),
+    [replayActive, replay, cockpitCandles]
+  );
   const cockpitExpiry = guestActive ? guest.expiry : feed.expiry;
   const strikeStep = guestActive ? (guest.strikeStep || 5) : 5;
   // Only the active cockpit's alerts draw on its chart; replay draws none (the
@@ -565,7 +576,13 @@ export default function App() {
     while (hist.length && hist[0].t < Date.now() - 10000) hist.shift();
   }, [feed.price]);
 
-  const T = useMemo(() => timeToExpiryYearsAt(replayActive ? replayNow : now), [now, replayActive, replayNow]);
+  // Time-to-expiry, quantized to 30s buckets: T drifts ~2e-6 per tick —
+  // invisible in any premium — but a per-tick T is a draw-effect dependency,
+  // so it forced the WHOLE canvas to repaint every 800ms even with nothing
+  // else changing (the idle-cockpit CPU tax kisa felt as sticky hover).
+  // Replay keeps exact time — the tape drives it, not the clock.
+  const tSlow = Math.floor(now / 30_000) * 30_000;
+  const T = useMemo(() => timeToExpiryYearsAt(replayActive ? replayNow : tSlow), [tSlow, replayActive, replayNow]);
 
   // Upper bound for an OTM option that has no fresh quote of its own. Option
   // value is monotonic in strike, so an OTM call can't be worth more than a
@@ -899,8 +916,10 @@ export default function App() {
   // (that's the route record — v1.1 reads it).
   const chartBusStops = useMemo(() => {
     if (replayActive) return [];
-    return busStops.filter((s) => !s.resolution || now < expiryCutoffMs(s.expiry, s.createdAt) + 30 * 60000);
-  }, [busStops, replayActive, now]);
+    // tSlow, not now: the cutoff windows are 30-minute-scale, and a per-tick
+    // dep meant a fresh array (→ full canvas repaint) every 800ms.
+    return busStops.filter((s) => !s.resolution || tSlow < expiryCutoffMs(s.expiry, s.createdAt) + 30 * 60000);
+  }, [busStops, replayActive, tSlow]);
 
   // Day P/L: blotter cash flow plus the marked value of what's still open.
   // In replay: the practice session's P/L (closed + open marks vs entries).
@@ -1492,7 +1511,7 @@ export default function App() {
           )}
           <div className="chart-area">
             <Chart
-              candles={replayActive ? replay.candles.slice(0, replay.idx + 1) : cockpitCandles}
+              candles={chartCandles}
               price={dispPrice}
               positions={chartPositions}
               theme={chartTheme}
@@ -1514,7 +1533,7 @@ export default function App() {
               }}
               onInspectPosition={(p) => { setHoverPos(null); setInspectId(p.id); }}
               ghostFills={visibleGhosts}
-              busStops={guestActive ? [] : chartBusStops}
+              busStops={guestActive ? EMPTY_ARR : chartBusStops}
               busArmed={busArmed && !replayActive && !guestActive}
               onDropBusStop={handleDropBusStop}
               onSelectBusStop={(s) => setBusPanelId(s.id)}
