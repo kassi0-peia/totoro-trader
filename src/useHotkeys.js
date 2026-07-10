@@ -33,12 +33,13 @@ export function keyIntent(e) {
   const k = String(e.key).toLowerCase();
   if (k === 'c') return { kind: 'ticket', type: 'call' };
   if (k === 'p') return { kind: 'ticket', type: 'put' };
+  if (k === 'n') return { kind: 'note' }; // annotate the latest fill
   return null;
 }
 
-// handlers: { onEscape, onDigit(n), onSpace(), onTicket('call'|'put') }.
-// onDigit/onSpace/onTicket return true when they acted → preventDefault (stops
-// Space from scrolling the page). Handlers are read through a ref so the
+// handlers: { onEscape, onDigit(n), onSpace(), onTicket('call'|'put'), onNote() }.
+// onDigit/onSpace/onTicket/onNote return true when they acted → preventDefault
+// (stops Space from scrolling the page). Handlers are read through a ref so the
 // listener binds once and never goes stale.
 export default function useHotkeys(handlers) {
   const ref = useRef(handlers);
@@ -52,7 +53,8 @@ export default function useHotkeys(handlers) {
       if (intent.kind === 'escape') { h.onEscape?.(); return; }
       if (intent.kind === 'digit') { if (h.onDigit?.(intent.n)) e.preventDefault(); return; }
       if (intent.kind === 'space') { if (h.onSpace?.()) e.preventDefault(); return; }
-      if (intent.kind === 'ticket') { if (h.onTicket?.(intent.type)) e.preventDefault(); }
+      if (intent.kind === 'ticket') { if (h.onTicket?.(intent.type)) e.preventDefault(); return; }
+      if (intent.kind === 'note') { if (h.onNote?.()) e.preventDefault(); }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
