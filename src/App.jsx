@@ -12,6 +12,7 @@ import QuoteStrip from './QuoteStrip.jsx';
 import SymbolSearch, { searchPopover } from './SymbolSearch.jsx';
 import useHotkeys from './useHotkeys.js';
 import useAlerts from './useAlerts.js';
+import useWatchlist from './useWatchlist.js';
 import ChartMenu from './ChartMenu.jsx';
 import { useIbkrFeed, liveGreeks, liveQuote } from './feed.js';
 import { greeks as bsGreeks, nearestOtmStrike } from './options.js';
@@ -399,35 +400,9 @@ export default function App() {
     feed.activateSymbol(activeSymbol, activeConIdRef.current);
   }, [feed.socketOpen, activeSymbol]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Watchlist (multi-symbol Phase B) ──
-  // Client-owned list of stock tickers, quotes-only. Persisted to localStorage;
-  // re-sent to the bridge whenever the socket (re)connects or the list changes
-  // (the bridge doesn't persist it — same contract as guest activation).
-  const WATCHLIST_MAX = 12;
-  const [watchlist, setWatchlist] = useState(() => {
-    try {
-      const raw = localStorage.getItem('tt.watchlist');
-      const a = raw ? JSON.parse(raw) : null;
-      if (Array.isArray(a)) return a.filter((x) => typeof x === 'string' && x && x !== 'SPX').slice(0, WATCHLIST_MAX);
-    } catch {}
-    return [];
-  });
-  useEffect(() => {
-    try { localStorage.setItem('tt.watchlist', JSON.stringify(watchlist)); } catch {}
-  }, [watchlist]);
-  useEffect(() => {
-    if (feed.socketOpen) feed.setWatchlist(watchlist);
-  }, [feed.socketOpen, watchlist]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const addWatch = useCallback((sym) => {
-    const s = String(sym || '').trim().toUpperCase();
-    if (!s || s === 'SPX') return;
-    setWatchlist((w) => (w.includes(s) || w.length >= WATCHLIST_MAX ? w : [...w, s]));
-  }, []);
-  const removeWatch = useCallback((sym) => {
-    const s = String(sym || '').toUpperCase();
-    setWatchlist((w) => w.filter((x) => x !== s));
-  }, []);
+  // Watchlist (multi-symbol Phase B): state + persistence + socket re-send +
+  // add/remove all live in useWatchlist. feed.setWatchlist is the bridge sender.
+  const { watchlist, addWatch, removeWatch } = useWatchlist({ socketOpen: feed.socketOpen, sendWatchlist: feed.setWatchlist });
 
   // ── Layout memory (invisible — localStorage tt.* keys, matching the pattern
   // above): last timeframe PER SYMBOL, and the active symbol itself. ──
