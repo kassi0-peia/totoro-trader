@@ -61,7 +61,8 @@ export default function Chart({
   onToggleAxisChain = null,
   alerts = [],
   onMenu = null,
-  apiRef = null
+  apiRef = null,
+  fillFlash = null
 }) {
   const wrapRef = useRef(null);
   const canvasRef = useRef(null);
@@ -1126,6 +1127,20 @@ export default function Chart({
           </svg>
         </button>
       )}
+      {/* Micro fill animation: a one-shot soft pulse across the filled strike's
+          line (BUY = up color, SELL = down). DOM overlay, keyed by fill ts so a
+          refill replays it; App clears the prop shortly after it fades. */}
+      {fillFlash && view && layout && (() => {
+        const y = priceToY(fillFlash.strike);
+        if (!Number.isFinite(y) || y < layout.priceTop || y > layout.priceBot) return null;
+        return (
+          <div
+            key={fillFlash.ts}
+            className={`fill-pulse-line ${fillFlash.action === 'BUY' ? 'up' : 'down'}`}
+            style={{ top: y }}
+          />
+        );
+      })()}
     </div>
   );
 }

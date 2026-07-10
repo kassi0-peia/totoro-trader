@@ -19,6 +19,7 @@ import { expiryCutoffMs, suggestTimetable, displayRows, scanTouch } from './buss
 import BusStopPanel from './BusStopPanel.jsx';
 import { THEMES } from './themes.js';
 import { plDollars } from './pl.js';
+import { chimeFill, chimeAlert } from './sounds.js';
 
 // Blind-replay day picker: a random weekday 3–60 days back (LOCAL date parts —
 // the UTC fence eats days after 8 PM ET). Holidays aren't modeled here; they
@@ -207,25 +208,15 @@ export default function App() {
     toastTimer.current = setTimeout(() => setToast(null), 4500);
   }, []);
 
-  // Soft two-note chime on fills — money should be audible. Best-effort: the
-  // browser may block audio before the first user interaction; we just skip.
-  const chime = useCallback(() => {
-    try {
-      const Ctx = window.AudioContext || window.webkitAudioContext;
-      const ctx = new Ctx();
-      const o = ctx.createOscillator();
-      const g = ctx.createGain();
-      o.type = 'sine';
-      o.connect(g);
-      g.connect(ctx.destination);
-      o.frequency.setValueAtTime(880, ctx.currentTime);
-      o.frequency.setValueAtTime(1318.5, ctx.currentTime + 0.09); // E6 — a happy fifth-ish hop
-      g.gain.setValueAtTime(0.07, ctx.currentTime);
-      g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.35);
-      o.start();
-      o.stop(ctx.currentTime + 0.4);
-      setTimeout(() => ctx.close().catch(() => {}), 600);
-    } catch {}
+  // Sounds live in src/sounds.js now: chimeFill (the original two-note fill
+  // chime, moved verbatim) and chimeAlert (a single soft blip for ⏰ alerts).
+
+  // Micro fill animation: when a fill lands, the affected position row (and
+  // the strike line on the active chart) glow once, ~400ms, no layout shift.
+  // { strike, right, expiry, symbol, action, ts } — cleared by freshness below.
+  const [fillFlash, setFillFlash] = useState(null);
+  const markFillFlash = useCallback((msg) => {
+    setFillFlash({ strike: msg.strike, right: msg.right, expiry: msg.expiry, symbol: msg.symbol ?? 'SPX', action: msg.action, ts: Date.now() });
   }, []);
 
   // Apply IBKR order lifecycle events to local positions. Entry/exit prices come
@@ -269,7 +260,8 @@ export default function App() {
           return p;
         }));
         showToast(`BRACKET ${childMatch[2].toUpperCase()} FILLED ${msg.strike}${msg.right} @ $${Number(msg.avgFillPrice).toFixed(2)}`, 'ok');
-        chime();
+        chimeFill();
+        markFillFlash(msg);
         return;
       }
       if (msg.status === 'Cancelled' || msg.status === 'ApiCancelled') {
@@ -297,9 +289,10 @@ export default function App() {
         return p;
       }));
       showToast(`FILLED ${msg.action} ${msg.strike}${msg.right} ×? @ $${Number(msg.avgFillPrice).toFixed(2)}`.replace('×?', `×${msg.filled}`), 'ok');
-      chime();
+      chimeFill();
+      markFillFlash(msg);
     }
-  }, [showToast, chime]);
+  }, [showToast, markFillFlash]);
 
   const feed = useIbkrFeed({ onOrderEvent: handleOrderEvent });
 
@@ -335,7 +328,7 @@ export default function App() {
       if (!hits.length) continue;
       setAlerts((list) => list.filter((a) => !hits.some((h) => h.id === a.id)));
       for (const h of hits) showToast(`⏰ ${sym} crossed ${h.price.toFixed(2)}`, 'ok');
-      chime(); // swap to the dedicated alert tone when sounds.js lands
+      chimeAlert(); // the dedicated alert blip — one soft low note, not the fill chime
     }
   }, [feed.price, guest?.price, guestActive, activeSymbol, alerts]); // eslint-disable-line react-hooks/exhaustive-deps
   // The cockpit's data source. In guest mode price/candles/greeksMap/expiry/
@@ -1311,6 +1304,14 @@ export default function App() {
     }
   });
 
+  // Fill flash, fresh-gated: the `now` tick (800ms) clears the prop shortly
+  // after the ~400ms CSS animation ends; the ts retriggers it on a same-leg
+  // refill. The chart only pulses its OWN symbol's fills, and never in replay
+  // (a real overnight fill has no place on a replayed tape).
+  const fillFlashFresh = fillFlash && now - fillFlash.ts < 900 ? fillFlash : null;
+  const chartFillFlash = fillFlashFresh && !replayActive && (fillFlashFresh.symbol ?? 'SPX') === activeSymbol
+    ? fillFlashFresh : null;
+
   // Informational banner: green LIVE TRADING when the connected account is live.
   const banner = feed.accountType === 'live'
     ? { text: 'LIVE TRADING', kind: 'live' }
@@ -1520,6 +1521,7 @@ export default function App() {
               alerts={chartAlerts}
               onMenu={setChartMenu}
               apiRef={chartApiRef}
+              fillFlash={chartFillFlash}
               source={replayActive || guestActive ? 'SPX' : feed.live ? feed.source : 'SPX'}
             />
             {toast && (
@@ -1588,6 +1590,7 @@ export default function App() {
             executionEnabled={replayActive ? true : feed.executionEnabled}
             funds={feed.funds}
             dayPL={dayPL}
+            fillFlash={replayActive ? null : fillFlashFresh}
           />
         </div>
       </main>
