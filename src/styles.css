@@ -97,18 +97,20 @@ button {
 }
 /* The relative above must not reflow hosts that are intentionally absolute. */
 .snap-now-btn, .fs-btn, .axis-prem-btn, .vol-btn, .rec-btn, .quick-btn, .cw-btn, .rung-btn,
-.trades-pull, .chart-acct { position: absolute; }
+.trades-pull { position: absolute; }
 
 /* Edge-anchor tooltips on screen-edge controls so they never clip the viewport.
    The [data-tip] keeps specificity at/above the base rule so these win. */
 .fs-btn[data-tip]::after, .axis-prem-btn[data-tip]::after, .vol-btn[data-tip]::after,
 .rec-btn[data-tip]::after, .quick-btn[data-tip]::after, .snap-now-btn[data-tip]::after,
-.rung-btn[data-tip]::after, .chart-acct[data-tip]::after {
+.rung-btn[data-tip]::after, .acct-badge[data-tip]::after, .chart-acct-id[data-tip]::after,
+.acct-bus-btn[data-tip]::after, .acct-quick-btn[data-tip]::after {
   left: auto; right: -1px; transform: translateX(0) translateY(3px);
 }
 .fs-btn[data-tip]:hover::after, .axis-prem-btn[data-tip]:hover::after, .vol-btn[data-tip]:hover::after,
 .rec-btn[data-tip]:hover::after, .quick-btn[data-tip]:hover::after, .snap-now-btn[data-tip]:hover::after,
-.rung-btn[data-tip]:hover::after, .chart-acct[data-tip]:hover::after {
+.rung-btn[data-tip]:hover::after, .acct-badge[data-tip]:hover::after, .chart-acct-id[data-tip]:hover::after,
+.acct-bus-btn[data-tip]:hover::after, .acct-quick-btn[data-tip]:hover::after {
   transform: translateX(0) translateY(0);
 }
 .cw-btn[data-tip]::after, .trades-pull[data-tip]::after, .qs-replay[data-tip]::after {
@@ -1759,6 +1761,8 @@ button {
 .symbol-search-row {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
+  gap: 12px;
   padding: 3px 10px 0;
   min-height: 0;
 }
@@ -2092,12 +2096,9 @@ button {
 .trades-drawer .th-list { max-height: none; flex: 1; }
 
 /* Account badge + id overlaid on the chart's top-right corner */
+/* In-flow since 2026-07-09 (kisa): lives in the symbol-search-row beside the 🔍
+   instead of floating over the chart's top-right corner. */
 .chart-acct {
-  position: absolute;
-  top: 8px;
-  right: 72px;            /* clear the price-axis label gutter (~64px) */
-  z-index: 7;
-  transition: right 160ms;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -2108,9 +2109,6 @@ button {
   color: var(--c-muted);
   font-variant-numeric: tabular-nums;
 }
-/* Axis premiums add a second number column in the right gutter; slide the
-   account cluster further left so PAPER/LIVE never sits on top of them. */
-.chart-acct--axis { right: 110px; }
 
 .quote-strip {
   display: flex;
@@ -2276,10 +2274,11 @@ button {
     min-height: 300px;
   }
 
-  .chart-acct { top: 36px; }   /* drop below the OHLC legend so they don't overlap */
   .acct-quick-btn { display: none; }   /* quick mode is right-click → desktop only */
   .acct-bus-btn { display: none; }     /* bus stop is desktop-only (spec-bus-stop.md) */
-  .symbol-search-row { display: none; }    /* multi-symbol search is desktop-first (Phase A) */
+  /* The control line slims to just the acct badge on mobile: multi-symbol
+     search is desktop-first (Phase A), quick/bus hidden above. */
+  .symbol-search-row .symbol-search { display: none; }
 
   /* Move Close-all / IBKR to a full-width row under the timeframe buttons. */
   .tf-bar { flex-wrap: wrap; }

@@ -1217,59 +1217,12 @@ export default function App() {
               else setReplayBarOpen((v) => !v);
             }}
           />
-          {/* Symbol search: a thin right-aligned row under the ATM quote strip —
-              collapsed to a 🔍 that expands on click (kisa's placement, 07-07). */}
-          {!replayActive && (
-            <div className="symbol-search-row">
-              <SymbolSearch
-                activeSymbol={activeSymbol}
-                guestPending={activeSymbol !== 'SPX' && !guestActive}
-                results={feed.searchResults}
-                onSearch={feed.searchSymbols}
-                onActivate={activateGuest}
-                onHome={goHome}
-                live={feed.live}
-                watchSymbols={watchlist}
-                watchQuotes={feed.watchlistQuotes || {}}
-                spxQuote={{
-                  last: feed.price,
-                  changePct: feed.price != null && feed.spxClose ? ((feed.price - feed.spxClose) / feed.spxClose) * 100 : null
-                }}
-                onAddWatch={addWatch}
-                onRemoveWatch={removeWatch}
-                canAddActive={guestActive && !watchlist.includes(activeSymbol)}
-                now={now}
-              />
-            </div>
-          )}
-          {(replayBarOpen || replay != null) && (
-            <ReplayBar
-              theme={theme}
-              replay={replay}
-              loading={replayLoading}
-              onLoad={(date) => {
-                setReplayPositions([]);
-                setReplay({ date, candles: [], idx: 0, speed: 2, playing: false });
-                if (!feed.requestReplayDay(date)) showToast('Replay needs the bridge connection', 'err');
-                feed.requestJournal(); // ghost fills for this day, if any were recorded
-              }}
-              onMystery={() => {
-                mysteryTriedRef.current = new Set();
-                const date = randomPastWeekday(mysteryTriedRef.current);
-                if (!date) return;
-                setReplayPositions([]);
-                setReplay({ date, candles: [], idx: 0, speed: 2, playing: false, blind: true });
-                if (!feed.requestReplayDay(date)) showToast('Replay needs the bridge connection', 'err');
-              }}
-              onSet={(patch) => setReplay((r) => (r ? { ...r, ...patch } : r))}
-              onChangeDay={() => { setReplay(null); setReplayPositions([]); setReplayBarOpen(true); }}
-              onExit={() => { setReplay(null); setReplayPositions([]); setReplayBarOpen(false); }}
-              ghosts={dayGhosts ? { total: dayGhosts.inSession.length, outside: dayGhosts.outside, on: ghostsOn } : null}
-              onToggleGhosts={() => setReplay((r) => (r ? { ...r, ghosts: !(r.ghosts !== false) } : r))}
-            />
-          )}
-          <div className="chart-area">
-            <div className={`chart-acct${axisChain ? ' chart-acct--axis' : ''}`}>
+          {/* One control line (kisa, 2026-07-09): acct · 🚏 · ⚡ · 🔍, right-aligned
+              under the ATM strip. The acct cluster moved up from its old float
+              over the chart, so the chart's top-right corner is clean. The row
+              renders in replay too (the badge stays); only the search hides. */}
+          <div className="symbol-search-row">
+            <div className="chart-acct">
               <span className="acct-badge" style={{ color: '#0a0c12', background: acctColor }} data-tip={feed.account ? `IBKR account ${feed.account}` : 'no account connected'}>{acctLabel}</span>
               <span className="chart-acct-id" data-tip={feed.account ? `IBKR account ${feed.account}` : 'no account connected'}>{feed.account || (feed.live ? '…' : 'no acct')}</span>
               {!replayActive && !guestActive && (
@@ -1311,6 +1264,55 @@ export default function App() {
                 </button>
               )}
             </div>
+            {!replayActive && (
+              <SymbolSearch
+                activeSymbol={activeSymbol}
+                guestPending={activeSymbol !== 'SPX' && !guestActive}
+                results={feed.searchResults}
+                onSearch={feed.searchSymbols}
+                onActivate={activateGuest}
+                onHome={goHome}
+                live={feed.live}
+                watchSymbols={watchlist}
+                watchQuotes={feed.watchlistQuotes || {}}
+                spxQuote={{
+                  last: feed.price,
+                  changePct: feed.price != null && feed.spxClose ? ((feed.price - feed.spxClose) / feed.spxClose) * 100 : null
+                }}
+                onAddWatch={addWatch}
+                onRemoveWatch={removeWatch}
+                canAddActive={guestActive && !watchlist.includes(activeSymbol)}
+                now={now}
+              />
+            )}
+          </div>
+          {(replayBarOpen || replay != null) && (
+            <ReplayBar
+              theme={theme}
+              replay={replay}
+              loading={replayLoading}
+              onLoad={(date) => {
+                setReplayPositions([]);
+                setReplay({ date, candles: [], idx: 0, speed: 2, playing: false });
+                if (!feed.requestReplayDay(date)) showToast('Replay needs the bridge connection', 'err');
+                feed.requestJournal(); // ghost fills for this day, if any were recorded
+              }}
+              onMystery={() => {
+                mysteryTriedRef.current = new Set();
+                const date = randomPastWeekday(mysteryTriedRef.current);
+                if (!date) return;
+                setReplayPositions([]);
+                setReplay({ date, candles: [], idx: 0, speed: 2, playing: false, blind: true });
+                if (!feed.requestReplayDay(date)) showToast('Replay needs the bridge connection', 'err');
+              }}
+              onSet={(patch) => setReplay((r) => (r ? { ...r, ...patch } : r))}
+              onChangeDay={() => { setReplay(null); setReplayPositions([]); setReplayBarOpen(true); }}
+              onExit={() => { setReplay(null); setReplayPositions([]); setReplayBarOpen(false); }}
+              ghosts={dayGhosts ? { total: dayGhosts.inSession.length, outside: dayGhosts.outside, on: ghostsOn } : null}
+              onToggleGhosts={() => setReplay((r) => (r ? { ...r, ghosts: !(r.ghosts !== false) } : r))}
+            />
+          )}
+          <div className="chart-area">
             <Chart
               candles={replayActive ? replay.candles.slice(0, replay.idx + 1) : cockpitCandles}
               price={dispPrice}
