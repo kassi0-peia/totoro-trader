@@ -41,6 +41,21 @@ export default function Positions({ positions, theme, onClose, onReverse, onCanc
     .reduce((s, p) => s + plOf(p).dollars, 0);
   const closedPL = done.reduce((s, p) => s + (p.closedPL || 0), 0);
 
+  // Net greeks of the open book (roadmap #6, kisa's clutter rule: one line in
+  // this summary row, visible only while something is open). Per-contract
+  // greeks × 100 × qty, sign-flipped for shorts: Δ in SPX-point dollars-ish
+  // share equivalents, Θ in $/day, ν in $/vol-point.
+  const net = positions.reduce((acc, p) => {
+    if (p.status !== 'open' || !p.greeksLive) return acc;
+    const m = 100 * (p.qty || 0) * plSign(p);
+    acc.on = true;
+    acc.delta += (p.greeksLive.delta || 0) * m;
+    acc.theta += (p.greeksLive.theta || 0) * m;
+    acc.vega += (p.greeksLive.vega || 0) * m;
+    return acc;
+  }, { on: false, delta: 0, theta: 0, vega: 0 });
+  const fmtG = (v, dp = 0) => `${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(dp)}`;
+
   return (
     <div className="positions">
       <div className="pl-summary">
@@ -69,6 +84,14 @@ export default function Positions({ positions, theme, onClose, onReverse, onCanc
             <span>Day P/L</span>
             <b style={{ color: dayPL >= 0 ? theme.profit : theme.loss }}>
               {dayPL >= 0 ? '+' : '−'}${Math.abs(dayPL).toFixed(0)}
+            </b>
+          </div>
+        )}
+        {net.on && (
+          <div className="pl-block" data-tip="Net greeks of the open book: Δ share-equivalents · Θ $/day · ν $/vol pt (shorts flip sign)">
+            <span>Greeks</span>
+            <b className="net-greeks">
+              Δ{fmtG(net.delta)} · Θ{fmtG(net.theta)} · ν{fmtG(net.vega)}
             </b>
           </div>
         )}
