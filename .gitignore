@@ -42,3 +42,4 @@ totoro-review-tasks.md
 
 # personal launch helper (hardcodes ~/ibc paths)
 start-all.sh
+.claude/
