@@ -1988,6 +1988,54 @@ button {
   font-weight: 700;
   letter-spacing: 0.12em;
 }
+/* ── Right-click strike menu (⚡-off half of the chart's right-click) ── */
+.chart-menu-veil { position: fixed; inset: 0; z-index: 59; }
+.chart-menu {
+  position: fixed;
+  z-index: 60;
+  padding: 5px 0;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+.cm-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 14px;
+  width: 100%;
+  padding: 7px 12px;
+  border: none;
+  background: none;
+  color: var(--c-text);
+  font-size: 11px;
+  font-family: inherit;
+  letter-spacing: 0.04em;
+  text-align: left;
+  cursor: pointer;
+}
+.cm-item b { font-family: 'JetBrains Mono', monospace; font-weight: 700; }
+.cm-item:hover { background: var(--c-surfaceAlt); }
+.cm-sell { color: var(--c-loss, #e07d8a); }
+.cm-div { border-top: 1px solid var(--c-border); margin: 4px 0; }
+
+.modal-side-sell {
+  color: var(--c-loss, #e07d8a);
+  font-weight: 800;
+  letter-spacing: 0.12em;
+}
+.modal-short-warn {
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--c-loss, #e07d8a);
+  background: color-mix(in srgb, var(--c-loss, #e07d8a) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--c-loss, #e07d8a) 40%, transparent);
+  border-radius: 5px;
+  padding: 7px 9px;
+  margin-bottom: 12px;
+}
+
 .modal-settle-warn {
   font-size: 10.5px;
   line-height: 1.4;

@@ -58,7 +58,9 @@ export default function Chart({
   showPositions = true,
   showMarkers = true,
   quickMode = false,
-  onToggleAxisChain = null
+  onToggleAxisChain = null,
+  alerts = [],
+  onMenu = null
 }) {
   const wrapRef = useRef(null);
   const canvasRef = useRef(null);
@@ -335,7 +337,7 @@ export default function Chart({
 
     drawCandles(ctx, { view, layout, theme, priceToY, indexToX, price, positions, showPositions, source, showVolume });
 
-    drawPriceLine(ctx, { layout, theme, priceToY, price, expectedMove, rightAxis: RIGHT_AXIS });
+    drawPriceLine(ctx, { layout, theme, priceToY, price, expectedMove, alerts, rightAxis: RIGHT_AXIS });
 
     drawAxisChain(ctx, { view, layout, theme, priceToY, price, axisChain, greeksMap, ivol, timeToExpiryYears, strikeStep });
 
@@ -357,7 +359,7 @@ export default function Chart({
     }
 
     busHitsRef.current = drawBusStops(ctx, { view, layout, theme, priceToY, indexToX, price, busStops, tfCandles, tToIdx, bucketMs });
-  }, [candles, price, positions, theme, size, view, layout, priceToY, indexToX, timeframe, showMarkers, showVolume, expectedMove, axisChain, strikeStep, greeksMap, ivol, timeToExpiryYears, source, showPositions, ghostFills, busStops]);
+  }, [candles, price, positions, theme, size, view, layout, priceToY, indexToX, timeframe, showMarkers, showVolume, expectedMove, alerts, axisChain, strikeStep, greeksMap, ivol, timeToExpiryYears, source, showPositions, ghostFills, busStops]);
 
   // wheel zoom — attach non-passive so we can preventDefault page scroll
   useEffect(() => {
@@ -836,7 +838,20 @@ export default function Chart({
         onClick={handleClickEvent}
         onContextMenu={(e) => {
           e.preventDefault(); // chart owns right-click; no browser menu
-          if (quickMode && onQuickTrade && hover && hover.future && !markerHover) onQuickTrade(hover.strike, hover.type, hover.ask ?? null);
+          // Two modes, one gesture: ⚡ armed = the instant quick order (unchanged);
+          // ⚡ off = the strike menu (buy/sell C/P, alert here). Needs a real
+          // price row under the cursor — the axis/time gutters get no menu.
+          if (quickMode && onQuickTrade && hover && hover.future && !markerHover) {
+            onQuickTrade(hover.strike, hover.type, hover.ask ?? null);
+            return;
+          }
+          if (!quickMode && onMenu && cursor && Number.isFinite(cursor.price)) {
+            const near = alerts.find((a) => Math.abs(priceToY(a.price) - cursor.y) <= 8);
+            onMenu({
+              x: e.clientX, y: e.clientY, price: cursor.price,
+              alertId: near ? near.id : null, alertPrice: near ? near.price : null
+            });
+          }
         }}
         onTouchStart={handleTouchStart}
         onTouchMove={handleTouchMove}

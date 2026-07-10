@@ -10,30 +10,37 @@ export default function TradeModal({ pending, theme, series, onRefresh, onCancel
   const canvasRef = useRef(null);
   const [cursor, setCursor] = useState(null); // {x,y} over the premium graph
   const [qty, setQty] = useState(1);
+  // SELL-to-open ticket (from the chart's right-click menu): limit-only — with
+  // no limit the bridge routes a real MKT, and a market sell into the thin
+  // overnight book is a blank check in the worst direction.
+  const sell = pending?.side === 'sell';
   // Guest orders are marketable limits only (the bridge rejects a guest MKT), so
   // the ticket opens on LMT and the MKT arm is disabled. SPX defaults to MKT.
-  const [orderKind, setOrderKind] = useState(guest ? 'LMT' : 'MKT');
+  const [orderKind, setOrderKind] = useState(guest || sell ? 'LMT' : 'MKT');
   const [limitStr, setLimitStr] = useState('');
   const [tpStr, setTpStr] = useState('');  // optional bracket take-profit (SELL LMT, native — works overnight)
   const [slStr, setSlStr] = useState('');  // optional bracket stop (IBKR-simulated; unreliable pre-midnight)
 
   useEffect(() => {
     setQty(1);
-    setOrderKind(guest ? 'LMT' : 'MKT');
-    // Prefill the limit field with the live ask so switching to LMT is one click
-    // (and, in guest mode, so the pre-selected LMT ticket already has a price).
-    setLimitStr(pending?.ask != null ? pending.ask.toFixed(2) : '');
+    setOrderKind(guest || sell ? 'LMT' : 'MKT');
+    // Prefill the limit with the side you cross to: BUY lifts the ask, a SELL
+    // hits the bid — so the pre-filled ticket is already marketable.
+    const px = sell ? pending?.bid : pending?.ask;
+    setLimitStr(px != null ? px.toFixed(2) : '');
     setTpStr('');
     setSlStr('');
   }, [pending?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const limit = orderKind === 'LMT' ? parseFloat(limitStr) : null;
   const limitOk = orderKind === 'MKT' || (Number.isFinite(limit) && limit > 0);
+  const sellOk = !sell || (orderKind === 'LMT' && Number.isFinite(limit) && limit > 0);
   const tp = tpStr.trim() === '' ? null : parseFloat(tpStr);
   const sl = slStr.trim() === '' ? null : parseFloat(slStr);
-  const bracketOk = (tp == null || (Number.isFinite(tp) && tp > 0)) && (sl == null || (Number.isFinite(sl) && sl > 0));
-  const canExecute = executionEnabled && limitOk && bracketOk;
-  const execute = () => canExecute && onExecute(qty, orderKind === 'LMT' ? limit : null, tp, sl);
+  const bracketOk = sell || ((tp == null || (Number.isFinite(tp) && tp > 0)) && (sl == null || (Number.isFinite(sl) && sl > 0)));
+  const canExecute = executionEnabled && limitOk && bracketOk && sellOk;
+  // Brackets are BUY-to-open only (the bridge ignores them on a SELL).
+  const execute = () => canExecute && onExecute(qty, orderKind === 'LMT' ? limit : null, sell ? null : tp, sell ? null : sl);
 
   useEffect(() => {
     const onKey = (e) => {
@@ -180,6 +187,8 @@ export default function TradeModal({ pending, theme, series, onRefresh, onCancel
   const spread = hasQuote ? ask - bid : null;
   // Market BUY pays the ask (when quoted); a limit BUY can't pay more than the limit.
   const maxRisk = (orderKind === 'LMT' && Number.isFinite(limit) ? limit : hasQuote ? ask : greeks.premium) * 100 * qty;
+  // A SELL collects at most the limit (the credit) — the risk is on the other side.
+  const credit = (Number.isFinite(limit) ? limit : bid != null ? bid : greeks.premium) * 100 * qty;
 
   return (
     <div className="modal-backdrop" onClick={onCancel}>
@@ -189,6 +198,7 @@ export default function TradeModal({ pending, theme, series, onRefresh, onCancel
         style={{ borderColor: color }}
       >
         <div className="modal-head">
+          {sell && <span className="modal-side-sell">SELL</span>}
           {guest && symbol && <span className="modal-sym" style={{ color }}>{symbol}</span>}
           <span className="modal-type" style={{ color }}>
             {type === 'call' ? 'CALL' : 'PUT'}
@@ -197,6 +207,13 @@ export default function TradeModal({ pending, theme, series, onRefresh, onCancel
           {/* SPX 0DTE shows "0DTE"; a guest shows its real nearest-weekly date. */}
           <span className="modal-exp">{guest ? (expLabel ? `W ${expLabel}` : 'weekly') : '0DTE'}</span>
         </div>
+
+        {sell && (
+          <div className="modal-short-warn">
+            SELL to open — a short option. You collect the credit up front, but the
+            loss can exceed it{type === 'call' ? ' without limit if price runs above the strike' : ' all the way to zero'}; margin is required.
+          </div>
+        )}
 
         {physical && (
           <div className="modal-settle-warn" data-tip="Unlike SPX (cash-settled), equity options settle into shares.">
@@ -241,9 +258,9 @@ export default function TradeModal({ pending, theme, series, onRefresh, onCancel
           <div className="order-kind">
             <button
               className={`kind-btn${orderKind === 'MKT' ? ' active' : ''}`}
-              onClick={() => !guest && setOrderKind('MKT')}
-              disabled={guest}
-              data-tip={guest ? 'Guest orders are marketable limits only — MKT is SPX-only in Phase A' : undefined}
+              onClick={() => !guest && !sell && setOrderKind('MKT')}
+              disabled={guest || sell}
+              data-tip={sell ? 'Sells are limit-only — a market sell into a thin book is a blank check' : guest ? 'Guest orders are marketable limits only — MKT is SPX-only in Phase A' : undefined}
             >MKT</button>
             <button
               className={`kind-btn${orderKind === 'LMT' ? ' active' : ''}`}
@@ -264,6 +281,7 @@ export default function TradeModal({ pending, theme, series, onRefresh, onCancel
           </div>
         </div>
 
+        {!sell && (
         <div className="qty-row">
           <span className="qty-label">Bracket</span>
           <div className="order-kind">
@@ -293,10 +311,11 @@ export default function TradeModal({ pending, theme, series, onRefresh, onCancel
             />
           </div>
         </div>
+        )}
 
         <div className="risk-row">
-          <span>Max Risk</span>
-          <b style={{ color: theme.loss }}>${maxRisk.toFixed(0)}</b>
+          <span>{sell ? 'Credit' : 'Max Risk'}</span>
+          <b style={{ color: sell ? theme.profit : theme.loss }}>${(sell ? credit : maxRisk).toFixed(0)}</b>
         </div>
 
         {!executionEnabled && (
@@ -311,11 +330,11 @@ export default function TradeModal({ pending, theme, series, onRefresh, onCancel
           <button className="btn-ghost" onClick={onCancel}>Cancel</button>
           <button
             className="btn-execute"
-            style={{ background: canExecute ? color : theme.surfaceAlt, color: canExecute ? '#0a0c12' : theme.muted, cursor: canExecute ? 'pointer' : 'not-allowed' }}
+            style={{ background: canExecute ? (sell ? theme.loss : color) : theme.surfaceAlt, color: canExecute ? '#0a0c12' : theme.muted, cursor: canExecute ? 'pointer' : 'not-allowed' }}
             onClick={execute}
             disabled={!canExecute}
           >
-            {!executionEnabled ? 'DISABLED' : orderKind === 'LMT' ? `BUY LMT ${limitOk ? limitStr : '…'}` : 'EXECUTE'}
+            {!executionEnabled ? 'DISABLED' : sell ? `SELL LMT ${limitOk ? limitStr : '…'}` : orderKind === 'LMT' ? `BUY LMT ${limitOk ? limitStr : '…'}` : 'EXECUTE'}
           </button>
         </div>
       </div>

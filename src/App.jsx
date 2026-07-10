@@ -10,6 +10,8 @@ import ThemePanel from './ThemePanel.jsx';
 import TimeframeBar from './TimeframeBar.jsx';
 import QuoteStrip from './QuoteStrip.jsx';
 import SymbolSearch from './SymbolSearch.jsx';
+import ChartMenu from './ChartMenu.jsx';
+import { crossed } from './alerts.js';
 import { useIbkrFeed, liveGreeks, liveQuote } from './feed.js';
 import { greeks as bsGreeks, nearestOtmStrike } from './options.js';
 import { expiryCutoffMs, suggestTimetable, displayRows, scanTouch } from './busstop.js';
@@ -146,6 +148,22 @@ export default function App() {
   useEffect(() => {
     try { localStorage.setItem('tt.busStops', JSON.stringify(busStops)); } catch {}
   }, [busStops]);
+  // ⏰ one-shot price alerts (kisa, 2026-07-09): armed from the chart's
+  // right-click menu, drawn as dashed lines only while armed, removed the
+  // moment the live tape crosses (toast + chime). Zero resting chrome — the
+  // line IS the feature. Persisted so a reload doesn't disarm the night's
+  // levels; SPX alerts watch the SPX-equiv price, so they work overnight too.
+  const [alerts, setAlerts] = useState(() => {
+    try {
+      const v = JSON.parse(localStorage.getItem('tt.alerts') || '[]');
+      if (Array.isArray(v)) return v.filter((a) => a && typeof a.symbol === 'string' && Number.isFinite(a.price));
+    } catch {}
+    return [];
+  });
+  useEffect(() => {
+    try { localStorage.setItem('tt.alerts', JSON.stringify(alerts)); } catch {}
+  }, [alerts]);
+  const [chartMenu, setChartMenu] = useState(null); // {x, y, price, alertId, alertPrice}
   useEffect(() => {
     try {
       localStorage.setItem('tt.axischain', axisChain ? '1' : '0');
@@ -274,6 +292,27 @@ export default function App() {
   const [activeSymbol, setActiveSymbol] = useState('SPX');
   const guestActive = activeSymbol !== 'SPX' && !!feed.guest && feed.guest.symbol === activeSymbol;
   const guest = guestActive ? feed.guest : null;
+
+  // Fire ⏰ alerts on a live crossing. SPX alerts check feed.price (the
+  // SPX-equiv proxy overnight — "ping when SPX-equiv crosses X"); a guest's
+  // alerts can only fire while that guest is active (its price only streams
+  // then). First tick after load primes the previous price without firing.
+  const alertPrevRef = useRef({});
+  useEffect(() => {
+    const tapes = [['SPX', feed.price]];
+    if (guestActive && guest?.price != null) tapes.push([activeSymbol, guest.price]);
+    for (const [sym, px] of tapes) {
+      if (px == null) continue;
+      const prev = alertPrevRef.current[sym];
+      alertPrevRef.current[sym] = px;
+      if (prev == null || prev === px) continue;
+      const hits = alerts.filter((a) => a.symbol === sym && crossed(prev, px, a.price));
+      if (!hits.length) continue;
+      setAlerts((list) => list.filter((a) => !hits.some((h) => h.id === a.id)));
+      for (const h of hits) showToast(`⏰ ${sym} crossed ${h.price.toFixed(2)}`, 'ok');
+      chime(); // swap to the dedicated alert tone when sounds.js lands
+    }
+  }, [feed.price, guest?.price, guestActive, activeSymbol, alerts]); // eslint-disable-line react-hooks/exhaustive-deps
   // The cockpit's data source. In guest mode price/candles/greeksMap/expiry/
   // strikeStep come from feed.guest; otherwise the SPX feed, untouched. Replay is
   // disabled in guest mode, so these never collide with replay's own price/time.
@@ -282,6 +321,12 @@ export default function App() {
   const cockpitGreeksMap = guestActive ? feed.guestGreeksMap : feed.greeksMap;
   const cockpitExpiry = guestActive ? guest.expiry : feed.expiry;
   const strikeStep = guestActive ? (guest.strikeStep || 5) : 5;
+  // Only the active cockpit's alerts draw on its chart; replay draws none (the
+  // replayed tape is the past — today's levels would be noise on it).
+  const chartAlerts = useMemo(
+    () => (replayActive ? [] : alerts.filter((a) => a.symbol === activeSymbol)),
+    [alerts, activeSymbol, replayActive]
+  );
 
   // Return home: deactivate the guest and snap the cockpit back to SPX.
   const goHome = useCallback(() => {
@@ -819,11 +864,11 @@ export default function App() {
   })();
 
 
-  const handleRequestTrade = ({ strike, type, busStopId = null }) => {
+  const handleRequestTrade = ({ strike, type, side = 'buy', busStopId = null }) => {
     const g = resolveGreeks(strike, type);
     const q = replayActive ? null : liveQuote(cockpitGreeksMap, strike, type);
     setPending({
-      id: Date.now(), strike, type, greeks: g, bid: q?.bid, ask: q?.ask, busStopId,
+      id: Date.now(), strike, type, side, greeks: g, bid: q?.bid, ask: q?.ask, busStopId,
       // Guest ticket context for the modal (symbol, expiry, settlement warning).
       ...(guestActive ? { symbol: activeSymbol, expiry: guest.expiry, settlement: guest.settlement } : {})
     });
@@ -846,16 +891,22 @@ export default function App() {
     if (!feed.executionEnabled) { showToast('Execution disabled', 'err'); return; }
     // Guest orders MUST be a marketable limit — the bridge rejects a guest MKT.
     if (guestActive && limit == null) { showToast('Guest orders need a limit price', 'err'); return; }
+    // Sell-to-open is limit-only, same rule as guests: with no limit the bridge
+    // routes a real MKT, and a market SELL into the thin overnight book is a
+    // blank check in the worst direction. The modal enforces this; belt here.
+    const sell = pending.side === 'sell';
+    if (sell && limit == null) { showToast('Sell orders need a limit price', 'err'); return; }
     const ref = feed.sendOrder({
-      intent: 'open', action: 'BUY', strike: pending.strike, right: rightOf(pending.type), qty, expiry: cockpitExpiry,
+      intent: 'open', action: sell ? 'SELL' : 'BUY', strike: pending.strike, right: rightOf(pending.type), qty, expiry: cockpitExpiry,
       ...(guestActive ? { symbol: activeSymbol } : {}),
       ...(limit != null ? { limit } : {}),
-      ...(takeProfit != null ? { takeProfit } : {}),
-      ...(stopLoss != null ? { stopLoss } : {})
+      // Brackets are BUY-to-open only (the bridge ignores them on a SELL).
+      ...(!sell && takeProfit != null ? { takeProfit } : {}),
+      ...(!sell && stopLoss != null ? { stopLoss } : {})
     });
     if (!ref) { showToast('Order not sent — not connected', 'err'); return; }
     setPositions((prev) => [...prev, {
-      id: posSeq++, symbol: activeSymbol, type: pending.type, side: 'long', strike: pending.strike, qty, expiry: cockpitExpiry,
+      id: posSeq++, symbol: activeSymbol, type: pending.type, side: sell ? 'short' : 'long', strike: pending.strike, qty, expiry: cockpitExpiry,
       status: 'pending', openRef: ref, entryPremium: null, estPremium: limit ?? pending.greeks.premium,
       entryPrice: cockpitPrice, openedAt: Date.now(), greeksLive: pending.greeks
     }]);
@@ -1351,6 +1402,8 @@ export default function App() {
               showPositions={showPositions}
               showMarkers={showMarkers}
               quickMode={guestActive && quickMode === 'market' ? 'limit' : quickMode}
+              alerts={chartAlerts}
+              onMenu={setChartMenu}
               source={replayActive || guestActive ? 'SPX' : feed.live ? feed.source : 'SPX'}
             />
             {toast && (
@@ -1419,6 +1472,29 @@ export default function App() {
         </div>
       </main>
 
+      {chartMenu && !pending && (() => {
+        // Snap the menu's strike to the active grid (SPX 5s; a guest's real step).
+        const mStrike = Math.round(chartMenu.price / strikeStep) * strikeStep;
+        return (
+          <ChartMenu
+            menu={chartMenu}
+            strike={mStrike}
+            live={feed.live}
+            replayActive={replayActive}
+            executionEnabled={feed.executionEnabled}
+            onBuy={(type) => { setChartMenu(null); handleRequestTrade({ strike: mStrike, type }); }}
+            onSell={(type) => { setChartMenu(null); handleRequestTrade({ strike: mStrike, type, side: 'sell' }); }}
+            onAlert={(price) => {
+              const p = Math.round(price * 100) / 100;
+              setAlerts((l) => [...l, { id: Date.now(), symbol: activeSymbol, price: p, createdAt: Date.now() }]);
+              setChartMenu(null);
+              showToast(`⏰ alert armed at ${p.toFixed(2)}`, 'ok');
+            }}
+            onRemoveAlert={(id) => { setAlerts((l) => l.filter((a) => a.id !== id)); setChartMenu(null); }}
+            onClose={() => setChartMenu(null)}
+          />
+        );
+      })()}
       <TradeModal
         pending={pending}
         theme={theme}
