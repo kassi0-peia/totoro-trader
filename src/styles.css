@@ -2150,6 +2150,10 @@ button {
   display: flex;
   align-items: center;
   gap: 8px;
+  /* End the cluster left of the chart's ~64px price-label gutter (the old
+     float cleared it with right:72px; the row merge lost that — kisa
+     2026-07-10). The 🔍 alone stays at the edge, her 07-07 placement. */
+  margin-right: 28px;
   font-size: 10px;
   letter-spacing: 0.08em;
 }
