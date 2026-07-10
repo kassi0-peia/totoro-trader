@@ -7,9 +7,10 @@ import TradeModal from './TradeModal.jsx';
 import PositionModal from './PositionModal.jsx';
 import ReplayBar from './ReplayBar.jsx';
 import ThemePanel from './ThemePanel.jsx';
-import TimeframeBar from './TimeframeBar.jsx';
+import TimeframeBar, { TF_OPTIONS } from './TimeframeBar.jsx';
 import QuoteStrip from './QuoteStrip.jsx';
-import SymbolSearch from './SymbolSearch.jsx';
+import SymbolSearch, { searchPopover } from './SymbolSearch.jsx';
+import useHotkeys from './useHotkeys.js';
 import ChartMenu from './ChartMenu.jsx';
 import { crossed } from './alerts.js';
 import { useIbkrFeed, liveGreeks, liveQuote } from './feed.js';
@@ -103,13 +104,8 @@ export default function App() {
     hoverOpenRef.current = setTimeout(openTrades, 1500);
   }, [tradesPeek, openTrades]);
   const disarmHoverOpen = useCallback(() => clearTimeout(hoverOpenRef.current), []);
-  // Esc closes the trades peek drawer.
-  useEffect(() => {
-    if (!tradesPeek) return;
-    const onKey = (e) => { if (e.key === 'Escape') closeTrades(); };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-  }, [tradesPeek, closeTrades]);
+  // (Esc-closes-the-drawer moved into the keyboard layer's single prioritized
+  // Esc chain below — one close per press, top-most surface first.)
   // Unmount the drawer after its slide-out animation finishes (deterministic).
   useEffect(() => {
     if (tradesPeek || !drawerMounted) return;
@@ -1204,6 +1200,53 @@ export default function App() {
     triggerPulse();
   };
 
+  // ── Keyboard layer (invisible cockpit controls — src/useHotkeys.js) ──
+  // 1..N timeframes · Esc closes the top-most transient · Space snaps the
+  // chart to now · C/P arm a confirm ticket (never sends an order directly).
+  const chartApiRef = useRef(null); // Chart's imperative surface: { snapToNow, hover }
+  const hotkeysLive = feed.live || replayActive; // everything but Esc needs a tape
+  useHotkeys({
+    onEscape: () => {
+      // ONE close per press, top-most first. TradeModal and ChartMenu already
+      // close THEMSELVES on Esc (their own window listeners), as does the
+      // replay calendar popover and the focused search input — when any of
+      // those is up we only consume the press so nothing below also closes.
+      if (pending) return;
+      if (chartMenu) return;
+      if (document.querySelector('.replay-cal-pop')) return;
+      if (inspectId != null) { setInspectId(null); return; }
+      if (busPanelId != null) { setBusPanelId(null); return; }
+      if (searchPopover.isOpen()) { searchPopover.close(); return; }
+      if (tradesPeek) { closeTrades(); return; }
+      // The replay BAR closes only while idle (picking a day) — Esc must never
+      // dump an active practice session's progress.
+      if (replayBarOpen && replay == null) setReplayBarOpen(false);
+    },
+    onDigit: (n) => {
+      if (!hotkeysLive) return false;
+      const o = TF_OPTIONS[n - 1];
+      if (!o) return false;
+      setTimeframe(o.value);
+      return true;
+    },
+    onSpace: () => {
+      if (!hotkeysLive) return false;
+      chartApiRef.current?.snapToNow?.();
+      return true;
+    },
+    onTicket: (type) => {
+      // C/P work in replay too — practice tickets are the point of replay.
+      if (!hotkeysLive) return false;
+      if (pending || chartMenu) return false; // a ticket/menu is already up
+      const hov = chartApiRef.current?.hover;
+      const S = replayActive ? dispPrice : cockpitPrice;
+      const strike = hov ? hov.strike : (Number.isFinite(S) ? nearestOtmStrike(S, type, strikeStep) : null);
+      if (!Number.isFinite(strike)) return false;
+      handleRequestTrade({ strike, type }); // same confirm-modal path as a chart click
+      return true;
+    }
+  });
+
   // Informational banner: green LIVE TRADING when the connected account is live.
   const banner = feed.accountType === 'live'
     ? { text: 'LIVE TRADING', kind: 'live' }
@@ -1412,6 +1455,7 @@ export default function App() {
               quickMode={guestActive && quickMode === 'market' ? 'limit' : quickMode}
               alerts={chartAlerts}
               onMenu={setChartMenu}
+              apiRef={chartApiRef}
               source={replayActive || guestActive ? 'SPX' : feed.live ? feed.source : 'SPX'}
             />
             {toast && (

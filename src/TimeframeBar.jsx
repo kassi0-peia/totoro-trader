@@ -9,6 +9,10 @@ const OPTIONS = [
   { label: '1D', value: 1440 }
 ];
 
+// The tf-bar order, exported for the keyboard layer (number keys 1..N select
+// these) and for validating persisted timeframe values.
+export const TF_OPTIONS = OPTIONS;
+
 export default function TimeframeBar({ value, onChange, theme, onCloseAll, canCloseAll, onReplay = null, replayOn = false }) {
   return (
     <div className="tf-bar">
