@@ -2475,3 +2475,34 @@ button {
   line-height: 1.5;
   flex: none;
 }
+
+/* ============ MICRO FILL ANIMATION (sounds.js's visual twin) ============ */
+
+/* Position row glow: one soft ~400ms wash + a colored edge bar when that
+   leg's fill lands. BUY = theme up color, SELL = down. No layout shift —
+   background + inset shadow only. */
+@keyframes pos-fill-flash {
+  from { background-color: color-mix(in srgb, var(--flash-c) 20%, transparent); box-shadow: inset 3px 0 0 var(--flash-c); }
+  to   { background-color: transparent; box-shadow: inset 3px 0 0 transparent; }
+}
+.pos-flash-buy  { --flash-c: var(--c-up);   animation: pos-fill-flash 420ms ease-out; }
+.pos-flash-sell { --flash-c: var(--c-down); animation: pos-fill-flash 420ms ease-out; }
+
+/* Chart pulse: the filled strike's line flashes once and fades. Overlay div
+   (no canvas churn), clipped to the plot area (right price gutter excluded). */
+.fill-pulse-line {
+  position: absolute;
+  left: 0;
+  right: 64px;             /* RIGHT_AXIS gutter */
+  height: 0;
+  border-top: 2px solid var(--flash-c);
+  pointer-events: none;
+  z-index: 6;
+  animation: fill-pulse-line 480ms ease-out forwards;
+}
+.fill-pulse-line.up   { --flash-c: var(--c-up); }
+.fill-pulse-line.down { --flash-c: var(--c-down); }
+@keyframes fill-pulse-line {
+  from { opacity: 0.9; box-shadow: 0 0 12px 2px var(--flash-c); }
+  to   { opacity: 0;   box-shadow: 0 0 0 0 transparent; }
+}

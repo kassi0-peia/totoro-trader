@@ -14,10 +14,20 @@ function fmtMoney(v) {
   return v.toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
 }
 
-export default function Positions({ positions, theme, onClose, onReverse, onCancelOrder, onCancelWorkingOrder, onInspect, onHoverPos, workingOrders = [], executionEnabled = false, funds = null, dayPL = null }) {
+export default function Positions({ positions, theme, onClose, onReverse, onCancelOrder, onCancelWorkingOrder, onInspect, onHoverPos, workingOrders = [], executionEnabled = false, funds = null, dayPL = null, fillFlash = null }) {
   // "Working" = open, or any in-flight order (pending fill / closing).
   const working = positions.filter((p) => p.status === 'open' || p.status === 'pending' || p.status === 'closing');
   const done = positions.filter((p) => p.status === 'closed' || p.status === 'rejected');
+
+  // Micro fill animation: the row whose leg just filled glows once (~400ms,
+  // theme up/down color, no layout shift). The key suffix retriggers the CSS
+  // animation on a same-leg refill; App clears the prop on its `now` tick.
+  const flashKey = fillFlash
+    ? `${fillFlash.strike}|${fillFlash.right}|${fillFlash.expiry}|${fillFlash.symbol ?? 'SPX'}`
+    : null;
+  const flashOf = (p) => (flashKey && `${p.strike}|${p.type === 'call' ? 'C' : 'P'}|${p.expiry}|${p.symbol ?? 'SPX'}` === flashKey
+    ? { cls: fillFlash.action === 'BUY' ? ' pos-flash-buy' : ' pos-flash-sell', k: `:${fillFlash.ts}` }
+    : { cls: '', k: '' });
 
   // Server-truth working orders, minus ones already represented by a local
   // in-flight row (the device that placed an order shows it as FILLING/CLOSING).
@@ -93,10 +103,11 @@ export default function Positions({ positions, theme, onClose, onReverse, onCanc
           const inflight = p.status === 'pending' || p.status === 'closing';
           const tag = p.status === 'pending' ? 'FILLING' : p.status === 'closing' ? 'CLOSING' : null;
           const { live, dollars, pct } = plOf(p);
+          const flash = flashOf(p);
           return (
             <div
-              className={`pos-row${p.status === 'open' ? ' pos-row-click' : ''}`}
-              key={p.id}
+              className={`pos-row${p.status === 'open' ? ' pos-row-click' : ''}${flash.cls}`}
+              key={`${p.id}${flash.k}`}
               onClick={() => p.status === 'open' && onInspect?.(p)}
               onMouseEnter={(e) => p.status === 'open' && onHoverPos?.(p, e.clientX, e.clientY)}
               onMouseLeave={() => p.status === 'open' && onHoverPos?.(null)}
@@ -145,8 +156,9 @@ export default function Positions({ positions, theme, onClose, onReverse, onCanc
 
         {done.map((p) => {
           const rejected = p.status === 'rejected';
+          const flash = p.status === 'closed' ? flashOf(p) : { cls: '', k: '' };
           return (
-            <div className="pos-row pos-row-closed" key={p.id}>
+            <div className={`pos-row pos-row-closed${flash.cls}`} key={`${p.id}${flash.k}`}>
               <span className="pos-type" style={{ background: theme.surfaceAlt, color: theme.muted }}>
                 {p.type === 'call' ? 'C' : 'P'}
               </span>
