@@ -303,6 +303,13 @@ button {
   margin: 2px 0;
 }
 
+/* Staleness heartbeat: the header says LIVE but no tick has landed for a few
+   seconds — dim the big price so a frozen feed never looks live. */
+.price.price-stale {
+  opacity: 0.38;
+  transition: opacity 300ms ease;
+}
+
 .change {
   font-size: 12px;
   font-variant-numeric: tabular-nums;
