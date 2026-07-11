@@ -17,6 +17,7 @@ import useBottomDrawer from './useBottomDrawer.js';
 import ChartMenu from './ChartMenu.jsx';
 import { useIbkrFeed, liveGreeks, liveQuote } from './feed.js';
 import { greeks as bsGreeks, nearestOtmStrike, realizedVol } from './options.js';
+import { classifyRegime } from './regime.js';
 import { expiryCutoffMs, suggestTimetable, displayRows, scanTouch } from './busstop.js';
 import BusStopPanel from './BusStopPanel.jsx';
 import { THEMES } from './themes.js';
@@ -557,6 +558,18 @@ export default function App() {
   // Replay keeps exact time — the tape drives it, not the clock.
   const tSlow = Math.floor(now / 30_000) * 30_000;
   const T = useMemo(() => timeToExpiryYearsAt(replayActive ? replayNow : tSlow), [tSlow, replayActive, replayNow]);
+
+  // Regime read (trend vs chop) over the trailing ~60m of the cockpit's 1-min
+  // candles. Recompute on the 30s tSlow clock and whenever a NEW bar opens
+  // (candle count changes) — NOT on every intra-bar tick (a tick mutates the last
+  // bar's close but not the count, so this stays quiet second-to-second).
+  // Replay: recompute as the tape advances, but ONLY over candles revealed so far
+  // (slice to the replay index — no future leakage). QuoteStrip hides it when
+  // 'unknown' (zero pixels when uncertain).
+  const regime = useMemo(() => {
+    const src = replayActive ? replay.candles.slice(0, replay.idx + 1) : cockpitCandles;
+    return classifyRegime(src);
+  }, [tSlow, replayActive, replay?.idx, cockpitCandles.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Model sigma, vol-aware (kisa's weekend pick, 2026-07-11): the flat 18%
   // guess overpriced everything when real vol sat near 11% (mark-audit).
@@ -1433,6 +1446,7 @@ export default function App() {
             greeksMap={cockpitGreeksMap}
             atmStep={strikeStep}
             vix={feed.vix}
+            regime={regime}
             theme={theme}
             replayOn={replay != null || replayBarOpen}
             // Replay is SPX-only (disabled in guest mode). VIX stays (global).
