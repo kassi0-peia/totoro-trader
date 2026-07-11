@@ -26,7 +26,7 @@ const rightOf = (type) => (type === 'call' ? 'C' : 'P');
 // on a SELL) and are only spread when present.
 export function buildOpenOrder({
   side, strike, type, qty, limit = null, takeProfit = null, stopLoss = null,
-  guestActive, activeSymbol, cockpitExpiry,
+  guestActive, activeSymbol, cockpitExpiry, refAtSend = null,
 }) {
   if (guestActive && limit == null) return { ok: false, reason: 'Guest orders need a limit price' };
   const sell = side === 'sell';
@@ -37,6 +37,9 @@ export function buildOpenOrder({
     ...(limit != null ? { limit } : {}),
     ...(!sell && takeProfit != null ? { takeProfit } : {}),
     ...(!sell && stopLoss != null ? { stopLoss } : {}),
+    // Fill-quality reference (kisa 2026-07-11): the mid at the moment of send —
+    // the bridge stamps it onto the fill row so slippage is measurable later.
+    ...(Number.isFinite(refAtSend) && refAtSend > 0 ? { refAtSend } : {}),
   };
   return { ok: true, payload };
 }
@@ -64,6 +67,12 @@ export function buildQuickOrder({
     intent: 'open', action: 'BUY', strike, right: rightOf(type), qty: 1, expiry: cockpitExpiry,
     ...(guestActive ? { symbol: activeSymbol } : {}),
     ...(market ? {} : { limit }),
+    // ⚡ orders exist for THIS moment only (kisa 2026-07-11): `quick` asks the
+    // bridge to auto-cancel if still unfilled after its window — no chase, a
+    // self-repricing order is a robot; she gets a toast instead. refAtSend is
+    // the ask she saw, so the fill row records what hurrying cost.
+    quick: true,
+    refAtSend: ask,
   };
   return { ok: true, payload, market, limit };
 }

@@ -218,6 +218,9 @@ export default function App() {
   // Micro fill animation: when a fill lands, the affected position row (and
   // the strike line on the active chart) glow once, ~400ms, no layout shift.
   // { strike, right, expiry, symbol, action, ts } — cleared by freshness below.
+  // Fill-quality: remember the reference price each order was sent against
+  // (clientRef → {px, kind}) so the fill toast can say what hurrying cost.
+  const refAtSendRef = useRef({});
   const [fillFlash, setFillFlash] = useState(null);
   const markFillFlash = useCallback((msg) => {
     setFillFlash({ strike: msg.strike, right: msg.right, expiry: msg.expiry, symbol: msg.symbol ?? 'SPX', action: msg.action, ts: Date.now() });
@@ -235,6 +238,13 @@ export default function App() {
     if (msg.type === 'orderWarning') {
       // Non-fatal (e.g. "held until the open") — keep the working position, just notify.
       showToast(`Order note: ${msg.reason}`, 'err');
+      return;
+    }
+    if (msg.type === 'orderAutoCancel') {
+      // A ⚡ order outlived its moment (unfilled past the bridge's window) and
+      // was cancelled server-side. The IBKR Cancelled status follows and does
+      // the position cleanup; this toast carries the WHY.
+      showToast(`⚡ ${msg.strike}${msg.right} auto-cancelled — ${msg.reason}`, 'err');
       return;
     }
     if (msg.type === 'orderError') {
@@ -293,7 +303,12 @@ export default function App() {
         }
         return p;
       }));
-      showToast(`FILLED ${msg.action} ${msg.strike}${msg.right} ×? @ $${Number(msg.avgFillPrice).toFixed(2)}`.replace('×?', `×${msg.filled}`), 'ok');
+      // Fill quality: how far the fill landed from the price seen at send —
+      // the number that teaches which moments are expensive to hurry.
+      const sent = refAtSendRef.current[msg.clientRef];
+      const d = sent && sent.px > 0 ? Number(msg.avgFillPrice) - sent.px : null;
+      const refNote = d != null ? ` · ${d >= 0 ? '+' : '−'}$${Math.abs(d).toFixed(2)} vs ${sent.kind}@send` : '';
+      showToast(`FILLED ${msg.action} ${msg.strike}${msg.right} ×? @ $${Number(msg.avgFillPrice).toFixed(2)}${refNote}`.replace('×?', `×${msg.filled}`), 'ok');
       chimeFill();
       markFillFlash(msg);
     }
@@ -991,13 +1006,15 @@ export default function App() {
     if (!feed.executionEnabled) { showToast('Execution disabled', 'err'); return; }
     const sell = pending.side === 'sell';
     // Payload + guest/sell limit guards live in buildOpenOrder (order-payload.js).
+    const refAtSend = pending.bid != null && pending.ask != null ? (pending.bid + pending.ask) / 2 : null;
     const built = buildOpenOrder({
       side: pending.side, strike: pending.strike, type: pending.type, qty, limit, takeProfit, stopLoss,
-      guestActive, activeSymbol, cockpitExpiry
+      guestActive, activeSymbol, cockpitExpiry, refAtSend
     });
     if (!built.ok) { showToast(built.reason, 'err'); return; }
     const ref = feed.sendOrder(built.payload);
     if (!ref) { showToast('Order not sent — not connected', 'err'); return; }
+    if (refAtSend != null) refAtSendRef.current[ref] = { px: refAtSend, kind: 'mid' };
     setPositions((prev) => [...prev, {
       id: posSeq++, symbol: activeSymbol, type: pending.type, side: sell ? 'short' : 'long', strike: pending.strike, qty, expiry: cockpitExpiry,
       status: 'pending', openRef: ref, entryPremium: null, estPremium: limit ?? pending.greeks.premium,
@@ -1037,6 +1054,7 @@ export default function App() {
     const { payload, market, limit } = built;
     const ref = feed.sendOrder(payload);
     if (!ref) { showToast('Order not sent — not connected', 'err'); return; }
+    refAtSendRef.current[ref] = { px: ask, kind: 'ask' };
     const g = resolveGreeks(strike, type);
     setPositions((prev) => [...prev, {
       id: posSeq++, symbol: activeSymbol, type, side: 'long', strike, qty: 1, expiry: cockpitExpiry,
