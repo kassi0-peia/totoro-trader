@@ -16,7 +16,7 @@ import useWatchlist from './useWatchlist.js';
 import useBottomDrawer from './useBottomDrawer.js';
 import ChartMenu from './ChartMenu.jsx';
 import { useIbkrFeed, liveGreeks, liveQuote } from './feed.js';
-import { greeks as bsGreeks, nearestOtmStrike } from './options.js';
+import { greeks as bsGreeks, nearestOtmStrike, realizedVol } from './options.js';
 import { expiryCutoffMs, suggestTimetable, displayRows, scanTouch } from './busstop.js';
 import BusStopPanel from './BusStopPanel.jsx';
 import { THEMES } from './themes.js';
@@ -37,7 +37,7 @@ function randomPastWeekday(exclude) {
   return null;
 }
 
-const IVOL = 0.18;
+const IVOL_FALLBACK = 0.18; // used only when neither VIX nor a replay tape is known
 // How stale a bid/ask may be and still take the mark over the model tick.
 // Chain strikes tick every few seconds when the book is alive; the far-strike
 // snapshot poller refreshes every 30 s — 60 s covers both without flapping.
@@ -543,6 +543,21 @@ export default function App() {
   const tSlow = Math.floor(now / 30_000) * 30_000;
   const T = useMemo(() => timeToExpiryYearsAt(replayActive ? replayNow : tSlow), [tSlow, replayActive, replayNow]);
 
+  // Model sigma, vol-aware (kisa's weekend pick, 2026-07-11): the flat 18%
+  // guess overpriced everything when real vol sat near 11% (mark-audit).
+  // Live: VIX is the market's own 30-day sigma → vix/100. Replay: the
+  // replayed day's OWN realized vol from its 1-min returns — the day knows
+  // itself better than today's VIX knows it. The old 0.18 survives only as
+  // the nothing-known fallback (cold start, no VIX tick yet).
+  const ivol = useMemo(() => {
+    if (replayActive) {
+      const rv = realizedVol(replay.candles);
+      if (rv > 0) return rv;
+    }
+    const v = feed.vix?.last ?? feed.vix?.close;
+    return v > 0 ? v / 100 : IVOL_FALLBACK;
+  }, [replayActive, replay?.candles, feed.vix]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Upper bound for an OTM option that has no fresh quote of its own. Option
   // value is monotonic in strike, so an OTM call can't be worth more than a
   // lower (closer-to-money) quoted call, nor an OTM put more than a higher quoted
@@ -575,7 +590,7 @@ export default function App() {
     // Replay mode prices everything with the model at the replayed time —
     // live quotes belong to the present and would poison the practice tape.
     if (replayActive) {
-      const g = bsGreeks({ S: dispPrice, K: strike, T, sigma: IVOL, type });
+      const g = bsGreeks({ S: dispPrice, K: strike, T, sigma: ivol, type });
       return { ...g, source: 'replay' };
     }
     // A position on a symbol with NO live feed (a guest that isn't the active
@@ -605,11 +620,11 @@ export default function App() {
       if (gFresh) {
         const mid = (gq.bid + gq.ask) / 2;
         if (gLive) return { premium: mid, delta: gLive.delta, gamma: gLive.gamma, theta: gLive.theta, vega: gLive.vega, source: 'mid' };
-        const g = bsGreeks({ S, K: strike, T, sigma: IVOL, type });
+        const g = bsGreeks({ S, K: strike, T, sigma: ivol, type });
         return { ...g, premium: mid, source: 'mid' };
       }
       if (gLive) return { premium: gLive.premium, delta: gLive.delta, gamma: gLive.gamma, theta: gLive.theta, vega: gLive.vega, source: 'ibkr' };
-      const g = bsGreeks({ S, K: strike, T, sigma: IVOL, type });
+      const g = bsGreeks({ S, K: strike, T, sigma: ivol, type });
       if (gq && gq.bid != null && gq.ask != null) return { ...g, premium: (gq.bid + gq.ask) / 2, source: 'quote' };
       return { ...g, source: 'bs' };
     }
@@ -637,7 +652,7 @@ export default function App() {
     if (fresh) {
       const mid = (q.bid + q.ask) / 2;
       if (live) return { premium: mid, delta: live.delta, gamma: live.gamma, theta: live.theta, vega: live.vega, source: 'mid' };
-      const g = bsGreeks({ S: feed.price, K: strike, T, sigma: IVOL, type });
+      const g = bsGreeks({ S: feed.price, K: strike, T, sigma: ivol, type });
       return { ...g, premium: mid, source: 'mid' };
     }
     if (live) {
@@ -645,7 +660,7 @@ export default function App() {
     }
     // No model premium, but a real quote (e.g. snapshot for a far strike):
     // mark at the bid/ask mid — the flat-IV model misprices wings badly.
-    const g = bsGreeks({ S: feed.price, K: strike, T, sigma: IVOL, type });
+    const g = bsGreeks({ S: feed.price, K: strike, T, sigma: ivol, type });
     if (q && q.bid != null && q.ask != null) {
       return { ...g, premium: (q.bid + q.ask) / 2, source: 'quote' };
     }
@@ -851,7 +866,7 @@ export default function App() {
     if (nowMs >= cutoff) { showToast("Today's contract has settled — wait for the 16:15 roll", 'err'); return; }
     if (targetTime >= cutoff) { showToast('Past the 16:00 settle — the contract expires before the bus arrives', 'err'); return; }
     const targetPrice = Math.round(rawPrice * 4) / 4;
-    const tt = suggestTimetable({ targetPrice, targetTime, spot: feed.price, greeksMap: feed.greeksMap, ivol: IVOL, cutoff });
+    const tt = suggestTimetable({ targetPrice, targetTime, spot: feed.price, greeksMap: feed.greeksMap, ivol, cutoff });
     const stop = {
       id: `bs${nowMs.toString(36)}${Math.floor(Math.random() * 1e4).toString(36)}`,
       createdAt: nowMs,
@@ -1511,7 +1526,7 @@ export default function App() {
               price={dispPrice}
               positions={chartPositions}
               theme={chartTheme}
-              ivol={IVOL}
+              ivol={ivol}
               timeToExpiryYears={T}
               timeframe={timeframe}
               strikeStep={strikeStep}
