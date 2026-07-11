@@ -29,7 +29,7 @@ function formatExpiry(expiry, now) {
 // Amber for the DELAYED state (theme-independent: it's a warning, not a mood).
 const DELAYED_COLOR = '#e6a23c';
 
-export default function Header({ price, prevClose, theme, mood, earsUp, pulse, onToggleSettings, now, live, delayed = false, replayMode = false, source = 'SPX', guestSymbol = null, expiry = null, account = null, accountType = null, basisSource = null }) {
+export default function Header({ price, prevClose, theme, mood, earsUp, pulse, onToggleSettings, now, live, delayed = false, replayMode = false, source = 'SPX', guestSymbol = null, expiry = null, account = null, accountType = null, basisSource = null, stale = false, staleSecs = 0 }) {
   // Daily change vs the previous 4:00 PM SPX cash close.
   const haveDaily = Number.isFinite(prevClose) && prevClose > 0 && Number.isFinite(price);
   const change = haveDaily ? price - prevClose : NaN;
@@ -101,7 +101,10 @@ export default function Header({ price, prevClose, theme, mood, earsUp, pulse, o
               />
             )}
           </div>
-          <div className="price">{Number.isFinite(price) ? price.toFixed(2) : '—'}</div>
+          <div
+            className={`price${stale ? ' price-stale' : ''}`}
+            data-tip={stale ? `no ticks for ${staleSecs}s — feed may be stalled` : undefined}
+          >{Number.isFinite(price) ? price.toFixed(2) : '—'}</div>
           <div className="change" style={{ color: changeColor }}>
             {haveDaily
               ? `${change >= 0 ? '+' : '−'}${Math.abs(change).toFixed(2)} (${changePct >= 0 ? '+' : '−'}${Math.abs(changePct).toFixed(2)}%)`
