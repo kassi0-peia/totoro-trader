@@ -31,6 +31,7 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent } = {}) {
       delayed: false,        // bridge connected but IBKR served delayed data (code 10197)
       socketOpen: false,
       price: null,           // no price until the bridge delivers live data
+      tickTs: null,          // when the displayed price last ticked (staleness heartbeat)
       candles: [],           // empty chart until the bridge delivers candles
       greeksMap: new Map(),
       source: 'SPX',
@@ -238,6 +239,9 @@ export function applyMessage(s, msg) {
       live: goLive,
       delayed: goLive && !!msg.delayed,
       price: goLive && msg.price != null ? msg.price : s.price,
+      // Staleness heartbeat: the bridge's last-tick time for the displayed price,
+      // used as a seed at connect. Live ticks below re-stamp it to arrival time.
+      tickTs: msg.tickTs ?? s.tickTs,
       candles: goLive && msg.candles?.length ? msg.candles : s.candles,
       greeksMap,
       source: msg.source || s.source,
@@ -331,7 +335,9 @@ export function applyMessage(s, msg) {
       if (last && last.t === msg.candle.t) candles = [...candles.slice(0, -1), msg.candle];
       else candles = [...candles, msg.candle];
     }
-    return { ...s, price: msg.price, candles };
+    // Stamp arrival time: a tick just landed, so the displayed price is fresh now.
+    // (Covers both SPX and ES source ticks — whichever is being shown.)
+    return { ...s, price: msg.price, candles, tickTs: Date.now() };
   }
 
   // One-shot snapshot quote for a strike outside the streamed chain — merge it
@@ -399,7 +405,7 @@ export function applyMessage(s, msg) {
       if (last && last.t === msg.candle.t) candles = [...candles.slice(0, -1), msg.candle];
       else candles = [...candles, msg.candle];
     }
-    return { ...s, guest: { ...s.guest, price: msg.price, candles, live: true } };
+    return { ...s, guest: { ...s.guest, price: msg.price, candles, live: true, lastTickTs: Date.now() } };
   }
 
   if (msg.type === 'guestGreeks') {
