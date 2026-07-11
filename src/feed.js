@@ -94,7 +94,7 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent } = {}) {
         let msg;
         try { msg = JSON.parse(ev.data); } catch { return; }
         // Order lifecycle events are transient — hand them to the callback.
-        if (msg.type === 'orderAck' || msg.type === 'fill' || msg.type === 'orderError' || msg.type === 'orderWarning' || msg.type === 'cancelAck') {
+        if (msg.type === 'orderAck' || msg.type === 'fill' || msg.type === 'orderError' || msg.type === 'orderWarning' || msg.type === 'orderAutoCancel' || msg.type === 'cancelAck') {
           onOrderEventRef.current?.(msg);
           return;
         }

@@ -183,6 +183,7 @@ const watchResolving = new Set(); // symbols with a reqContractDetails in flight
 const watchInFlight = new Map();  // symbol -> reqId of the snapshot currently on the wire
 
 // Account safety + order execution state.
+const QUICK_CANCEL_MS = 10_000; // ⚡ unfilled-order lifetime before auto-cancel (kisa 2026-07-11)
 let account = null;             // e.g. "DU1234567"
 let accountType = null;         // 'paper' | 'live' | null (unknown)
 let executionEnabled = false;   // true once an IBKR account is identified
@@ -2234,6 +2235,12 @@ function handleOrderRequest(ws, msg) {
   const isStop = !isLimit && Number.isFinite(stop) && stop > 0;
   // OCA group: paired exits cancel each other when one fills.
   const ocaGroup = typeof msg.ocaGroup === 'string' && msg.ocaGroup ? msg.ocaGroup : null;
+  // Fill-quality reference (mid/ask seen at send — stamped onto the fill row)
+  // and the ⚡ quick flag: quick orders exist for their moment only and are
+  // auto-cancelled if still unfilled after the window (no chase, by design).
+  const refAtSend = Number(msg.refAtSend);
+  const hasRef = Number.isFinite(refAtSend) && refAtSend > 0;
+  const quick = msg.quick === true;
 
   const orderId = reqSeq++;
   const order = {
@@ -2252,7 +2259,7 @@ function handleOrderRequest(ws, msg) {
     // order placed outside RTH would be held until the regular open.
     outsideRth: true
   };
-  orders.set(orderId, { clientRef, symbol: orderSymbol, action, strike, right, expiry, qty, orderType: order.orderType, limit: isLimit ? limit : isStop ? stop : null, status: 'submitted', filled: 0, avgFillPrice: 0 });
+  orders.set(orderId, { clientRef, symbol: orderSymbol, action, strike, right, expiry, qty, orderType: order.orderType, limit: isLimit ? limit : isStop ? stop : null, status: 'submitted', filled: 0, avgFillPrice: 0, ...(hasRef ? { refAtSend } : {}) });
   // Track every id we hand to IBKR so a mid-bracket throw can unwind cleanly.
   // The parent goes out transmit:false when children exist; if a child placeOrder
   // throws, the parent is sitting HELD in TWS and must be cancelled, not just
@@ -2261,6 +2268,24 @@ function handleOrderRequest(ws, msg) {
   try {
     ib.placeOrder(orderId, makeContract(), order);
     placedIds.push(orderId);
+    // ⚡ auto-cancel: a quick order that hasn't filled inside its window has
+    // outlived its moment — cancel it rather than leave a zombie working at a
+    // price the book already left. Never fires on a filled/partial/cancelled
+    // order; quick orders are qty-1 with no bracket children.
+    if (quick) {
+      setTimeout(() => {
+        const o = orders.get(orderId);
+        if (!o || (o.filled ?? 0) > 0) return;
+        if (['Filled', 'Cancelled', 'ApiCancelled', 'error'].includes(o.status)) return;
+        try {
+          ib.cancelOrder(orderId);
+          console.log(`[ibkr] ⚡ order ${orderId} (${o.strike}${o.right}) auto-cancelled: unfilled after ${QUICK_CANCEL_MS / 1000}s`);
+          broadcast({ type: 'orderAutoCancel', clientRef: o.clientRef, orderId, strike: o.strike, right: o.right, reason: `unfilled ${QUICK_CANCEL_MS / 1000}s, book moved` });
+        } catch (e) {
+          console.log(`[ibkr] ⚡ auto-cancel ${orderId} failed:`, e.message);
+        }
+      }, QUICK_CANCEL_MS);
+    }
     if (wantTp || wantSl) {
       const contract = makeContract();
       if (wantTp) {
@@ -2638,7 +2663,9 @@ function recordTrade(orderId, o, filled, avgFillPrice) {
     id: ++tradeSeq, orderId, ts: Date.now(), action: o.action, strike: o.strike,
     right: o.right, expiry: o.expiry, qty: filled, price: avgFillPrice,
     // Blotter/journal rows gain a symbol; absent (old rows) reads as SPXW.
-    ...(o.symbol && o.symbol !== 'SPX' ? { symbol: o.symbol } : {})
+    ...(o.symbol && o.symbol !== 'SPX' ? { symbol: o.symbol } : {}),
+    // Fill-quality: the reference price (mid/ask) seen at the moment of send.
+    ...(o.refAtSend > 0 ? { ref: o.refAtSend } : {})
   };
   trades.push(trade);
   if (trades.length > 1000) trades = trades.slice(-1000);
@@ -2710,7 +2737,9 @@ function recordExecution(contract, execution, live = false) {
     // Live fill: stamp now. Backfill: parse the Central time, clamped to now.
     ts: live ? Date.now() : Math.min(parseExecTime(execution.time), Date.now()),
     action, strike, right, expiry, qty, price,
-    ...(symbol ? { symbol } : {})
+    ...(symbol ? { symbol } : {}),
+    // Fill-quality reference, when the placing order is known this session.
+    ...(ord && ord.refAtSend > 0 ? { ref: ord.refAtSend } : {})
   };
   trades.push(trade);
   if (trades.length > 1000) trades = trades.slice(-1000);

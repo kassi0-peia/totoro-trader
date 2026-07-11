@@ -45,7 +45,12 @@ function TradeRow({ t, theme, editing = false, onEdit = null, onSave = null }) {
         <span className="th-side" style={{ color: buy ? theme.profit : theme.loss }}>{buy ? 'BUY' : 'SELL'}</span>
         <span className="th-contract" style={{ color: c }}>{t.symbol && t.symbol !== 'SPX' ? `${t.symbol} ` : ''}{t.strike}{t.right}</span>
         <span className="th-qty">×{t.qty}</span>
-        <span className="th-price">@ ${Number(t.price).toFixed(2)}</span>
+        <span
+          className="th-price"
+          {...(t.ref > 0 ? { 'data-tip': `${t.price >= t.ref ? '+' : '−'}$${Math.abs(t.price - t.ref).toFixed(2)} vs $${t.ref.toFixed(2)} seen at send` } : {})}
+        >
+          @ ${Number(t.price).toFixed(2)}
+        </span>
         {onEdit && (
           <button
             className={`th-note-btn${t.note ? ' has' : ''}`}

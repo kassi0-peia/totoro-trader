@@ -130,3 +130,20 @@ test('quick: SPX carries no symbol; guest amber carries it', () => {
   const g = buildQuickOrder({ strike: 500, type: 'call', ask: 2, quickMode: 'limit', ...GUEST });
   assert.equal(g.payload.symbol, 'SPY');
 });
+
+test('refAtSend rides the open payload when valid, never when not', () => {
+  const base = { side: 'buy', strike: 7480, type: 'call', qty: 1, guestActive: false, activeSymbol: 'SPX', cockpitExpiry: '20260713' };
+  const ok = buildOpenOrder({ ...base, refAtSend: 2.125 });
+  assert.equal(ok.payload.refAtSend, 2.125);
+  for (const bad of [null, undefined, 0, -1, NaN]) {
+    const r = buildOpenOrder({ ...base, refAtSend: bad });
+    assert.ok(!('refAtSend' in r.payload), `refAtSend leaked for ${bad}`);
+  }
+});
+
+test('quick payload is flagged quick and carries the ask as its reference', () => {
+  const r = buildQuickOrder({ strike: 7480, type: 'call', ask: 2.1, quickMode: 'limit', guestActive: false, activeSymbol: 'SPX', cockpitExpiry: '20260713' });
+  assert.equal(r.payload.quick, true);
+  assert.equal(r.payload.refAtSend, 2.1);
+  assert.equal(r.payload.limit, 2.15);
+});
