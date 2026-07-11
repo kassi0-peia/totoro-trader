@@ -6,7 +6,7 @@ const ivPct = (iv) => (Number.isFinite(iv) ? (iv * 100).toFixed(1) + '%' : '—'
 
 // Bold strip above the chart: ATM call/put quote + IV, and the VIX (red when up
 // on the day, green when down). ATM is the nearest 5-point strike to the SPX(-equiv) price.
-export default function QuoteStrip({ price, greeksMap, vix, theme, onReplay = null, replayOn = false, atmStep = 5 }) {
+export default function QuoteStrip({ price, greeksMap, vix, theme, regime = null, onReplay = null, replayOn = false, atmStep = 5 }) {
   const step = atmStep > 0 ? atmStep : 5;
   const atm = Number.isFinite(price) ? Math.round(price / step) * step : null;
   const call = atm != null ? liveQuote(greeksMap, atm, 'call') : null;
@@ -28,6 +28,16 @@ export default function QuoteStrip({ price, greeksMap, vix, theme, onReplay = nu
       <span className="qs-iv">IV {q ? ivPct(q.iv) : '—'}</span>
     </span>
   );
+
+  // Regime read: trend vs chop over the last ~60m. Hidden entirely when the
+  // classifier is uncertain ('unknown') — zero pixels when we don't know.
+  const showRegime = regime && regime.regime !== 'unknown';
+  const regimeLabel = regime?.regime === 'trend'
+    ? (regime.dir >= 0 ? '↗ TREND' : '↘ TREND')
+    : '⇄ CHOP';
+  const regimeTip = regime
+    ? `last 60m efficiency ratio ${regime.er.toFixed(2)} — ${regime.regime === 'trend' ? 'trending' : 'choppy'}`
+    : undefined;
 
   return (
     <div className="quote-strip">
@@ -55,6 +65,11 @@ export default function QuoteStrip({ price, greeksMap, vix, theme, onReplay = nu
           </span>
         )}
       </span>
+      {showRegime && (
+        <span className="qs-regime" style={{ color: theme.muted }} data-tip={regimeTip}>
+          {regimeLabel}
+        </span>
+      )}
     </div>
   );
 }
