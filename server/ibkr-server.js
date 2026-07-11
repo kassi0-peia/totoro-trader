@@ -1859,7 +1859,9 @@ function guestMsg() {
       expirations: guest.expirations,
       secType: 'STK',
       settlement: 'physical',
-      live: guest.live
+      live: guest.live,
+      // Staleness heartbeat seed for the guest cockpit (see snapshotMsg.tickTs).
+      lastTickTs: guest.series.lastTick || null
     }
   };
 }
@@ -2615,7 +2617,12 @@ function snapshotMsg() {
     positions: positionsList(),
     orders: workingOrdersList(),
     funds,
-    spxClose
+    spxClose,
+    // Staleness heartbeat: when the displayed price last ticked. Seeds the client's
+    // freshness clock at (re)connect for the price it actually shows — SPX cash in
+    // RTH, the ES proxy overnight — so a feed that's already frozen at connect reads
+    // as stale immediately (the client re-stamps this on every live tick after).
+    tickTs: (session.source === 'ES' ? watchdogState.lastEsTick : watchdogState.lastSpxTick) || null
   };
 }
 

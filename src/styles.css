@@ -303,6 +303,13 @@ button {
   margin: 2px 0;
 }
 
+/* Staleness heartbeat: the header says LIVE but no tick has landed for a few
+   seconds — dim the big price so a frozen feed never looks live. */
+.price.price-stale {
+  opacity: 0.38;
+  transition: opacity 300ms ease;
+}
+
 .change {
   font-size: 12px;
   font-variant-numeric: tabular-nums;
@@ -1198,6 +1205,41 @@ button {
   color: var(--c-muted);
   font-size: 11px;
   letter-spacing: 0.12em;
+}
+
+.qty-controls {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.qty-chips {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.qty-chip {
+  height: 26px;
+  min-width: 26px;
+  padding: 0 7px;
+  border-radius: 7px;
+  background: var(--c-surfaceAlt);
+  border: 1px solid var(--c-border);
+  color: var(--c-muted);
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.qty-chip:hover {
+  border-color: var(--c-accent);
+  color: var(--c-accent);
+}
+
+.qty-chip.active {
+  color: var(--c-accent);
+  border-color: var(--c-accent);
 }
 
 .qty-stepper {
@@ -2269,6 +2311,7 @@ button {
 
 .quote-strip .qs-atm { color: var(--c-muted); font-size: 12px; letter-spacing: 0.14em; }
 .qs-leg, .qs-vix { display: inline-flex; align-items: baseline; gap: 6px; }
+.qs-regime { font-size: 12px; font-weight: 600; letter-spacing: 0.08em; white-space: nowrap; }
 .qs-tag { font-size: 12px; }
 .qs-iv { font-size: 11px; font-weight: 500; color: var(--c-muted); }
 @media (max-width: 720px) {
@@ -2284,6 +2327,7 @@ button {
   .quote-strip .qs-atm, .qs-tag { font-size: 11px; }
   .qs-leg, .qs-vix { gap: 4px; }
   .qs-iv { display: none; }
+  .qs-regime { display: none; } /* keep ATM/C/P/VIX on one line on narrow screens */
 }
 
 .fill-toast {

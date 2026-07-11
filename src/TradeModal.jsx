@@ -6,10 +6,29 @@ function fmtExpiry(exp) {
   return null;
 }
 
+// Ticket quantity memory: a ticket opens at the LAST EXECUTED size this session
+// (persisted in localStorage so it survives reloads), so a 3-lot trader stops
+// re-clicking + on every entry. Validated to 1..99; default 1. Wrapped in try/catch
+// because localStorage can throw (private mode / SSR / tests).
+const QTY_KEY = 'tt.lastQty';
+const QTY_PRESETS = [1, 2, 3, 5, 10];
+function readLastQty() {
+  try {
+    const v = parseInt(window.localStorage.getItem(QTY_KEY), 10);
+    if (Number.isFinite(v) && v >= 1 && v <= 99) return v;
+  } catch { /* localStorage unavailable — fall through to default */ }
+  return 1;
+}
+function writeLastQty(q) {
+  try {
+    if (Number.isFinite(q) && q >= 1 && q <= 99) window.localStorage.setItem(QTY_KEY, String(q));
+  } catch { /* localStorage unavailable — memory is best-effort */ }
+}
+
 export default function TradeModal({ pending, theme, series, onRefresh, onCancel, onExecute, executionEnabled = false, accountType = null, guest = false }) {
   const canvasRef = useRef(null);
   const [cursor, setCursor] = useState(null); // {x,y} over the premium graph
-  const [qty, setQty] = useState(1);
+  const [qty, setQty] = useState(readLastQty);
   // SELL-to-open ticket (from the chart's right-click menu): limit-only — with
   // no limit the bridge routes a real MKT, and a market sell into the thin
   // overnight book is a blank check in the worst direction.
@@ -22,7 +41,7 @@ export default function TradeModal({ pending, theme, series, onRefresh, onCancel
   const [slStr, setSlStr] = useState('');  // optional bracket stop (IBKR-simulated; unreliable pre-midnight)
 
   useEffect(() => {
-    setQty(1);
+    setQty(readLastQty());
     setOrderKind(guest || sell ? 'LMT' : 'MKT');
     // Prefill the limit with the side you cross to: BUY lifts the ask, a SELL
     // hits the bid — so the pre-filled ticket is already marketable.
@@ -40,7 +59,13 @@ export default function TradeModal({ pending, theme, series, onRefresh, onCancel
   const bracketOk = sell || ((tp == null || (Number.isFinite(tp) && tp > 0)) && (sl == null || (Number.isFinite(sl) && sl > 0)));
   const canExecute = executionEnabled && limitOk && bracketOk && sellOk;
   // Brackets are BUY-to-open only (the bridge ignores them on a SELL).
-  const execute = () => canExecute && onExecute(qty, orderKind === 'LMT' ? limit : null, sell ? null : tp, sell ? null : sl);
+  // Record the executed size FIRST (so the next ticket opens at it), then call
+  // through to App's handler unchanged — App's order flow is untouched.
+  const execute = () => {
+    if (!canExecute) return;
+    writeLastQty(qty);
+    onExecute(qty, orderKind === 'LMT' ? limit : null, sell ? null : tp, sell ? null : sl);
+  };
 
   useEffect(() => {
     const onKey = (e) => {
@@ -246,10 +271,24 @@ export default function TradeModal({ pending, theme, series, onRefresh, onCancel
 
         <div className="qty-row">
           <span className="qty-label">Quantity</span>
-          <div className="qty-stepper">
-            <button onClick={() => setQty((q) => Math.max(1, q - 1))} aria-label="decrease">−</button>
-            <span className="qty-value">{qty}</span>
-            <button onClick={() => setQty((q) => Math.min(99, q + 1))} aria-label="increase">+</button>
+          <div className="qty-controls">
+            {/* Preset size chips — one click sets the lot instantly. Same visual
+                language as the MKT/LMT kind-btns. */}
+            <div className="qty-chips">
+              {QTY_PRESETS.map((n) => (
+                <button
+                  key={n}
+                  className={`qty-chip${qty === n ? ' active' : ''}`}
+                  onClick={() => setQty(n)}
+                  aria-label={`set quantity ${n}`}
+                >{n}</button>
+              ))}
+            </div>
+            <div className="qty-stepper">
+              <button onClick={() => setQty((q) => Math.max(1, q - 1))} aria-label="decrease">−</button>
+              <span className="qty-value">{qty}</span>
+              <button onClick={() => setQty((q) => Math.min(99, q + 1))} aria-label="increase">+</button>
+            </div>
           </div>
         </div>
 
