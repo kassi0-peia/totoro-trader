@@ -1200,6 +1200,41 @@ button {
   letter-spacing: 0.12em;
 }
 
+.qty-controls {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.qty-chips {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.qty-chip {
+  height: 26px;
+  min-width: 26px;
+  padding: 0 7px;
+  border-radius: 7px;
+  background: var(--c-surfaceAlt);
+  border: 1px solid var(--c-border);
+  color: var(--c-muted);
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.qty-chip:hover {
+  border-color: var(--c-accent);
+  color: var(--c-accent);
+}
+
+.qty-chip.active {
+  color: var(--c-accent);
+  border-color: var(--c-accent);
+}
+
 .qty-stepper {
   display: flex;
   align-items: center;
