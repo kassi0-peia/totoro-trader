@@ -439,6 +439,21 @@ export default function App() {
   // disabled) the cockpit prices against the guest's spot.
   const dispPrice = replayActive ? replayPrice : cockpitPrice;
 
+  // ── Staleness heartbeat (self-contained) ──────────────────────────────────
+  // A frozen feed must never look live. The active cockpit stamps a tickTs on
+  // every live price update (feed.tickTs for SPX, guest.lastTickTs for a guest).
+  // When the header says LIVE but no tick has landed for > PRICE_STALE_MS, the big
+  // price dims. Uses the existing ~800ms `now` clock. Replay/delayed never dim
+  // (the header isn't showing LIVE then). A genuinely stale weekend price DOES
+  // dim — that is correct; it is stale.
+  const PRICE_STALE_MS = 5000;
+  const activeTickTs = guestActive ? guest?.lastTickTs : feed.tickTs;
+  const priceStaleMs = feed.live && !feed.delayed && !replayActive && Number.isFinite(activeTickTs)
+    ? now - activeTickTs
+    : 0;
+  const priceStale = priceStaleMs > PRICE_STALE_MS;
+  const priceStaleSecs = Math.round(priceStaleMs / 1000);
+
   // Replay: adopt the day's bars when the bridge delivers them, starting at the
   // very first bar of the session. A zero-bar day (holiday / missing data) exits
   // cleanly — or, on a blind mystery day, quietly re-rolls another date.
@@ -1386,6 +1401,8 @@ export default function App() {
         expiry={replayActive ? replay.date : guestActive ? guest.expiry : feed.live ? feed.expiry : null}
         account={feed.account}
         accountType={feed.accountType}
+        stale={priceStale}
+        staleSecs={priceStaleSecs}
       />
 
       {settingsOpen && (
