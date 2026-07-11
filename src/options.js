@@ -65,3 +65,23 @@ export function nearestOtmStrike(price, type, step = 5) {
   }
   return Math.floor((price - 0.01) / step) * step;
 }
+
+// Annualized realized volatility from 1-min close-to-close log returns —
+// the sigma a REPLAYED day should price with (its own tape), instead of a
+// flat guess or today's VIX. 252 trading days × 390 RTH minutes. Returns
+// null when there are too few bars to mean anything; a constant tape is
+// honestly zero. (Full-day realized vol is a tiny "leak" in blind replay —
+// it hints how wild the day is, never which way it goes. Accepted.)
+export function realizedVol(candles, minBars = 30) {
+  if (!candles || candles.length < minBars) return null;
+  const rets = [];
+  for (let i = 1; i < candles.length; i++) {
+    const a = candles[i - 1].close;
+    const b = candles[i].close;
+    if (a > 0 && b > 0) rets.push(Math.log(b / a));
+  }
+  if (rets.length < minBars - 1) return null;
+  const mean = rets.reduce((s, r) => s + r, 0) / rets.length;
+  const varr = rets.reduce((s, r) => s + (r - mean) * (r - mean), 0) / (rets.length - 1);
+  return Math.sqrt(varr) * Math.sqrt(252 * 390);
+}
