@@ -42,7 +42,7 @@ out of this file into commits; strikethrough = rejected, with the why.
 - **Vertical spreads** — click strike + short leg N out → one IBKR combo (BAG) order; defined-risk debit spreads; new position math. The "v2" feature.
 - **Drag working orders on the chart** — TP/SL/limit lines grabbable; release = modify at IBKR (Sierra/Ninja chart-trading; the crown jewel; pure chart-as-chain).
 - **OCO entry pairs** — two entries, first fill cancels the other; straddle a forming paw (EdgeProX/Ninja server-side OCO).
-- **Conditional entry release** — "submit only if SPX crosses X"; stop-entries for options, IBKR-native conditions (EdgeClear).
+- ~~Conditional entry release~~ — ✅ shipped 2026-07-11 as **armed orders** (design B, bridge-side: fires a fresh marketable limit at the live ask on crossing; qty-1/max-3/one-shot/never-MKT/10s-mortal). The robot line was crossed knowingly, with rails.
 - **Hard lockout** — bridge-enforced max daily loss: flatten + freeze until tomorrow (EdgeProX account-level risk). Before serious live.
 - **Auto-flatten at time** — "flatten at 15:55" bridge cron; 0DTE settlement-roulette dodge.
 - **PIN (order-path auth)** — typed-once per device, never served with the bundle; before sustained live trading.
