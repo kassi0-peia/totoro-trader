@@ -23,6 +23,7 @@ import { computeSession, etParts, ymd, lastCloseEt, etCloseEpoch } from './sessi
 import { computeOptionsForward } from './options-forward.js';
 import { pickExpiry, deriveStrikeStep, strikeWindow, validateOrder as validateGuestOrder } from './guest-symbol.js';
 import { normalizeWatchlist, shapeWatchQuote } from './watchlist.js';
+import { validateArmedOrder, armedTriggered, ARMED_MAX } from './armed.js';
 
 // Last-resort backstop: an unexpected throw in one handler must not kill the whole
 // bridge while working orders/brackets are live at IBKR. Log loudly and stay up —
@@ -182,6 +183,14 @@ const watchQuotes = new Map();    // symbol -> last good shaped quote { symbol, 
 const watchResolving = new Set(); // symbols with a reqContractDetails in flight (dedupe)
 const watchInFlight = new Map();  // symbol -> reqId of the snapshot currently on the wire
 
+// ── ⚔ Armed orders (kisa chose design B, 2026-07-11 — see server/armed.js) ──
+// Client-owned list, wholesale-set like the watchlist; NOT persisted (a bridge
+// restart fails safe to disarmed until a client re-sends). firedIds guards a
+// stale client list from re-arming something that already fired this session.
+let armedOrders = [];
+let armedPrevPrice = null;        // previous displayed price for crossing detection
+const armedFiredIds = new Set();
+
 // Account safety + order execution state.
 const QUICK_CANCEL_MS = 10_000; // ⚡ unfilled-order lifetime before auto-cancel (kisa 2026-07-11)
 let account = null;             // e.g. "DU1234567"
@@ -263,6 +272,7 @@ wss.on('connection', (ws) => {
     else if (msg.type === 'deactivateSymbol') handleDeactivateSymbol(ws, msg);
     else if (msg.type === 'watchlist') handleWatchlist(ws, msg);
     else if (msg.type === 'fillNote') handleFillNote(ws, msg);
+    else if (msg.type === 'armed') handleArmed(ws, msg);
   });
 });
 
@@ -1054,6 +1064,7 @@ function feedSpxTick(price) {
     broadcast({ type: 'tick', source: 'SPX', price: spxPrice, candle: { ...candle, src: 'SPX' } });
   }
   maybeRecenterChain(displayPrice());
+  checkArmedOrders();
 }
 
 function feedEsTick(price) {
@@ -1066,6 +1077,7 @@ function feedEsTick(price) {
     broadcast({ type: 'tick', source: 'ES', price: esPrice - b, candle: shiftCandle(candle, b) });
   }
   maybeRecenterChain(displayPrice());
+  checkArmedOrders();
 }
 
 // Watchdog: every 15s, check for (a) stalled mkt-data for the active source and
@@ -1976,6 +1988,80 @@ function watchQuotesMsg() {
   return { type: 'watchlistQuotes', quotes };
 }
 
+// ── ⚔ Armed orders (design B, kisa 2026-07-11) ──────────────────────────────
+// {type:'armed', orders:[...]} → wholesale set (the watchlist pattern): the
+// client owns the list and re-sends on (re)connect. Every order is
+// re-validated server-side; anything already fired this session is refused so
+// a stale client list can't re-arm a spent trigger.
+function handleArmed(_ws, msg) {
+  const list = Array.isArray(msg.orders) ? msg.orders.slice(0, ARMED_MAX) : [];
+  const px = displayPrice();
+  const next = [];
+  for (const raw of list) {
+    if (raw && armedFiredIds.has(String(raw.id))) {
+      broadcast({ type: 'armedRejected', id: String(raw.id), reason: 'already fired this session' });
+      continue;
+    }
+    const v = validateArmedOrder(raw, { price: px, expiry: currentExpiry });
+    if (v.ok) next.push(v.armed);
+    else broadcast({ type: 'armedRejected', id: raw?.id != null ? String(raw.id) : null, reason: v.reason });
+  }
+  armedOrders = next;
+  if (next.length) {
+    console.log(`[ibkr] ⚔ armed: ${next.map((a) => `${a.strike}${a.right} @ ${a.level}${a.dir === 'up' ? '↑' : '↓'}`).join(' · ')}`);
+  }
+}
+
+// Runs on every SPX/ES tick with the SAME displayed price the chart shows.
+// First tick after any gap only primes the previous price — a level crossed
+// during a blackout never fires retroactively.
+function checkArmedOrders() {
+  const px = displayPrice();
+  if (px == null) return;
+  const prev = armedPrevPrice;
+  armedPrevPrice = px;
+  if (prev == null || prev === px || armedOrders.length === 0) return;
+  for (const a of [...armedOrders]) {
+    if (!armedTriggered(a, prev, px)) continue;
+    armedOrders = armedOrders.filter((x) => x.id !== a.id); // one-shot: remove FIRST
+    armedFiredIds.add(a.id);
+    fireArmedOrder(a, px);
+  }
+}
+
+// Fire = exactly an amber ⚡ at the moment of crossing: qty 1, marketable
+// limit at the live ask + tick, refuses without a fresh ask, and inherits the
+// quick auto-cancel (unfilled 10s → dead). Routed through handleOrderRequest
+// so every existing guard (executionEnabled, account gate, ack flow) applies;
+// the fake socket only mutes the direct reply — broadcasts still reach every
+// client.
+function fireArmedOrder(a, px) {
+  const entry = chain.get(`${a.strike}${a.right}`);
+  const fresh = entry && entry.expiry === currentExpiry && entry.ask > 0 &&
+    entry.tickTs != null && Date.now() - entry.tickTs < 60_000;
+  if (a.expiry && currentExpiry && a.expiry !== currentExpiry) {
+    broadcast({ type: 'armedFailed', ...a, reason: 'expiry rolled since arming' });
+    return;
+  }
+  if (!executionEnabled) {
+    broadcast({ type: 'armedFailed', ...a, reason: 'execution disabled' });
+    return;
+  }
+  if (!fresh) {
+    broadcast({ type: 'armedFailed', ...a, reason: 'no fresh ask at trigger — refused to fire blind' });
+    return;
+  }
+  const tick = entry.ask < 3 ? 0.05 : 0.10;
+  const limit = Math.round((entry.ask + tick) * 100) / 100;
+  console.log(`[ibkr] ⚔ FIRED ${a.strike}${a.right}: ${px.toFixed(2)} crossed ${a.level} → BUY 1 @ ≤${limit}`);
+  broadcast({ type: 'armedFired', ...a, price: px, ask: entry.ask });
+  handleOrderRequest({ readyState: 0 }, {
+    clientRef: `armed:${a.id}`, intent: 'open', action: 'BUY',
+    strike: a.strike, right: a.right, qty: 1, expiry: a.expiry || currentExpiry,
+    limit, quick: true, refAtSend: entry.ask
+  });
+}
+
 // ── Session evaluation ──────────────────────────────────────────────────────
 
 function evaluateSession() {
@@ -1990,6 +2076,10 @@ function evaluateSession() {
   if (next.expiry !== currentExpiry) {
     console.log(`[ibkr] expiry roll -> ${next.expiry}`);
     rebuildChainForExpiry(next.expiry);
+    // ⚔ armed orders die at the roll — their contract just expired. The client
+    // is told per order so its list (and chart lines) clear too.
+    for (const a of armedOrders) broadcast({ type: 'armedFailed', ...a, reason: 'expiry rolled — disarmed' });
+    armedOrders = [];
   }
 
   if (next.source !== prevSource || next.expiry !== prevExpiry) {
@@ -2049,6 +2139,10 @@ function resetSubscriptions() {
   watchQuotes.clear();
   watchResolving.clear();
   watchInFlight.clear();
+  // ⚔ armed orders SURVIVE an IB reconnect (they're bridge state, not an IB
+  // subscription) — but the crossing clock resets, so a level crossed during
+  // the blackout can never fire retroactively (first tick back only primes).
+  armedPrevPrice = null;
 }
 
 function setStatus(s) {

@@ -8,7 +8,8 @@ import React, { useEffect } from 'react';
 // clamped to the viewport. Esc / click-away / another right-click closes.
 export default function ChartMenu({
   menu, strike, live, replayActive, executionEnabled,
-  onBuy, onSell, onAlert, onRemoveAlert, onClose
+  onBuy, onSell, onAlert, onRemoveAlert, onClose,
+  canArm = false, armPrice = null, onArm = null, onDisarm = null
 }) {
   useEffect(() => {
     const onKey = (e) => { if (e.key === 'Escape') onClose(); };
@@ -20,7 +21,12 @@ export default function ChartMenu({
   const canTrade = replayActive || (live && executionEnabled);
   const showSell = live && executionEnabled && !replayActive;
   const showAlert = !replayActive; // an alert armed offline fires once live again
-  const rows = (canTrade ? 2 : 0) + (showSell ? 2 : 0) + (showAlert ? 1 : 0) + (menu.alertId != null ? 1 : 0);
+  // ⚔ arm item points AWAY from the market: above price = call on the up-cross,
+  // below = put on the down-cross (design B, kisa 2026-07-11).
+  const armDir = canArm && onArm && armPrice != null && menu.price !== armPrice
+    ? (menu.price > armPrice ? 'up' : 'down') : null;
+  const rows = (canTrade ? 2 : 0) + (showSell ? 2 : 0) + (showAlert ? 1 : 0) +
+    (menu.alertId != null ? 1 : 0) + (armDir ? 1 : 0) + (menu.armedId != null ? 1 : 0);
   if (rows === 0) return null;
   const W = 200;
   const H = rows * 30 + 10 + (canTrade && showAlert ? 9 : 0);
@@ -53,6 +59,19 @@ export default function ChartMenu({
         )}
         {menu.alertId != null && (
           <button className="cm-item" onClick={() => onRemoveAlert(menu.alertId)}>Remove alert <b>{menu.alertPrice.toFixed(2)}</b></button>
+        )}
+        {armDir === 'up' && (
+          <button className="cm-item cm-arm" onClick={() => onArm('call', 'up', menu.price)} data-tip="Fires a 1-lot marketable limit at the live ask when SPX crosses up through this level. One-shot; dies unfilled after 10s.">
+            ⚔ Buy CALL if ≥ <b>{menu.price.toFixed(2)}</b>
+          </button>
+        )}
+        {armDir === 'down' && (
+          <button className="cm-item cm-arm" onClick={() => onArm('put', 'down', menu.price)} data-tip="Fires a 1-lot marketable limit at the live ask when SPX crosses down through this level. One-shot; dies unfilled after 10s.">
+            ⚔ Buy PUT if ≤ <b>{menu.price.toFixed(2)}</b>
+          </button>
+        )}
+        {menu.armedId != null && onDisarm && (
+          <button className="cm-item" onClick={() => onDisarm(menu.armedId)}>Disarm <b>{menu.armedLabel}</b></button>
         )}
       </div>
     </>

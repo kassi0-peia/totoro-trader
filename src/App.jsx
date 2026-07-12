@@ -23,7 +23,7 @@ import BusStopPanel from './BusStopPanel.jsx';
 import { THEMES } from './themes.js';
 import { plDollars } from './pl.js';
 import { buildOpenOrder, buildQuickOrder } from './order-payload.js';
-import { chimeFill } from './sounds.js';
+import { chimeFill, chimeAlert } from './sounds.js';
 
 // Blind-replay day picker: a random weekday 3–60 days back (LOCAL date parts —
 // the UTC fence eats days after 8 PM ET). Holidays aren't modeled here; they
@@ -248,6 +248,19 @@ export default function App() {
       showToast(`⚡ ${msg.strike}${msg.right} auto-cancelled — ${msg.reason}`, 'err');
       return;
     }
+    // ⚔ armed-order lifecycle (setArmed referenced at call time — declared
+    // below, deliberately NOT in this callback's deps: setters are stable).
+    if (msg.type === 'armedFired') {
+      setArmed((l) => l.filter((a) => a.id !== msg.id));
+      chimeAlert();
+      showToast(`⚔ FIRED — SPX crossed ${msg.level}: buying 1 ${msg.strike}${msg.right} at the ask`, 'ok');
+      return;
+    }
+    if (msg.type === 'armedFailed' || msg.type === 'armedRejected') {
+      if (msg.id != null) setArmed((l) => l.filter((a) => a.id !== msg.id));
+      showToast(`⚔ ${msg.strike ?? ''}${msg.right ?? ''} disarmed — ${msg.reason}`, 'err');
+      return;
+    }
     if (msg.type === 'orderError') {
       setPositions((prev) => prev.map((p) => {
         if (p.openRef === msg.clientRef && p.status === 'pending') return { ...p, status: 'rejected', note: msg.reason };
@@ -334,6 +347,28 @@ export default function App() {
 
   // ⏰ price alerts: state + persistence + the live-crossing effect (see useAlerts).
   const [alerts, setAlerts] = useAlerts({ feedPrice: feed.price, guestPrice: guest?.price, guestActive, activeSymbol, showToast });
+
+  // ⚔ armed orders (design B — kisa 2026-07-11): the client owns the list
+  // (persisted, re-sent on every reconnect — the watchlist pattern); the
+  // bridge re-validates, watches the displayed price, and fires one-shot.
+  // Fired/failed/rejected events prune this list so a stale entry can never
+  // be re-armed (the bridge's firedIds set guards the app-was-closed case).
+  const ARMED_MAX_CLIENT = 3;
+  const [armed, setArmed] = useState(() => {
+    try {
+      const v = JSON.parse(localStorage.getItem('tt.armed') || '[]');
+      if (Array.isArray(v)) {
+        return v.filter((a) => a && Number.isFinite(a.level) && Number.isFinite(a.strike) && (a.right === 'C' || a.right === 'P')).slice(0, ARMED_MAX_CLIENT);
+      }
+    } catch {}
+    return [];
+  });
+  useEffect(() => {
+    try { localStorage.setItem('tt.armed', JSON.stringify(armed)); } catch {}
+  }, [armed]);
+  useEffect(() => {
+    if (feed.socketOpen) feed.sendArmed(armed);
+  }, [feed.socketOpen, armed]); // eslint-disable-line react-hooks/exhaustive-deps
   // The cockpit's data source. In guest mode price/candles/greeksMap/expiry/
   // strikeStep come from feed.guest; otherwise the SPX feed, untouched. Replay is
   // disabled in guest mode, so these never collide with replay's own price/time.
@@ -1609,6 +1644,7 @@ export default function App() {
               showMarkers={showMarkers}
               quickMode={guestActive && quickMode === 'market' ? 'limit' : quickMode}
               alerts={chartAlerts}
+              armed={replayActive || activeSymbol !== 'SPX' ? EMPTY_ARR : armed}
               onMenu={setChartMenu}
               apiRef={chartApiRef}
               fillFlash={chartFillFlash}
@@ -1724,6 +1760,16 @@ export default function App() {
               showToast(`⏰ alert armed at ${p.toFixed(2)}`, 'ok');
             }}
             onRemoveAlert={(id) => { setAlerts((l) => l.filter((a) => a.id !== id)); setChartMenu(null); }}
+            canArm={!replayActive && !guestActive && feed.live && feed.executionEnabled && armed.length < ARMED_MAX_CLIENT}
+            armPrice={cockpitPrice}
+            onArm={(type, dir, price) => {
+              const level = Math.round(price * 100) / 100;
+              const strike = nearestOtmStrike(level, type, 5);
+              setArmed((l) => (l.length >= ARMED_MAX_CLIENT ? l : [...l, { id: String(Date.now()), level, dir, strike, right: type === 'call' ? 'C' : 'P' }]));
+              setChartMenu(null);
+              showToast(`⚔ armed: buy 1 ${strike}${type === 'call' ? 'C' : 'P'} if SPX crosses ${level.toFixed(2)}`, 'ok');
+            }}
+            onDisarm={(id) => { setArmed((l) => l.filter((a) => a.id !== id)); setChartMenu(null); showToast('⚔ disarmed', 'ok'); }}
             onClose={() => setChartMenu(null)}
           />
         );
