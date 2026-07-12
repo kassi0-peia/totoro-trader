@@ -2127,6 +2127,7 @@ button {
 .cm-item b { font-family: 'JetBrains Mono', monospace; font-weight: 700; }
 .cm-item:hover { background: var(--c-surfaceAlt); }
 .cm-sell { color: var(--c-loss, #e07d8a); }
+.cm-arm { color: var(--c-accent); }
 .cm-div { border-top: 1px solid var(--c-border); margin: 4px 0; }
 
 .modal-side-sell {

@@ -95,7 +95,8 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent } = {}) {
         let msg;
         try { msg = JSON.parse(ev.data); } catch { return; }
         // Order lifecycle events are transient — hand them to the callback.
-        if (msg.type === 'orderAck' || msg.type === 'fill' || msg.type === 'orderError' || msg.type === 'orderWarning' || msg.type === 'orderAutoCancel' || msg.type === 'cancelAck') {
+        if (msg.type === 'orderAck' || msg.type === 'fill' || msg.type === 'orderError' || msg.type === 'orderWarning' || msg.type === 'orderAutoCancel' || msg.type === 'cancelAck' ||
+            msg.type === 'armedFired' || msg.type === 'armedFailed' || msg.type === 'armedRejected') {
           onOrderEventRef.current?.(msg);
           return;
         }
@@ -184,6 +185,15 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent } = {}) {
     return true;
   }, []);
 
+  // ⚔ armed orders: wholesale-set the bridge's list (watchlist pattern — the
+  // client owns it and re-sends on reconnect; the bridge re-validates each).
+  const sendArmed = useCallback((orders) => {
+    const ws = socketRef.current;
+    if (!ws || ws.readyState !== 1) return false;
+    ws.send(JSON.stringify({ type: 'armed', orders }));
+    return true;
+  }, []);
+
   // Attach/edit/clear a one-line note on a fill row (today or any journal day).
   const sendFillNote = useCallback((id, text) => {
     const ws = socketRef.current;
@@ -224,7 +234,7 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent } = {}) {
     return true;
   }, []);
 
-  return { ...snapshot, sendOrder, sendCancel, requestQuote, requestHistory, requestOptHistory, requestReplayDay, requestJournal, sendFillNote, searchSymbols, activateSymbol, deactivateSymbol, setWatchlist };
+  return { ...snapshot, sendOrder, sendCancel, requestQuote, requestHistory, requestOptHistory, requestReplayDay, requestJournal, sendFillNote, sendArmed, searchSymbols, activateSymbol, deactivateSymbol, setWatchlist };
 }
 
 // Exported for unit testing the reducer (guest merges must not disturb SPX

@@ -4,7 +4,7 @@ import { fmtPrice } from '../format.js';
 // Pure paint; leaves ctx clean (both dashed blocks balance save/restore; the
 // chip's font/align/baseline are the last state set and are re-established by
 // later painters — kept verbatim from the original inline block).
-export function drawPriceLine(ctx, { layout, theme, priceToY, price, expectedMove, alerts, rightAxis }) {
+export function drawPriceLine(ctx, { layout, theme, priceToY, price, expectedMove, alerts, armed, rightAxis }) {
   // current price dashed line
   const yPrice = priceToY(price);
   ctx.save();
@@ -83,6 +83,40 @@ export function drawPriceLine(ctx, { layout, theme, priceToY, price, expectedMov
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillText(`⏰ ${fmtPrice(a.price)}`, layout.chartW + 4, ya);
+      ctx.restore();
+    }
+  }
+
+  // ⚔ armed orders (design B, kisa 2026-07-11): a SOLID line — this level is
+  // loaded, not just watched — with an axis tag naming the contract it fires.
+  // One-shot; the client prunes it the moment the bridge fires or fails it.
+  if (armed && armed.length) {
+    for (const a of armed) {
+      const ya = priceToY(a.level);
+      if (!(ya > 4 && ya < layout.priceBot - 2)) continue;
+      ctx.save();
+      ctx.strokeStyle = theme.accent;
+      ctx.globalAlpha = 0.55;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, ya + 0.5);
+      ctx.lineTo(layout.chartW, ya + 0.5);
+      ctx.stroke();
+      ctx.restore();
+      ctx.save();
+      ctx.globalAlpha = 0.95;
+      ctx.fillStyle = theme.surface;
+      ctx.strokeStyle = theme.accent;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.rect(layout.chartW + 0.5, ya - 8.5, rightAxis - 1, 17);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = theme.text;
+      ctx.font = '9px "JetBrains Mono", monospace';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(`⚔ ${a.strike}${a.right}`, layout.chartW + 4, ya);
       ctx.restore();
     }
   }
