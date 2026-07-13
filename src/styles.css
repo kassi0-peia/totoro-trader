@@ -1771,6 +1771,15 @@ button {
   z-index: 30;
 }
 .safety-live { background: var(--c-profit, #5cb85c); color: #0a0c12; }
+/* Kill-switch arm window (Shift+Esc pressed once): loud, brief, breathing.
+   Deliberately NOT the theme's soft loss tint — this one must be unmistakable
+   on every theme, so it gets a hard alarm red of its own. */
+.safety-kill {
+  background: #d92b39;
+  color: #fff;
+  animation: kill-pulse 0.6s ease-in-out infinite;
+}
+@keyframes kill-pulse { 50% { opacity: 0.75; } }
 
 .acct-block {
   display: none;            /* desktop: feed status lives in the title block */
