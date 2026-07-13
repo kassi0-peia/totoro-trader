@@ -11,6 +11,7 @@ const KEYS = [
   ['N', 'note the latest fill (the why)'],
   ['Enter', 'execute the open ticket'],
   ['Esc', 'close the top-most thing, one per press'],
+  ['Shift+Esc ×2', 'KILL — cancel all orders, close all positions'],
   ['?', 'this panel'],
 ];
 

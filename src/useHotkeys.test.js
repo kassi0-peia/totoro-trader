@@ -22,6 +22,15 @@ test('keyIntent: Space, Escape, C/P (case-insensitive)', () => {
   assert.equal(keyIntent(ev('x')), null);
 });
 
+test('keyIntent: Shift+Escape is the kill switch; plain Escape stays escape', () => {
+  assert.deepEqual(keyIntent(ev('Escape', { shiftKey: true })), { kind: 'kill' });
+  assert.deepEqual(keyIntent(ev('Escape', { shiftKey: false })), { kind: 'escape' });
+  // A held Shift+Esc must not arm-and-fire in one hold.
+  assert.equal(keyIntent(ev('Escape', { shiftKey: true, repeat: true })), null);
+  // Ctrl/meta/alt still veto everything, shift or not.
+  assert.equal(keyIntent(ev('Escape', { shiftKey: true, ctrlKey: true })), null);
+});
+
 test('keyIntent: modifiers and key-repeat are ignored (incl. held Esc)', () => {
   assert.equal(keyIntent(ev('1', { ctrlKey: true })), null);
   assert.equal(keyIntent(ev('c', { metaKey: true })), null);

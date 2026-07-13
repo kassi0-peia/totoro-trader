@@ -1243,6 +1243,47 @@ export default function App() {
     showToast(`Closing ${open.length} position${open.length > 1 ? 's' : ''}`, 'ok');
   };
 
+  // Shift+Esc ×2 — the KILL SWITCH: the keyboard sibling of close-all, minus
+  // the dialog (the confirm IS the second press). One action, whole book:
+  // disarm every ⚔ armed order, cancel every working order (exits included —
+  // cancels go first so a resting TP can't race the close into an overfill),
+  // then close every open position exactly like CLOSE does — marketable
+  // limits, never MKT. A leg with no live bid CANNOT flatten honestly; it
+  // stays open and the toast says so in capitals instead of pretending.
+  const killSwitch = () => {
+    // Replay: flatten the practice book — the reflex is drillable off-hours.
+    if (replayActive) {
+      const open = positionsLive.filter((p) => p.status === 'open');
+      if (!open.length) { showToast('KILL — nothing to flatten', 'ok'); return; }
+      open.forEach((p) => closePosition(p));
+      showToast(`REPLAY KILL — ${open.length} closed`, 'ok');
+      return;
+    }
+    if (!feed.executionEnabled) { showToast('Execution disabled', 'err'); return; }
+    const armedN = armed.length;
+    if (armedN) setArmed([]); // the sync effect wholesale-sends [] to the bridge
+    const working = feed.orders ?? [];
+    working.forEach((o) => feed.sendCancel({ orderId: o.orderId }));
+    const open = positionsLive.filter((p) => p.status === 'open');
+    // Mirror closePosition's own refusal (no live bid → no order) so the
+    // summary toast counts honestly instead of being overwritten by per-leg
+    // error toasts.
+    const closable = open.filter((p) => sellLimitFor(p.strike, p.type) != null);
+    closable.forEach((p) => closePosition(p));
+    const stuck = open.length - closable.length;
+    const parts = [];
+    if (working.length) parts.push(`${working.length} cancelled`);
+    if (armedN) parts.push(`${armedN} disarmed`);
+    if (closable.length) parts.push(`${closable.length} closing`);
+    if (!parts.length && !stuck) { showToast('KILL — nothing to flatten', 'ok'); return; }
+    showToast(
+      stuck
+        ? `KILL — ${parts.join(', ') || 'nothing sent'} · ${stuck} NO QUOTE — STILL OPEN`
+        : `KILL — ${parts.join(', ')}`,
+      stuck ? 'err' : 'ok'
+    );
+  };
+
   const cancelOrder = (pos) => {
     if (!pos) return;
     const ref = pos.status === 'closing' ? pos.closeRef : pos.openRef;
@@ -1375,8 +1416,28 @@ export default function App() {
   // chart to now · C/P arm a confirm ticket (never sends an order directly).
   const chartApiRef = useRef(null); // Chart's imperative surface: { snapToNow, hover }
   const hotkeysLive = feed.live || replayActive; // everything but Esc needs a tape
+  // Kill-switch arm window: first Shift+Esc arms (red banner), a second inside
+  // KILL_ARM_MS fires. Timing lives in a ref (no re-render race); the state
+  // only drives the banner.
+  const KILL_ARM_MS = 2000;
+  const [killArmed, setKillArmed] = useState(false);
+  const killArmRef = useRef(0);
+  const killTimerRef = useRef(null);
   useHotkeys({
     onHelp: () => { setHelpOpen((v) => !v); return true; },
+    onKill: () => {
+      clearTimeout(killTimerRef.current);
+      if (Date.now() - killArmRef.current < KILL_ARM_MS) {
+        killArmRef.current = 0;
+        setKillArmed(false);
+        killSwitch();
+        return true;
+      }
+      killArmRef.current = Date.now();
+      setKillArmed(true);
+      killTimerRef.current = setTimeout(() => { killArmRef.current = 0; setKillArmed(false); }, KILL_ARM_MS);
+      return true;
+    },
     onEscape: () => {
       // ONE close per press, top-most first. TradeModal and ChartMenu already
       // close THEMSELVES on Esc (their own window listeners), as does the
@@ -1453,6 +1514,9 @@ export default function App() {
     <div className="app" style={{ background: theme.bg, color: theme.text }}>
       {banner && (
         <div className={`safety-banner safety-${banner.kind}`} role="alert">{banner.text}</div>
+      )}
+      {killArmed && (
+        <div className="safety-banner safety-kill" role="alert">⚠ SHIFT+ESC AGAIN — FLATTEN EVERYTHING</div>
       )}
 
       <Header
