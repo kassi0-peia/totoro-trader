@@ -9,7 +9,7 @@ out of this file into commits; strikethrough = rejected, with the why.
 ## Small (an evening or less)
 - **Bracket presets** — one chip arms her standard TP/SL (e.g. +30%/−50%) computed off fill price; stop typing exits per ticket.
 - **Fill latency stamp** — send→fill ms in the fill toast (both timestamps already exist client-side); sibling of the shipped fill-quality delta.
-- **Kill-switch hotkey** — chord (e.g. Shift+Esc ×2) = cancel all working + close all at marketable limits; keyboard for the shaking-hand moment.
+- ~~Kill-switch hotkey~~ — ✅ shipped 2026-07-13: **Shift+Esc ×2** (first press arms a red banner ~2s, second fires; no dialog) = disarm all ⚔ + cancel all working + close all at marketable limits; unquoted legs stay open and the toast says so; works from inside text fields; drillable in replay.
 - **Setup tags** — `N` notes parse hashtags (#paw #fade); journal history shows win-rate per tag (Edgewonk's core, one regex away).
 - **Close half** — ½ button on position rows: sell floor(qty/2) as marketable limit; ladder traders trim.
 - **Theta clock** — position rows show time-in-trade + est. theta burned since entry.
