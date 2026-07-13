@@ -18,6 +18,7 @@ test('keyIntent: Space, Escape, C/P (case-insensitive)', () => {
   assert.deepEqual(keyIntent(ev('p')), { kind: 'ticket', type: 'put' });
   assert.deepEqual(keyIntent(ev('n')), { kind: 'note' });
   assert.deepEqual(keyIntent(ev('N')), { kind: 'note' });
+  assert.deepEqual(keyIntent(ev('?')), { kind: 'help' });
   assert.equal(keyIntent(ev('x')), null);
 });
 

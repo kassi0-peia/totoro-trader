@@ -34,6 +34,7 @@ export function keyIntent(e) {
   if (k === 'c') return { kind: 'ticket', type: 'call' };
   if (k === 'p') return { kind: 'ticket', type: 'put' };
   if (k === 'n') return { kind: 'note' }; // annotate the latest fill
+  if (e.key === '?') return { kind: 'help' }; // the self-documenting overlay
   return null;
 }
 
@@ -54,7 +55,8 @@ export default function useHotkeys(handlers) {
       if (intent.kind === 'digit') { if (h.onDigit?.(intent.n)) e.preventDefault(); return; }
       if (intent.kind === 'space') { if (h.onSpace?.()) e.preventDefault(); return; }
       if (intent.kind === 'ticket') { if (h.onTicket?.(intent.type)) e.preventDefault(); return; }
-      if (intent.kind === 'note') { if (h.onNote?.()) e.preventDefault(); }
+      if (intent.kind === 'note') { if (h.onNote?.()) e.preventDefault(); return; }
+      if (intent.kind === 'help') { if (h.onHelp?.()) e.preventDefault(); }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
