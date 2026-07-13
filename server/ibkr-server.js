@@ -2842,6 +2842,21 @@ function recordExecution(contract, execution, live = false) {
     // Fill-quality reference, when the placing order is known this session.
     ...(ord && ord.refAtSend > 0 ? { ref: ord.refAtSend } : {})
   };
+  // Route the fill to ITS OWN trade date (16:15-roll + holiday aware). A
+  // backfill can re-deliver a PAST day's execution — that belongs in the
+  // journal under its day, never in today's blotter (kisa 2026-07-13:
+  // "todays trades shows a bunch of stuff from friday").
+  const rowDate = computeSession(new Date(trade.ts)).expiry;
+  if (rowDate !== tradesDate) {
+    const rows = journal[rowDate] || (journal[rowDate] = []);
+    if (!rows.some((t) => t.execId === execId)) {
+      rows.push(trade);
+      rows.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+      saveJournal();
+      console.log(`[ibkr] backfilled fill routed to journal ${rowDate}: ${action} ${strike}${right}`);
+    }
+    return;
+  }
   trades.push(trade);
   if (trades.length > 1000) trades = trades.slice(-1000);
   saveTrades();
@@ -2893,7 +2908,17 @@ function loadJournal() {
     const d = JSON.parse(fs.readFileSync(JOURNAL_FILE, 'utf8'));
     if (d && d.days && typeof d.days === 'object') {
       journal = d.days;
-      console.log(`[ibkr] journal: ${Object.keys(journal).length} day(s) loaded`);
+      // Seed the execId dedupe from the WHOLE archive, not just today's file —
+      // without this, a restart after the daily sweep forgot every past
+      // execId, and the reqExecutions backfill re-delivered Friday's fills
+      // into Monday's blotter as "new" (kisa, 2026-07-13).
+      let seeded = 0;
+      for (const rows of Object.values(journal)) {
+        for (const t of rows || []) {
+          if (t && t.execId) { seenExecIds.add(t.execId); seeded++; }
+        }
+      }
+      console.log(`[ibkr] journal: ${Object.keys(journal).length} day(s) loaded, ${seeded} execIds seeded`);
     }
   } catch {}
 }
