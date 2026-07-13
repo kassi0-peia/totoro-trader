@@ -429,24 +429,23 @@ export default function Chart({
     cancelMomentum();
   }, [timeframe, cancelMomentum]);
 
-  // Screen-capture clip: records the tab/window the user picks in the browser
-  // prompt and downloads a .webm. Click again (or the browser's "stop sharing")
-  // to finish; auto-stops at 90 s as a safety net.
-  const toggleRecord = useCallback(async () => {
+  // Record a clip of the CHART CANVAS directly (canvas.captureStream) — no
+  // permission prompt at all. The old getDisplayMedia path died silently in the
+  // chromeless app window: Firefox anchors its screen-share doorhanger to the
+  // toolbox that userChrome.css collapses, so the prompt opened invisibly and
+  // the button "did nothing" (kisa, 2026-07-13 — recording last worked 06-11,
+  // the chromeless window shipped 06-25). Canvas capture starts instantly,
+  // records at full dpr resolution, and the chart IS the app; DOM overlays
+  // (hover cards, toasts) aren't in the clip — the tape and its lines are.
+  // Click again to finish (downloads a .webm); auto-stops at 90 s.
+  const toggleRecord = useCallback(() => {
     if (recRef.current) {
       if (recRef.current.state === 'recording') recRef.current.stop();
       return;
     }
-    let stream;
-    try {
-      stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { frameRate: 30 },
-        audio: false,
-        preferCurrentTab: true
-      });
-    } catch {
-      return; // user dismissed the share picker
-    }
+    const canvas = canvasRef.current;
+    if (!canvas || typeof canvas.captureStream !== 'function') return;
+    const stream = canvas.captureStream(30);
     const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp9') ? 'video/webm;codecs=vp9' : 'video/webm';
     const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 6_000_000 });
     const chunks = [];
@@ -463,10 +462,6 @@ export default function Chart({
       recRef.current = null;
       setRecording(false);
     };
-    // Browser's own "Stop sharing" bar should also finalize the clip.
-    stream.getVideoTracks()[0].addEventListener('ended', () => {
-      if (rec.state === 'recording') rec.stop();
-    });
     rec.start();
     recRef.current = rec;
     setRecording(true);
