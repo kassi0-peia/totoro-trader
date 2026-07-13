@@ -15,6 +15,7 @@ import useAlerts from './useAlerts.js';
 import useWatchlist from './useWatchlist.js';
 import useBottomDrawer from './useBottomDrawer.js';
 import ChartMenu from './ChartMenu.jsx';
+import HelpOverlay from './HelpOverlay.jsx';
 import { useIbkrFeed, liveGreeks, liveQuote } from './feed.js';
 import { greeks as bsGreeks, nearestOtmStrike, realizedVol } from './options.js';
 import { classifyRegime } from './regime.js';
@@ -150,6 +151,9 @@ export default function App() {
   // that row's note editor focused (the "note to self" moment, right after a
   // fill). The nonce re-triggers even for the same fill id.
   const [noteReq, setNoteReq] = useState(null);
+  // ? overlay — keys/gestures/marks reference (kisa 2026-07-13: "it's falling
+  // out of my head"). Toggled by ?, closed by Esc/click-away; zero resting UI.
+  const [helpOpen, setHelpOpen] = useState(false);
   useEffect(() => {
     try { localStorage.setItem('tt.drawerView', drawerView); } catch {}
   }, [drawerView]);
@@ -1372,11 +1376,13 @@ export default function App() {
   const chartApiRef = useRef(null); // Chart's imperative surface: { snapToNow, hover }
   const hotkeysLive = feed.live || replayActive; // everything but Esc needs a tape
   useHotkeys({
+    onHelp: () => { setHelpOpen((v) => !v); return true; },
     onEscape: () => {
       // ONE close per press, top-most first. TradeModal and ChartMenu already
       // close THEMSELVES on Esc (their own window listeners), as does the
       // replay calendar popover and the focused search input — when any of
       // those is up we only consume the press so nothing below also closes.
+      if (helpOpen) { setHelpOpen(false); return; }
       if (pending) return;
       if (chartMenu) return;
       if (document.querySelector('.replay-cal-pop')) return;
@@ -1741,6 +1747,7 @@ export default function App() {
         </div>
       </main>
 
+      {helpOpen && <HelpOverlay onClose={() => setHelpOpen(false)} />}
       {chartMenu && !pending && (() => {
         // Snap the menu's strike to the active grid (SPX 5s; a guest's real step).
         const mStrike = Math.round(chartMenu.price / strikeStep) * strikeStep;
