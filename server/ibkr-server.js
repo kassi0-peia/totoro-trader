@@ -38,6 +38,7 @@ import {
   spxwContract,
 } from './order-plan.js';
 import { atomicWriteSync } from './atomic-file.js';
+import { createQuoteRequestTracker } from './quote-request-tracker.js';
 import { createTradeJournal } from './trade-journal.js';
 
 // Last-resort backstop: an unexpected throw in one handler must not kill the whole
@@ -2016,11 +2017,19 @@ function resetSubscriptions() {
   currentExpiry = null;
   esContract = null;
   esExpiry = null;
+  // One-shot quote ownership lives outside `subs`. A disconnect drops the IB
+  // requests, so retaining either key would make the matching contract look
+  // permanently in flight and suppress every quote request after reconnect.
+  quoteInFlight.clear();
   // Guest state is NOT persisted across a reconnect — its subs were just cleared
   // with everyone else's, and the client re-activates from memory. Drop it so a
   // stale guest can't drive the order path against contracts we no longer track.
   guestChain.clear();
   guest = null;
+  // A guest may have paused the home SPXW chain when the socket dropped. The
+  // guest itself is discarded above, so the pause must be discarded with it;
+  // otherwise the next handshake cannot rebuild SPXW/options-basis after login.
+  spxwChainPaused = false;
   // Watchlist state is not persisted across a reconnect either — its resolved
   // contracts/reqIds were just cleared with everyone else's. Drop the runtime
   // maps and the list; the client re-sends `watchlist` on reconnect from memory.
@@ -2357,7 +2366,7 @@ function handleReplayDayRequest(_ws, msg) {
 // Results are cached briefly and broadcast so every client benefits.
 const QUOTE_CACHE_MS = 4000;
 const quoteCache = new Map();   // strike|right|expiry -> { bid, ask, last, ts }
-const quoteInFlight = new Map(); // same key -> reqId
+const quoteInFlight = createQuoteRequestTracker(); // same key -> reqId
 
 function handleQuoteRequest(_ws, msg) {
   const strike = Number(msg.strike);
@@ -2402,7 +2411,7 @@ function handleQuoteRequest(_ws, msg) {
     ib.reqMktData(reqId, contract, '', true, false, []);
   } catch (e) {
     console.log('[ibkr] quote snapshot failed:', e.message);
-    quoteInFlight.delete(key);
+    quoteInFlight.release(reqId, key);
     subs.delete(reqId);
     return;
   }
@@ -2412,9 +2421,12 @@ function handleQuoteRequest(_ws, msg) {
 
 function finishQuoteSnap(reqId) {
   const s = subs.get(reqId);
-  if (!s || s.kind !== 'quote-snap') return;
+  if (!s || s.kind !== 'quote-snap') {
+    quoteInFlight.release(reqId);
+    return;
+  }
   subs.delete(reqId);
-  quoteInFlight.delete(s.key);
+  quoteInFlight.release(reqId, s.key);
   if (s.bid == null && s.ask == null && s.last == null) return; // nothing quoted
   const q = { bid: s.bid, ask: s.ask, last: s.last, dayHigh: s.high ?? null, dayLow: s.low ?? null, ts: Date.now() };
   quoteCache.set(s.key, q);
