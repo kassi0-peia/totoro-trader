@@ -11,11 +11,8 @@
 //   Target option expiry rolls to the next trading day at 16:15.
 
 import net from 'node:net';
-import http from 'node:http';
-import https from 'node:https';
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { IBApi, EventName } from '@stoqey/ib';
 import { WebSocketServer } from 'ws';
@@ -32,6 +29,7 @@ import {
   parseHistTime,
 } from './candle-series.js';
 import { parseExecTime } from './execution-time.js';
+import { createStaticServer, defaultCARoot } from './http-server.js';
 
 // Last-resort backstop: an unexpected throw in one handler must not kill the whole
 // bridge while working orders/brackets are live at IBKR. Log loudly and stay up —
@@ -229,8 +227,14 @@ loadTrades();
 
 // ── HTTP(S) + WebSocket server ────────────────────────────────────────────────
 
-const httpServer = createServer();
-const usingTls = httpServer instanceof https.Server;
+const { server: httpServer, usingTls } = createStaticServer({
+  distDir: DIST_DIR,
+  shotsDir: SHOTS_DIR,
+  caroot: process.env.CAROOT || defaultCARoot(),
+  wantTls: WANT_TLS,
+  tlsCert: TLS_CERT,
+  tlsKey: TLS_KEY,
+});
 const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
 
 httpServer.listen(WS_PORT, () => {
@@ -242,20 +246,6 @@ httpServer.listen(WS_PORT, () => {
   console.log(`[ibkr-server] session: source=${session.source} expiry=${session.expiry} rth=${session.rth}, md type=${MARKET_DATA_TYPE}`);
   console.log('[ibkr-server] order path has no app-layer auth — keep this port on localhost or a trusted overlay (Tailscale/VPN), never exposed raw');
 });
-
-function createServer() {
-  if (WANT_TLS) {
-    if (fs.existsSync(TLS_CERT) && fs.existsSync(TLS_KEY)) {
-      console.log(`[ibkr-server] TLS enabled (cert: ${TLS_CERT})`);
-      return https.createServer(
-        { cert: fs.readFileSync(TLS_CERT), key: fs.readFileSync(TLS_KEY) },
-        serveStatic
-      );
-    }
-    console.log(`[ibkr-server] TLS requested but cert/key not found at ${TLS_CERT} — falling back to HTTP`);
-  }
-  return http.createServer(serveStatic);
-}
 
 wss.on('connection', (ws) => {
   ws.send(JSON.stringify(snapshotMsg()));
@@ -284,114 +274,6 @@ wss.on('connection', (ws) => {
     else if (msg.type === 'armed') handleArmed(ws, msg);
   });
 });
-
-const MIME = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.mjs': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.webmanifest': 'application/manifest+json',
-  '.png': 'image/png',
-  '.ico': 'image/x-icon',
-  '.svg': 'image/svg+xml',
-  '.woff2': 'font/woff2',
-  '.map': 'application/json; charset=utf-8'
-};
-
-// mkcert's CA root dir, per platform (Linux ~/.local/share/mkcert, macOS
-// ~/Library/Application Support/mkcert, Windows %LOCALAPPDATA%\mkcert). Only used
-// for the optional HTTPS/PWA path; CAROOT env overrides. (Was POSIX-only $HOME.)
-const CAROOT = process.env.CAROOT || (() => {
-  const home = os.homedir();
-  if (process.platform === 'win32') return path.join(process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local'), 'mkcert');
-  if (process.platform === 'darwin') return path.join(home, 'Library', 'Application Support', 'mkcert');
-  return path.join(home, '.local', 'share', 'mkcert');
-})();
-
-function serveStatic(req, res) {
-  let reqPathRaw;
-  try {
-    reqPathRaw = decodeURIComponent((req.url || '/').split('?')[0]);
-  } catch {
-    // Malformed percent-encoding (e.g. GET /%) — a bad URL must never take the
-    // bridge down while orders are working at IBKR.
-    res.writeHead(400, { 'content-type': 'text/plain' });
-    res.end('Bad request');
-    return;
-  }
-  // Convenience: let the phone download the mkcert root CA to install it.
-  // The public CA cert is safe to distribute; the CA private key is never served.
-  if (reqPathRaw === '/rootCA.pem' || reqPathRaw === '/totoro-ca.crt') {
-    const caPath = path.join(CAROOT, 'rootCA.pem');
-    if (fs.existsSync(caPath)) {
-      res.writeHead(200, {
-        'content-type': 'application/x-x509-ca-cert',
-        'content-disposition': 'attachment; filename="totoro-rootCA.crt"'
-      });
-      fs.createReadStream(caPath).pipe(res);
-      return;
-    }
-  }
-
-  // 📸 journal fill snapshots — their own dir, strict filename shape (row id +
-  // known image ext), so this route can never reach outside SHOTS_DIR.
-  if (reqPathRaw.startsWith('/shots/')) {
-    const name = reqPathRaw.slice('/shots/'.length);
-    if (!/^\d+\.(webp|png|jpg)$/.test(name)) {
-      res.writeHead(404, { 'content-type': 'text/plain' });
-      res.end('Not found');
-      return;
-    }
-    fs.readFile(path.join(SHOTS_DIR, name), (err, data) => {
-      if (err) {
-        res.writeHead(404, { 'content-type': 'text/plain' });
-        res.end('Not found');
-        return;
-      }
-      const type = name.endsWith('.webp') ? 'image/webp' : name.endsWith('.png') ? 'image/png' : 'image/jpeg';
-      res.writeHead(200, { 'content-type': type, 'cache-control': 'public, max-age=3600' });
-      res.end(data);
-    });
-    return;
-  }
-
-  if (!fs.existsSync(DIST_DIR)) {
-    res.writeHead(503, { 'content-type': 'text/plain' });
-    res.end('No build found. Run `npm run build` first, or use the Vite dev server.');
-    return;
-  }
-  const rel = reqPathRaw === '/' ? 'index.html' : reqPathRaw.replace(/^\/+/, '');
-  const resolved = path.normalize(path.join(DIST_DIR, rel));
-  if (resolved !== DIST_DIR && !resolved.startsWith(DIST_DIR + path.sep)) {
-    res.writeHead(403, { 'content-type': 'text/plain' });
-    res.end('Forbidden');
-    return;
-  }
-  fs.stat(resolved, (err, stat) => {
-    if (!err && stat.isFile()) sendFile(res, resolved);
-    else sendFile(res, path.join(DIST_DIR, 'index.html')); // SPA fallback
-  });
-}
-
-function sendFile(res, filePath) {
-  fs.readFile(filePath, (err, data) => {
-    if (err) {
-      res.writeHead(404, { 'content-type': 'text/plain' });
-      res.end('Not found');
-      return;
-    }
-    const headers = { 'content-type': MIME[path.extname(filePath).toLowerCase()] || 'application/octet-stream' };
-    const base = path.basename(filePath);
-    if (base === 'sw.js' || base === 'index.html' || base === 'manifest.json') {
-      headers['cache-control'] = 'no-cache';
-    } else if (filePath.includes(`${path.sep}assets${path.sep}`)) {
-      headers['cache-control'] = 'public, max-age=31536000, immutable';
-    }
-    res.writeHead(200, headers);
-    res.end(data);
-  });
-}
 
 // ── IBKR connection ───────────────────────────────────────────────────────────
 
