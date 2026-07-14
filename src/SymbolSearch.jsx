@@ -8,10 +8,10 @@ import WatchPanel from './Watchlist.jsx';
 export const searchPopover = { isOpen: () => false, close: () => {} };
 
 // Multi-symbol Phase A+B: symbol search, right-aligned under the ATM quote
-// strip. Collapsed to a bare 🔍 by default (kisa's placement, 2026-07-07);
+// strip. Collapsed to a bare 🔍 by default;
 // clicking it expands the input AND opens the popover. While the input is
 // empty the popover is the watchlist panel (SPX home + starred stocks with
-// quotes — folded in here 2026-07-09 so the row stays a lone magnifier);
+// quotes — folded in here so the row stays a lone magnifier);
 // typing swaps it for the debounced symbolSearch results, where ☆/★ toggles
 // a symbol in and out of the watchlist. Pick a result (or a watch row) =
 // activate a guest cockpit. When a guest is active the [SPX] home chip +
@@ -93,7 +93,7 @@ export default function SymbolSearch({
   return (
     <div className="symbol-search" ref={boxRef}>
       {/* Chips only earn their space when a guest is active — collapsed-on-SPX
-          is just the bare 🔍 (kisa's ask). */}
+          is just the bare 🔍. */}
       {guestOn && (
         <>
           <button
@@ -109,8 +109,8 @@ export default function SymbolSearch({
           </span>
         </>
       )}
-      {/* Tabs for symbols holding an open position (kisa 2026-07-10): a TSLA
-          leg must never strand its cockpit behind a fresh search — one click
+      {/* Tabs for symbols holding an open position: a guest leg must never
+          strand its cockpit behind a fresh search — one click
           returns to it, and its marks only stream while it's active. */}
       {openGuestSymbols.filter((s) => s !== activeSymbol).map((s) => (
         <button

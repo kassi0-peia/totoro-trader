@@ -191,7 +191,7 @@ let chainCenter = null;
 // Multiple browser tabs may share it, but delivery and order/history authority
 // stay client-owned. Its candle/chain state is isolated and the SPXW line-hog
 // yields while it is active; browser session intent reactivates after reconnect.
-// See server/guest-registry.js, server/guest-symbol.js, and spec-multi-symbol.md.
+// See server/guest-registry.js and server/guest-symbol.js.
 const GUEST_STRIKE_WINDOW = 6;    // n strikes each side of spot (narrower than SPXW)
 const GUEST_RECENTRE_STEPS = 1;   // recenter once spot drifts a full step past the window edge
 const GUEST_HISTORY_CANDLES = 3000;
@@ -207,11 +207,11 @@ function newGuestSeries() {
 // ── Watchlist layer (multi-symbol Phase B) ───────────────────────────────────
 // A client-owned list of US stock tickers polled for QUOTES ONLY — no chart, no
 // chain, no orders. The bridge never streams these: it fires one-shot snapshot
-// reqMktData on a slow, staggered cycle, because kisa's market-data line budget
+// reqMktData on a slow, staggered cycle because the market-data line budget
 // is already spent on the SPXW (or guest) chain. The client is the source of
 // truth for the list and re-sends it on (re)connect; the bridge does NOT persist
 // it. SPX is excluded (home instrument, already streaming — the client pins it
-// from the live feed). See server/watchlist.js and spec-multi-symbol.md.
+// from the live feed). See server/watchlist.js.
 const WATCH_POLL_MS = 25_000;     // full refresh cycle per symbol (slow, budget-friendly)
 const WATCH_STAGGER_MS = 350;     // spacing between the symbols' snapshots within a cycle
 const WATCH_SNAP_TIMEOUT_MS = 8_000; // finalize a snapshot even if tickSnapshotEnd never lands
@@ -221,7 +221,7 @@ const watchQuotes = new Map();    // symbol -> last good shaped quote { symbol, 
 const watchResolving = new Set(); // symbols with a reqContractDetails in flight (dedupe)
 const watchInFlight = new Map();  // symbol -> reqId of the snapshot currently on the wire
 
-// ── ⚔ Armed orders (kisa chose design B, 2026-07-11 — see server/armed.js) ──
+// ── ⚔ Armed orders (see server/armed.js) ────────────────────────────────────
 // Client-owned list, wholesale-set like the watchlist; NOT persisted (a bridge
 // restart fails safe to disarmed until a client re-sends). firedIds guards a
 // stale client list from re-arming something that already fired this session.
@@ -244,7 +244,7 @@ if (reverseRoutingLocked) {
 // Order execution state. Account/position/funds authority lives in the
 // portfolio controller below; working-order lifecycle remains here until the
 // order gateway extraction is connected.
-const QUICK_CANCEL_MS = 10_000; // ⚡ unfilled-order lifetime before auto-cancel (kisa 2026-07-11)
+const QUICK_CANCEL_MS = 10_000; // ⚡ unfilled-order lifetime before auto-cancel
 // This bridge's own orders keep their numeric key because every placement/error
 // call made by this API client uses that namespace. reqAllOpenOrders also returns
 // foreign/manual rows whose numeric IDs are client-scoped, so those live in a
@@ -1616,7 +1616,7 @@ function applyBackfilledBasis(target, spxBarClose, esBarClose, how) {
 // off by that much. Overnight the SPXW chain trades live, and put-call parity
 // gives the true forward model-free — so keep a chain-anchored basis fresh and
 // prefer it; the frozen snapshot stays as the fallback, the daily-change
-// reference, and the cold-start seed. See spec-options-implied-basis.md.
+// reference, and the cold-start seed.
 let basisLive = null;   // esPrice − optionsForward; never persisted
 let basisLiveTs = 0;    // Date.now() of the last good recompute
 const BASIS_LIVE_FRESH_MS = 30_000;    // trust window after a good recompute
@@ -2425,7 +2425,7 @@ function watchQuotesMsg() {
   return { type: 'watchlistQuotes', quotes };
 }
 
-// ── ⚔ Armed orders (design B, kisa 2026-07-11) ──────────────────────────────
+// ── ⚔ Armed orders ─────────────────────────────────────────────────────────
 // {type:'armed', orders:[...]} → wholesale set (the watchlist pattern): the
 // client owns the list and re-sends on (re)connect. Every order is
 // re-validated server-side; anything already fired this session is refused so
@@ -2815,7 +2815,7 @@ setInterval(evaluateSession, 5000);
 setInterval(maybeBackfillBasis, 300_000);
 
 // Poll the watchlist with one-shot snapshots on a slow cycle. No-op when the
-// list is empty or disconnected, so it costs nothing until kisa stars a symbol.
+// list is empty or disconnected, so it costs nothing until a client stars a symbol.
 setInterval(pollWatchlist, WATCH_POLL_MS);
 
 // While DELAYED, re-subscribe SPX every 2 min: TWS only re-evaluates the data
@@ -3585,7 +3585,7 @@ function handleQuoteRequest(ws, msg) {
   const strike = Number(msg.strike);
   const right = msg.right === 'P' ? 'P' : 'C';
   if (!Number.isFinite(strike) || !ib || !connected) return;
-  // A guest-symbol quote (read-only; kisa 2026-07-10): the position poller
+  // A guest-symbol quote is read-only; the position poller
   // marks open legs on symbols whose cockpit ISN'T active. There's no
   // discovered secdef here, so the OPT contract is built directly — SMART
   // resolves stock weeklies fine, and a failed resolution just means no

@@ -1,7 +1,7 @@
 import React from 'react';
 
 // Multi-symbol Phase B: the starred-symbols panel, folded INSIDE the 🔍 search
-// popover (kisa's call, 2026-07-09 — the separate ★ button crowded her row).
+// popover so a separate ★ button does not crowd the control row.
 // SymbolSearch shows it while the query is empty: SPX pinned at top (goes
 // home), then the starred stocks with last · change% from the bridge's
 // snapshot-quote poll. Click a row to activate that symbol's guest cockpit;

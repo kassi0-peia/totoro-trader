@@ -1,8 +1,8 @@
 import React from 'react';
 
-// Bus Stop timetable: the coordinate she called, its countdown/result, and the
+// Bus Stop timetable: the stored coordinate, its countdown/result, and the
 // contract suggestions computed at drop time (stored on the stop — the picks
-// are a snapshot of the chain when she called the shot, not a live feed).
+// are a snapshot of the chain when the stop was created, not a live feed).
 // All projected multiples are ESTIMATES (sticky-strike repricing); the panel
 // says so. Entry goes through onTrade → the normal marketable-limit path.
 

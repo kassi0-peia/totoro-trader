@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-// ── Bottom drawer (kisa 2026-07-10: "hide everything below the chart") ──
+// ── Bottom drawer ───────────────────────────────────────────────────────────
 // At rest the chart runs edge-to-edge. The invisible band along the bottom
 // edge materializes the panel (tf-bar + positions) after a 1.5s hover —
 // same rhythm as the left trades drawer — or instantly on click; it FADES
-// in ("for drama"). Once open it stays until she clicks off it or hits Esc
-// (never on mouse-away). A closing fill auto-peeks it ~5s unless she
+// in. Once open it stays until the user clicks off it or hits Esc
+// (never on mouse-away). A closing fill auto-peeks it ~5s unless the user
 // engages. Mobile keeps the always-visible layout (styles.css — touch has
 // no hover, and positions must not hide behind a gesture on the phone).
 //
@@ -22,7 +22,7 @@ export default function useBottomDrawer() {
     clearTimeout(bottomPeekTimer.current);
     bottomPeekTimer.current = setTimeout(() => setBottomOpen(false), 5000);
   }, []);
-  const footerRef = useRef(null); // the whole footer is a trigger too (kisa: the 14px band was "v small")
+  const footerRef = useRef(null); // the whole footer is a larger trigger than the narrow grab band
   useEffect(() => {
     if (!bottomOpen) return;
     const onDoc = (e) => {

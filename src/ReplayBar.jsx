@@ -58,7 +58,7 @@ export default function ReplayBar({ theme, replay, loading, onLoad, onMystery, o
 
   const { candles, idx, playing, speed, leadIn } = replay;
   const cur = candles[idx];
-  // Blind (mystery) day: mask the date until the tape runs out or she peeks.
+  // Blind (mystery) day: mask the date until the tape runs out or it is revealed.
   const revealed = !replay.blind || replay.revealed || idx >= candles.length - 1;
 
   return (

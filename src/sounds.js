@@ -1,4 +1,4 @@
-// Soft cockpit sounds. Two tones, both quiet by design (kisa hates noise):
+// Soft cockpit sounds. Two tones, both intentionally quiet:
 // money should be audible, never loud. Best-effort — the browser may block
 // audio before the first user interaction; we just skip.
 

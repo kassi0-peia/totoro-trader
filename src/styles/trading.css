@@ -307,7 +307,7 @@
 }
 
 /* ── Multi-symbol Phase A: symbol search under the ATM quote strip ──
-   A thin right-aligned row (kisa's placement, 2026-07-07): collapsed to a bare
+   A thin right-aligned row collapsed to a bare
    🔍 that expands to the input on click. Guest/SPX chips appear only when a
    guest is active. Desktop-first — hidden on mobile. */
 .symbol-search-row {
@@ -469,8 +469,8 @@
 }
 
 /* ── Watchlist (multi-symbol Phase B) ── the starred-symbols panel, rendered
-   inside the 🔍 popover (.sym-dropdown) while the query is empty — no chrome
-   of its own on the cockpit (kisa, 2026-07-09). */
+   inside the 🔍 popover (.sym-dropdown) while the query is empty, with no
+   separate cockpit chrome. */
 .watch-add {
   display: block;
   width: 100%;

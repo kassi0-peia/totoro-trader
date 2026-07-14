@@ -155,8 +155,7 @@ export default function App() {
     dispatchPinnedCard({ type: 'close', key, viewport: pinnedViewportRef.current });
   }, []);
   // Slide-in drawer: today's fills over the chart. Open/closed state is
-  // layout memory (tt.drawerOpen) — if she trades with it pinned open, it
-  // greets her open on the next load.
+  // layout memory (tt.drawerOpen), so a pinned-open drawer survives reloads.
   const [tradesPeek, setTradesPeek] = useState(() => {
     try { return localStorage.getItem('tt.drawerOpen') === '1'; } catch { return false; }
   });
@@ -182,7 +181,7 @@ export default function App() {
     const t = setTimeout(() => setDrawerMounted(false), 300);
     return () => clearTimeout(t);
   }, [tradesPeek, drawerMounted]);
-  // ── Bottom drawer (kisa 2026-07-10: "hide everything below the chart") ──
+  // ── Bottom drawer ────────────────────────────────────────────────────────
   // Invisible bottom band + footer: hover 1.5s or click to reveal the panel;
   // clicks-off/Esc close it; a closing fill auto-peeks it ~5s. Opening fills
   // stay quiet so entering a position never covers the chart. All timers,
@@ -198,8 +197,8 @@ export default function App() {
   // that row's note editor focused (the "note to self" moment, right after a
   // fill). The nonce re-triggers even for the same fill id.
   const [noteReq, setNoteReq] = useState(null);
-  // ? overlay — keys/gestures/marks reference (kisa 2026-07-13: "it's falling
-  // out of my head"). Toggled by ?, closed by Esc/click-away; zero resting UI.
+  // ? overlay keeps keys, gestures, and marks discoverable without resting UI.
+  // Toggled by ?, closed by Esc/click-away.
   const [helpOpen, setHelpOpen] = useState(false);
   useEffect(() => {
     try { localStorage.setItem('tt.drawerView', drawerView); } catch {}
@@ -456,7 +455,7 @@ export default function App() {
   // ⏰ price alerts: state + persistence + the live-crossing effect (see useAlerts).
   const [alerts, setAlerts] = useAlerts({ feedPrice: feed.price, guestPrice: guest?.price, guestActive, activeSymbol, showToast });
 
-  // ⚔ armed orders (design B — kisa 2026-07-11): the client owns the list
+  // ⚔ armed orders: the client owns the list
   // (persisted, re-sent on every reconnect — the watchlist pattern); the
   // bridge re-validates, watches the displayed price, and fires one-shot.
   // Fired/failed/rejected events prune this list so a stale entry can never
@@ -791,7 +790,7 @@ export default function App() {
   // Time-to-expiry, quantized to 30s buckets: T drifts ~2e-6 per tick —
   // invisible in any premium — but a per-tick T is a draw-effect dependency,
   // so it forced the WHOLE canvas to repaint every 800ms even with nothing
-  // else changing (the idle-cockpit CPU tax kisa felt as sticky hover).
+  // else changing (an idle-cockpit CPU tax that made hover feel sticky).
   // Replay keeps exact time — the tape drives it, not the clock.
   const tSlow = Math.floor(now / 30_000) * 30_000;
   const modelNow = replayActive ? replayNow : tSlow;
@@ -813,8 +812,8 @@ export default function App() {
     return classifyRegime(src);
   }, [tSlow, replayActive, replay?.idx, cockpitCandles.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Model sigma, vol-aware (kisa's weekend pick, 2026-07-11): the flat 18%
-  // guess overpriced everything when real vol sat near 11% (mark-audit).
+  // Model sigma is volatility-aware: the flat 18% fallback can overprice options
+  // when realized volatility is materially lower.
   // Live: VIX is the market's own 30-day sigma → vix/100. Replay samples only
   // the bars revealed through replay.idx; future bars and today's VIX are both
   // off-limits. The old 0.18 survives as the nothing-known/flat fallback.
@@ -865,8 +864,8 @@ export default function App() {
     }
     // A position on a symbol with NO live feed (a guest that isn't the active
     // cockpit) cannot be marked honestly. The old fallthrough priced it on the
-    // SPX path — a TSLA ~315C "marked" against SPX ≈ 7500 → comedy P/L (kisa,
-    // 2026-07-10). No data → no mark: premium null, the row shows —, P/L
+    // SPX path, producing nonsensical P/L. No data → no mark: premium null,
+    // the row shows —, P/L
     // contributions freeze at entry until the symbol's cockpit is active again.
     if (symbol !== 'SPX' && !(guestActive && symbol === activeSymbol)) {
       // The 30s exact-contract snapshot poller keeps inactive marks and, when
@@ -909,8 +908,8 @@ export default function App() {
     // Prefer the market's own mid for the MARK when the quote is fresh. IBKR's
     // model tick prices the whole chain off one shared underlying that can sit
     // points away from the options market's parity — measured $150+/contract of
-    // phantom P/L on 2026-07-02 (holiday) AND 2026-07-05 (normal overnight),
-    // mark-audit.js. Greeks still come from the model; only the premium moves.
+    // phantom P/L during both holiday and normal overnight sessions. Greeks
+    // still come from the model; only the premium moves.
     // Both sides carry their own bridge timestamp. Requiring both prevents a
     // fresh bid from laundering an old ask (or vice versa); crossed and
     // zero-bid books are excluded from midpoint marks.
@@ -1022,8 +1021,8 @@ export default function App() {
       const psym = p.symbol ?? 'SPX';
       if (psym !== 'SPX') {
         // An inactive guest's leg gets ONE slow snapshot quote for its own
-        // contract, so its mark stays honest without a cockpit switch (kisa
-        // 2026-07-10, the TSLA follow-up). The ACTIVE guest's legs stream
+        // contract, so its mark stays honest without a cockpit switch. The
+        // ACTIVE guest's legs stream
         // via its chain — don't double-quote them.
         if (guestActive && psym === activeSymbol) return [];
         return [{ symbol: psym, strike: p.strike, right, expiry: p.expiry, conId: p.conId }];
@@ -1066,7 +1065,7 @@ export default function App() {
     return lv.length ? lv : null;
   }, [dayLevelsOn, replayActive, guestActive, feed.histSeries, feed.expiry, feed.spxClose]);
 
-  // Breakeven line, hover-only (kisa 2026-07-13): the hovered leg's at-expiry
+  // Breakeven line, hover-only: the hovered leg's at-expiry
   // breakeven — strike ± its real entry premium (same line for shorts). Only
   // for the active chart symbol; pending legs (no entryPremium) get no line.
   const beLine = useMemo(() => {
@@ -1079,8 +1078,8 @@ export default function App() {
   }, [hoverPos, positionsLive, activeSymbol]);
 
   // Symbols (beyond SPX) currently holding an open/in-flight position keep a
-  // one-click tab in the control line (kisa 2026-07-10: a TSLA position must
-  // never strand its cockpit behind a fresh search).
+  // one-click tab in the control line, so an open position never strands its
+  // cockpit behind a fresh search.
   const openGuestSymbols = useMemo(() => {
     const s = new Set();
     for (const p of positionsLive) {
@@ -1114,7 +1113,7 @@ export default function App() {
     return { anchor: feed.spxClose, width: c + p };
   }, [replayActive, feed.live, feed.price, feed.greeksMap, feed.spxClose, guestActive, guest, feed.guestGreeksMap, strikeStep, now]);
 
-  // 🚏 Drop a bus stop: her mind's-eye (price, time) coordinate, snapped to the
+  // 🚏 Drop a bus stop: a chosen (price, time) coordinate, snapped to the
   // minute and a quarter point. The timetable (contract suggestions) is computed
   // once, from the chain as it stands at the call — a snapshot of the shot, not
   // a live feed. Disarms after each drop so a stray second click can't dupe.
@@ -1606,7 +1605,7 @@ export default function App() {
             // risk leaves it visible-but-disabled with an exact explanation.
             onReplay={activeSymbol === 'SPX' && !replayGate.hidden ? toggleReplaySafe : null}
           />
-          {/* One control line (kisa, 2026-07-09): acct · 🚏 · ⚡ · 🔍, right-aligned
+          {/* One control line: acct · 🚏 · ⚡ · 🔍, right-aligned
               under the ATM strip. The acct cluster moved up from its old float
               over the chart, so the chart's top-right corner is clean. The row
               renders in replay too (the badge stays); only the search hides. */}
@@ -1802,7 +1801,7 @@ export default function App() {
               </div>
             )}
           </div>
-          {/* Bottom drawer: everything below the chart, folded (kisa 2026-07-10).
+          {/* Bottom drawer: everything below the chart, folded.
               The band is invisible chrome — hover peeks, click pins, closing
               fills auto-peek via markFillFlash. Mobile: statically open. */}
           <div

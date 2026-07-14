@@ -1,4 +1,4 @@
-// 🚏 Bus stops: her called (price, time) coordinates. Time-anchored like the
+// 🚏 Bus stops: stored (price, time) coordinates. Time-anchored like the
 // trade markers, but they may sit in the FUTURE space right of the live
 // candle — extrapolate slots past the last bar at the current timeframe.
 // Off-edge targets clamp to the right edge with an arrow. Pure paint that

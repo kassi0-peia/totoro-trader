@@ -2,7 +2,7 @@
 // flat across strikes when the chain is healthy — that flatness IS the quality
 // signal. Pure module (no bridge state) so it unit-tests offline; the bridge
 // feeds it live chain entries and turns the forward into a live overnight basis.
-// See spec-options-implied-basis.md. A wrong forward is worse than no forward
+// A wrong forward is worse than no forward
 // (the caller falls back to the frozen 4 PM basis), so every gate rejects
 // toward null.
 

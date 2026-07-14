@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { crossed } from './alerts.js';
 import { chimeAlert } from './sounds.js';
 
-// ⏰ one-shot price alerts (kisa, 2026-07-09): armed from the chart's
+// ⏰ one-shot price alerts: armed from the chart's
 // right-click menu, drawn as dashed lines only while armed, removed the
 // moment the live tape crosses (toast + chime). Zero resting chrome — the
 // line IS the feature. Persisted so a reload doesn't disarm the night's

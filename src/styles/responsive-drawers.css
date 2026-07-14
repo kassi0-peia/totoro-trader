@@ -127,15 +127,14 @@
 .trades-drawer .th-list { max-height: none; flex: 1; }
 
 /* Account badge + id overlaid on the chart's top-right corner */
-/* In-flow since 2026-07-09 (kisa): lives in the symbol-search-row beside the 🔍
+/* In-flow: lives in the symbol-search-row beside the 🔍
    instead of floating over the chart's top-right corner. */
 .chart-acct {
   display: flex;
   align-items: center;
   gap: 8px;
-  /* End the cluster left of the chart's ~64px price-label gutter (the old
-     float cleared it with right:72px; the row merge lost that — kisa
-     2026-07-10). The 🔍 alone stays at the edge, her 07-07 placement. */
+  /* End the cluster left of the chart's ~64px price-label gutter; the old
+     float cleared it with right:72px, while the 🔍 stays at the edge. */
   margin-right: 28px;
   transition: margin-right 160ms;
   font-size: 10px;
@@ -343,8 +342,7 @@
   .title-block { display: none; }          /* drop "TotoroTrader" + "0DTE EXECUTION" subtitle */
   .expiry-word { display: none; }          /* drop "EXPIRY ·", keep the date */
   .acct-feed { display: flex; }            /* the feed dot survives; color = state */
-  .acct-feed .feed-word { display: none; } /* kisa 2026-07-13: the LIVE/OFFLINE word
-                                              eats header space a phone doesn't have —
+  .acct-feed .feed-word { display: none; } /* the LIVE/OFFLINE word consumes scarce phone space;
                                               the dot carries the state, the tooltip
                                               carries the account */
   .acct-id { display: none; }              /* id is in the tooltip */
@@ -371,8 +369,8 @@
   }
 
   .acct-quick-btn { display: none; }   /* quick mode is right-click → desktop only */
-  .acct-bus-btn { display: none; }     /* bus stop is desktop-only (spec-bus-stop.md) */
-  /* Mobile de-busying (kisa 2026-07-10, "very busy"): pinch already zooms so
+  .acct-bus-btn { display: none; }     /* bus stop is desktop-only */
+  /* Mobile decluttering: pinch already zooms so
      the ± buttons go; screen recording and axis premiums are desktop tools;
      the TIMEFRAME word is self-evident from its buttons; the header dot
      already tells the connection story, so of the action row only the panic
@@ -418,8 +416,8 @@
 
 /* ============ TRADES DRAWER — HISTORY VIEW (multi-day journal) ============ */
 
-/* One history glyph flips today ↔ journal (kisa 2026-07-10: the two-word
-   toggle was chrome; the header text already names the view). `.solo` = no
+/* One history glyph flips today ↔ journal; the header text already names the
+   view. `.solo` = no
    net-cash chip to its left, so it pushes itself to the right edge. */
 .th-hist {
   display: inline-flex;
