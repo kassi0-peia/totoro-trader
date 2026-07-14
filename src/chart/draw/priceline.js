@@ -148,7 +148,7 @@ export function drawPriceLine(ctx, { layout, theme, priceToY, price, expectedMov
 
   // Breakeven, hover-only (kisa 2026-07-13: "breakeven only showing on
   // hover"): while a position is hovered, its at-expiry breakeven — strike ±
-  // the real entry premium — as a dashed line in the leg's own color, with an
+  // the real entry premium — as a dotted line in the leg's own color, with an
   // axis tag. Drawn last: a hover is a question being asked right now, it
   // outranks everything resting. Unhover → gone; zero resting chrome.
   if (beLine && Number.isFinite(beLine.price)) {
@@ -156,7 +156,8 @@ export function drawPriceLine(ctx, { layout, theme, priceToY, price, expectedMov
     if (yb > 4 && yb < layout.priceBot - 2) {
       const color = beLine.type === 'call' ? theme.callLine : theme.putLine;
       ctx.save();
-      ctx.setLineDash([6, 3]);
+      ctx.setLineDash([1, 4]);
+      ctx.lineCap = 'round';
       ctx.strokeStyle = color;
       ctx.globalAlpha = 0.8;
       ctx.lineWidth = 1;
