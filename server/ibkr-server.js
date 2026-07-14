@@ -1224,9 +1224,15 @@ function broadcastVix() {
   broadcast({ type: 'vix', last: vixLast, close: vixClose });
 }
 
-function requestSpxHistory() {
+function requestSpxHistory({ preserveLive = false } = {}) {
   if (!ib) return;
-  spx.candles = []; // fresh seed — avoid stacking duplicates on reconnect/re-seed
+  // Fresh connect/reconnect clears so pre-disconnect bars can't accumulate. The
+  // watchdog HMDS-outage RETRY (preserveLive) must NOT clear: it fires every
+  // ~HIST_SEED_TIMEOUT_MS while the live feed keeps building bars, and
+  // finishHistoricalSeed now merges by timestamp (history first, live second →
+  // live wins its buckets), so clearing would discard real live-built bars for
+  // no benefit.
+  if (!preserveLive) spx.candles = [];
   watchdogState.spxHistRequestedAt = Date.now();
   watchdogState.spxHistSeededAt = 0;
   const reqId = nextRequestId();
@@ -1265,9 +1271,10 @@ function subscribeEs() {
   }
 }
 
-function requestEsHistory() {
+function requestEsHistory({ preserveLive = false } = {}) {
   if (!ib || !esContract) return;
-  es.candles = []; // fresh seed — avoid stacking duplicates on reconnect/re-seed
+  // See requestSpxHistory: watchdog retry preserves accumulated live candles.
+  if (!preserveLive) es.candles = [];
   watchdogState.esHistRequestedAt = Date.now();
   watchdogState.esHistSeededAt = 0;
   const reqId = nextRequestId();
@@ -1372,7 +1379,7 @@ function watchdogTick() {
       now - watchdogState.spxHistRequestedAt > HIST_SEED_TIMEOUT_MS) {
     console.log('[watchdog] spx-hist seed stalled — re-requesting');
     lastWatchdogAction = now;
-    requestSpxHistory();
+    requestSpxHistory({ preserveLive: true });
     return;
   }
   if (esContract && watchdogState.esHistRequestedAt &&
@@ -1380,7 +1387,7 @@ function watchdogTick() {
       now - watchdogState.esHistRequestedAt > HIST_SEED_TIMEOUT_MS) {
     console.log('[watchdog] es-hist seed stalled — re-requesting');
     lastWatchdogAction = now;
-    requestEsHistory();
+    requestEsHistory({ preserveLive: true });
   }
 }
 setInterval(watchdogTick, 15_000);

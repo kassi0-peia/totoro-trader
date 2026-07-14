@@ -119,6 +119,24 @@ test('bar-runaway: firing resets ALL sources; reset() clears', () => {
   assert.equal(mon.runawaySource(4_000), null);
 });
 
+test('historical seed keeps live-built bars a stalled retry did not clear', () => {
+  // The watchdog HMDS retry preserves series.candles instead of clearing. Live
+  // bars accumulated during the outage must survive the merge even when the
+  // (still short) history reply does not include their timestamps, and live
+  // must win any overlapping bucket.
+  const series = { candles: [], edge: 0 };
+  feedCandleSeries(series, 100, { now: 120_000 }); // t=120_000, live
+  feedCandleSeries(series, 105, { now: 181_000 }); // t=180_000, live (overlaps history)
+  const historical = [
+    { t: 60_000, open: 90, high: 90, low: 90, close: 90, volume: 1 },
+    { t: 180_000, open: 200, high: 200, low: 200, close: 200, volume: 2 },
+  ];
+  finishHistoricalSeed(series, historical, { now: 181_500, maxCandles: 10 });
+  assert.deepEqual(series.candles.map((c) => c.t), [60_000, 120_000, 180_000]);
+  assert.equal(series.candles[1].open, 100, 'live-only bucket (120_000) preserved');
+  assert.equal(series.candles[2].open, 105, 'live wins the overlapping 180_000 bucket');
+});
+
 test('parseHistTime handles epoch seconds, daily bars, timestamps and junk', () => {
   assert.equal(parseHistTime(123), 123_000);
   assert.equal(parseHistTime('123'), 123_000);
