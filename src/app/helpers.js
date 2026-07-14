@@ -30,10 +30,11 @@ export function randomPastWeekday(exclude, { now = Date.now(), random = Math.ran
   return null;
 }
 
-// Model time belongs to the option contract, not to the next wall-clock 4 PM.
-// `expiry` is IBKR's YYYYMMDD contract date; local 16:00 is the SPXW/US-equity
-// option cutoff used throughout this app. A settled or malformed contract has
-// no time left. Black-Scholes applies its own one-minute numerical floor.
+// Model time belongs to the option contract, not to the next wall-clock close.
+// `expiry` is IBKR's YYYYMMDD contract date; optionExpiryCutoffMs pins its normal
+// 16:00 and early-close 13:00 cutoff to New York regardless of the host timezone.
+// A settled or malformed contract has no time left. Black-Scholes applies its
+// own one-minute numerical floor.
 export function timeToExpiryYearsAt(expiry, now = Date.now()) {
   const close = optionExpiryCutoffMs(expiry);
   if (close == null) return 0;
