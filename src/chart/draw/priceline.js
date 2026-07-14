@@ -30,26 +30,30 @@ export function drawPriceLine(ctx, { layout, theme, priceToY, price, expectedMov
     ctx.restore();
   }
 
-  // current price dashed line
-  const yPrice = priceToY(price);
-  ctx.save();
-  ctx.setLineDash([5, 4]);
-  ctx.strokeStyle = theme.accent;
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(0, yPrice + 0.5);
-  ctx.lineTo(layout.chartW, yPrice + 0.5);
-  ctx.stroke();
-  ctx.restore();
+  // Current price dashed line + right-axis label. Candles can legitimately
+  // outlive the current mark during a reconnect (and while an offline replay
+  // request is being rejected), so omit only this live marker when no finite
+  // price exists. The independent overlays below can still be useful.
+  if (Number.isFinite(price)) {
+    const yPrice = priceToY(price);
+    ctx.save();
+    ctx.setLineDash([5, 4]);
+    ctx.strokeStyle = theme.accent;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, yPrice + 0.5);
+    ctx.lineTo(layout.chartW, yPrice + 0.5);
+    ctx.stroke();
+    ctx.restore();
 
-  // price label on right axis
-  ctx.fillStyle = theme.accent;
-  ctx.fillRect(layout.chartW, yPrice - 9, rightAxis, 18);
-  ctx.fillStyle = '#0a0c12';
-  ctx.font = '11px "JetBrains Mono", monospace';
-  ctx.textAlign = 'left';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(fmtPrice(price), layout.chartW + 6, yPrice);
+    ctx.fillStyle = theme.accent;
+    ctx.fillRect(layout.chartW, yPrice - 9, rightAxis, 18);
+    ctx.fillStyle = '#0a0c12';
+    ctx.font = '11px "JetBrains Mono", monospace';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(fmtPrice(price), layout.chartW + 6, yPrice);
+  }
 
   // Expected-move band: the range the ATM straddle prices for expiry,
   // anchored at the previous 4:00 PM cash close.
