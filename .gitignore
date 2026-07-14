@@ -9,6 +9,7 @@ server/certs/
 server/.basis-cache.json
 server/.trades.json
 server/.journal.json
+server/.journal-shots/
 
 # machine-local Claude Code settings
 .claude/settings.local.json
