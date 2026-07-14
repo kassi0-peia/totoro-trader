@@ -26,45 +26,18 @@ import { plDollars } from './pl.js';
 import { buildOpenOrder, buildQuickOrder } from './order-payload.js';
 import { chimeFill, chimeAlert } from './sounds.js';
 import { deriveDayLevels } from './levels.js';
-
-// Blind-replay day picker: a random weekday 3–60 days back (LOCAL date parts —
-// the UTC fence eats days after 8 PM ET). Holidays aren't modeled here; they
-// come back from the bridge with zero bars and the load effect re-rolls.
-function randomPastWeekday(exclude) {
-  for (let tries = 0; tries < 40; tries++) {
-    const d = new Date(Date.now() - (3 + Math.floor(Math.random() * 57)) * 86400000);
-    if (d.getDay() === 0 || d.getDay() === 6) continue;
-    const date = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
-    if (!exclude?.has(date)) return date;
-  }
-  return null;
-}
-
-const IVOL_FALLBACK = 0.18; // used only when neither VIX nor a replay tape is known
-// How stale a bid/ask may be and still take the mark over the model tick.
-// Chain strikes tick every few seconds when the book is alive; the far-strike
-// snapshot poller refreshes every 30 s — 60 s covers both without flapping.
-const MID_FRESH_MS = 60_000;
-const SPXW_STRIKE_STEP = 5; // SPXW strikes are every 5 points (used to walk money-ward)
-
-function timeToExpiryYearsAt(now) {
-  const d = new Date(now);
-  const close = new Date(d);
-  close.setHours(16, 0, 0, 0);
-  let ms = close - d;
-  if (ms < 0) ms += 24 * 60 * 60 * 1000;
-  return Math.max(ms / (365 * 24 * 60 * 60 * 1000), 1 / (365 * 24 * 60));
-}
-
-const rightOf = (type) => (type === 'call' ? 'C' : 'P');
-const EMPTY_GREEKS = new Map(); // replay mode shows no live chain
-const EMPTY_ARR = [];           // stable empty ref — an inline [] prop is a fresh
-                                // identity per render and re-fires draw effects
-const posKey = (strike, right, expiry) => `${strike}${right}:${expiry}`;
-// Premium-history key: guest series are symbol-prefixed so they never collide
-// with SPXW's; SPX stays bare (matches the bridge's optHistoryResult keying).
-const optHistKey = (symbol, strike, right) =>
-  (symbol && symbol !== 'SPX' ? `${symbol}:${strike}${right}` : `${strike}${right}`);
+import {
+  EMPTY_ARR,
+  EMPTY_GREEKS,
+  IVOL_FALLBACK,
+  MID_FRESH_MS,
+  SPXW_STRIKE_STEP,
+  optHistKey,
+  posKey,
+  randomPastWeekday,
+  rightOf,
+  timeToExpiryYearsAt,
+} from './app/helpers.js';
 
 let posSeq = 1;
 
