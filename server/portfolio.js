@@ -183,6 +183,8 @@ export function createPortfolioController({
 
   let account = null;
   let accountType = null;
+  let accountCount = 0;         // distinct managed accounts IBKR reported
+  let accountAmbiguous = false; // >1 account arrived; we route only the first
   let positionsReady = false;
   let positionsError = null;
   let positionsSubscribed = false;
@@ -270,6 +272,8 @@ export function createPortfolioController({
     return {
       account,
       accountType,
+      accountCount,
+      accountAmbiguous,
       // The account string alone is not authority.  New orders stay disabled
       // until the initial reqPositions/positionEnd barrier has completed.
       executionEnabled: isReady(),
@@ -356,6 +360,15 @@ export function createPortfolioController({
       : String(accountsValue ?? '').split(',');
     const first = normalizedAccount(values[0]) || null;
     if (!first) return false; // preserve the current account if an empty event arrives
+    // Selection is UNCHANGED (values[0]) — kisa's setups are single-account and
+    // fail-closing here could lock her out. Just surface the ambiguity loudly so
+    // the UI can warn; we still route the first account only.
+    const distinct = [...new Set(values.map(normalizedAccount).filter(Boolean))];
+    accountCount = distinct.length;
+    accountAmbiguous = distinct.length > 1;
+    if (accountAmbiguous) {
+      console.error(`[portfolio] MULTIPLE managed accounts reported (${distinct.length}: ${distinct.join(', ')}) — routing ONLY ${first}; the others are ignored`);
+    }
     const accountChanged = account !== first;
     if (account && accountChanged) {
       rejectAllRefreshes('ACCOUNT_CHANGED', `selected account changed from ${account} to ${first}`);
@@ -571,6 +584,8 @@ export function createPortfolioController({
     fundsByAccount.clear();
     account = null;
     accountType = null;
+    accountCount = 0;
+    accountAmbiguous = false;
     advancePositionAuthority(removed, { publishRevision: true });
     emit();
   }
