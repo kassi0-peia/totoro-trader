@@ -431,6 +431,9 @@
   background: var(--c-surfaceAlt);
   border: 1px solid var(--c-border);
   color: var(--c-text);
+  /* Keep the browser-owned number steppers in the same dark palette as the
+     field instead of rendering the bright OS-default arrow block. */
+  color-scheme: dark;
   font-size: 14px;
   font-variant-numeric: tabular-nums;
 }
@@ -703,4 +706,3 @@
 .btn-execute:active {
   transform: translateY(0);
 }
-
