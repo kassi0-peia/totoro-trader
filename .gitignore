@@ -31,7 +31,8 @@ Screenshot from *.png
 # session recaps stay local (our little secret)
 RECAP-*.md
 
-# Claude project instructions stay local (internal working doc)
+# Agent project instructions stay local (internal working docs)
+AGENTS.md
 CLAUDE.md
 
 # process scratch dropped in the repo folder — notes, shared images, zips
