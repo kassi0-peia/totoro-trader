@@ -24,6 +24,14 @@ import { computeOptionsForward } from './options-forward.js';
 import { pickExpiry, deriveStrikeStep, strikeWindow, validateOrder as validateGuestOrder } from './guest-symbol.js';
 import { normalizeWatchlist, shapeWatchQuote } from './watchlist.js';
 import { validateArmedOrder, armedTriggered, ARMED_MAX } from './armed.js';
+import {
+  CANDLE_MS,
+  feedCandleSeries,
+  newCandleSeries,
+  nextCandleEdge,
+  parseHistTime,
+} from './candle-series.js';
+import { parseExecTime } from './execution-time.js';
 
 // Last-resort backstop: an unexpected throw in one handler must not kill the whole
 // bridge while working orders/brackets are live at IBKR. Log loudly and stay up —
@@ -84,7 +92,6 @@ const STRIKE_STEP = 5;
 // default 100-line market-data cap. Covers far-OTM strikes on wide-range days.
 const CHAIN_HALF_WIDTH = 20;
 const RECENTRE_THRESHOLD = 2;
-const CANDLE_MS = 60_000;
 // ~2 days of 1-min bars (ES trades ~23h/day ≈ 1380/day). Snapshot payload at
 // this size is ~250 KB — fine for the LAN websocket.
 const HISTORY_CANDLES = 3000;
@@ -92,8 +99,8 @@ const HISTORY_CANDLES = 3000;
 let connected = false;
 
 // Two independent 1-min candle series. `edge` is the next bucket boundary.
-const spx = { candles: [], edge: nextCandleEdge(Date.now()) };
-const es = { candles: [], edge: nextCandleEdge(Date.now()) };
+const spx = newCandleSeries();
+const es = newCandleSeries();
 let spxPrice = null;
 
 // SPY volume proxy: SPX is a cash index with no traded volume, so we paint SPY's
@@ -164,7 +171,7 @@ const guestChain = new Map();     // `${strike}${right}` -> { reqId, strike, rig
 // validates against; `series` is the guest's own candle series (+ runaway guard).
 let guest = null;
 function newGuestSeries() {
-  return { candles: [], edge: nextCandleEdge(Date.now()), recentBars: [], lastTick: 0 };
+  return { ...newCandleSeries(), recentBars: [], lastTick: 0 };
 }
 
 // ── Watchlist layer (multi-symbol Phase B) ───────────────────────────────────
@@ -1042,36 +1049,10 @@ function requestEsHistory() {
 // ── Tick handling, candles, basis ─────────────────────────────────────────────
 
 function feedSeries(series, price) {
-  // Bucket-based: derive everything from Date.now() so a drifted `series.edge`
-  // can never trigger more than one new bar per minute. The bucket is the
-  // authoritative boundary; `series.edge` is kept in sync but never trusted.
-  const now = Date.now();
-  const bucket = Math.floor(now / CANDLE_MS) * CANDLE_MS;
-  const last = series.candles[series.candles.length - 1];
-  if (!last || last.t < bucket) {
-    // Open each bar at its FIRST real tick, not the prior close. Within a
-    // continuous session the first tick ≈ the prior close (a realistic hair-gap),
-    // but across a session seam — the Sunday/holiday futures reopen, or the 9:30
-    // SPX-cash open after the overnight ES proxy — the first tick jumps, so the
-    // real gap renders instead of being papered into a continuous tape.
-    const open = price;
-    series.candles.push({
-      t: bucket,
-      open,
-      high: Math.max(open, price),
-      low: Math.min(open, price),
-      close: price,
-      volume: 0
-    });
-    series.edge = bucket + CANDLE_MS;
-    watchdogState.recentBars.push(now);
-    if (series.candles.length > HISTORY_CANDLES + 32) series.candles = series.candles.slice(-HISTORY_CANDLES - 32);
-  } else {
-    last.high = Math.max(last.high, price);
-    last.low = Math.min(last.low, price);
-    last.close = price;
-  }
-  return series.candles[series.candles.length - 1];
+  return feedCandleSeries(series, price, {
+    maxCandles: HISTORY_CANDLES + 32,
+    onNewBar: (now) => watchdogState.recentBars.push(now),
+  });
 }
 
 function feedSpxTick(price) {
@@ -2810,38 +2791,6 @@ function recordTrade(orderId, o, filled, avgFillPrice) {
   broadcast({ type: 'trade', trade });
 }
 
-// reqExecutions backfill times arrive in the account's US/Central tz (the tz in
-// the 399 messages). Live execDetails fills are stamped with Date.now() directly
-// (see recordExecution's `live` flag), so only backfill rows are tz-parsed here.
-// Epoch ms for a wall-clock time in America/Chicago — the zone IBKR stamps
-// reqExecutions backfill rows in. DST-proof the same way session.js handles ET:
-// Central is UTC-5 (CDT) or UTC-6 (CST); try both candidate offsets and keep the
-// one that round-trips back to the same wall clock. (The old code hardcoded +5h
-// = CDT, so winter/CST backfill rows read one hour early.)
-function chicagoWallToEpoch(y, mo, d, hh, mm, ss) {
-  for (const off of [5, 6]) {
-    const t = Date.UTC(y, mo - 1, d, hh + off, mm, ss);
-    const p = new Intl.DateTimeFormat('en-US', {
-      timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
-    }).formatToParts(new Date(t));
-    const g = {};
-    for (const x of p) g[x.type] = x.value;
-    let ghh = parseInt(g.hour, 10);
-    if (ghh === 24) ghh = 0;
-    if (+g.year === y && +g.month === mo && +g.day === d && ghh === hh && +g.minute === mm) return t;
-  }
-  return null;
-}
-
-// Parse a backfill (US/Central) execution time string to epoch ms.
-function parseExecTime(s) {
-  const m = String(s || '').match(/(\d{4})(\d{2})(\d{2})\D+(\d{2}):(\d{2}):(\d{2})/);
-  if (!m) return Date.now();
-  const t = chicagoWallToEpoch(+m[1], +m[2], +m[3], +m[4], +m[5], +m[6]);
-  return t ?? Date.now();
-}
-
 // Record a fill from an execDetails event. Idempotent via execId, and skips a
 // fill the live orderStatus path already captured (those carry no execId).
 // `live` true = a real-time fill (use the wall clock, the fill is happening now);
@@ -3081,23 +3030,6 @@ function loadBasis() {
       console.log(`[ibkr] loaded persisted 4:00 basis ${basis.toFixed(2)}${tail}`);
     }
   } catch {}
-}
-
-function nextCandleEdge(t) {
-  return Math.floor(t / CANDLE_MS) * CANDLE_MS + CANDLE_MS;
-}
-
-function parseHistTime(time) {
-  if (typeof time === 'number') return time * 1000;
-  const s = String(time);
-  // Daily bars come back as a bare date even with formatDate=2 — must be
-  // checked before the epoch branch (an 8-digit "20260610" is not seconds).
-  const dm = s.match(/^(\d{4})(\d{2})(\d{2})$/);
-  if (dm) return Date.UTC(+dm[1], +dm[2] - 1, +dm[3], 12);
-  if (/^\d+$/.test(s)) return parseInt(s, 10) * 1000;
-  const m = s.match(/^(\d{4})(\d{2})(\d{2})\s+(\d{2}):(\d{2}):(\d{2})/);
-  if (m) return Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
-  return null;
 }
 
 async function tryConnect() {
