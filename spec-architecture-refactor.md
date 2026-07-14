@@ -1,6 +1,6 @@
 # Spec — architecture refactor without changing the trading contract
 
-**Status:** active plan  
+**Status:** first safe pass implemented 2026-07-13; live-coupled follow-ups deferred
 **Scope:** `server/ibkr-server.js`, `src/App.jsx`, and `src/styles.css`. The
 completed painter split in `src/Chart.jsx` remains intact; its optional phase-2
 interaction split is not required by this plan.  
@@ -10,6 +10,36 @@ the live trading contract stable at every step.
 This is not a rewrite. The running application must remain usable after every
 extraction. A module is split because it owns one responsibility, not merely
 because a file has many lines.
+
+## Implemented outcome
+
+This pass completed the low-risk seams and stopped before extracting state that
+could only be proven against a connected IBKR session:
+
+- `App.jsx`: 2,020 → 1,557 lines. Pure helpers, replay control, persistent
+  cockpit settings, and order/position actions now have named owners.
+- `server/ibkr-server.js`: 3,131 → 2,622 lines. Candle/time helpers, HTTP/TLS
+  serving, replay request control, pure order planning, atomic persistence, and
+  the trade journal were extracted with focused tests.
+- `styles.css`: 2,782 declarations/lines → a five-line ordered import manifest
+  plus five contiguous feature files. Concatenation matches the original file
+  byte-for-byte, and the production CSS asset hash is unchanged.
+- The hover breakeven guide is now dotted. This is the only intentional visual
+  behavior change in the refactor series.
+- The suite now runs 21 test files. `npm test`, `npm run build`, desktop/mobile
+  offline browser checks, the settings panel, and the replay picker all pass.
+
+Deliberately deferred:
+
+- `Chart.jsx` phase-2 interaction/tooltip extraction, as agreed; its completed
+  painter split remains untouched.
+- Live market-data, basis, history, portfolio, and WebSocket ownership still
+  share the bridge coordinator. Moving those safely needs a connected paper
+  session and reconnect/session-seam verification, not just an offline build.
+- Armed-order synchronization and more derived view-model state remain in
+  `App.jsx`; they can move later if that file becomes hard to work in again.
+- No live bridge was restarted and no real or paper order was submitted during
+  verification.
 
 ## Why this work exists
 
