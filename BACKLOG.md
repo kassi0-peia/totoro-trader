@@ -21,6 +21,11 @@ out of this file into commits; strikethrough = rejected, with the why.
 - **Basis-confidence tint** — dim/tint the ES/SPX label when basisSource degrades below options-implied; estimates must dress like estimates.
 - **Journal → CSV export** — ⤓ in history view; fills + notes, spreadsheet-ready.
 - **IV rank chip** — VIX percentile vs trailing months (needs daily VIX history accumulation bridge-side) (thinkorswim).
+- **Breakeven lines** *(in discussion 2026-07-13)* — dashed line per open leg at the SPX level where the trade breaks even at expiry (strike ± entry premium); clutter question open (per-leg vs net-book pair vs hover-only).
+- **Day levels** *(in discussion 2026-07-13)* — prior day high/low/close, today's open, opening range (15/30m) as quiet chart lines; from candles already held.
+- **Delta drift** *(in discussion 2026-07-13)* — position rows show entry Δ vs live Δ ("0.31 → 0.12"); the earliest honest sign a lotto is dying. Entry greeks already snapshotted.
+- **VWAP** — one running sum over the SPY-proxy volume already on candles; RTH-only, honest-estimate labeled like volume itself.
+- **Scratch exit** — one gesture: rest a sell at the entry premium ("get me out flat" — it waits, doesn't cross).
 
 ## Medium (a session)
 - **MFE/MAE** — record max favorable/adverse excursion per position from the live mark stream; journal rows show "peaked +45%, exited +12%" (Edgewonk/Tradezella; the exit-tuning stat).
@@ -37,6 +42,10 @@ out of this file into commits; strikethrough = rejected, with the why.
 - **P/L calendar heatmap** — the journal month view (original roadmap wording; journal shipped without it).
 - **Volume profile** — volume-at-price histogram from 1-min SPY-proxy bars, opt-in overlay like EM; right shape/nodes, RTH-only, honest-estimate labeling. (Sierra/Bookmap genre.)
 - **Guest replay / bus stops / mobile search** — multi-symbol parity leftovers (spec-multi-symbol out-of-scope list).
+- **Roll** — ↑/↓ on a position row: close this leg + open the next strike out/in as two sequential marketable limits; the strangle adjustment as one gesture.
+- **Both-wings ticket** — arm a strangle in one ticket (call+put around spot or at ±EM), two independent marketable limits — no combo order needed (much smaller than vertical spreads).
+- **Sentry mode** — a loud REPEATING alarm (not the polite chime) when an open position's premium crosses a set level or price nears a strike; position-based, unlike the ⏰ price alerts. For overnight holds. Not a robot — it only yells.
+- **Tape bookmarks** — B pins a moment + note on the chart ("paw forming"); journal/replay jump to them; feeds film review later.
 
 ## Big (dedicated session, order-path care)
 - **Vertical spreads** — click strike + short leg N out → one IBKR combo (BAG) order; defined-risk debit spreads; new position math. The "v2" feature.
@@ -54,6 +63,8 @@ out of this file into commits; strikethrough = rejected, with the why.
 
 ## Research
 - **Detector report card** — backtest totoro-detector calls over journal/replay days; precision per pattern. The un-shelving evidence (detector SHELVED as inaccurate, kisa 2026-07-10).
+- **OI walls** — put/call open interest per strike as a faint histogram behind the chain (where the pin lives). First question: does OI ride the chain's existing market-data lines (generic tick), or does it cost line budget?
+- **Premium velocity** — heat the chain by d(premium)/dt: which strikes are accelerating. From data already streaming; needs a think on smoothing/honesty.
 
 ## Rejected (the why matters)
 - ~~Drawing tools~~ — kisa 2026-07-09: not her style (fast 0DTE momentum, not multi-day lines).
