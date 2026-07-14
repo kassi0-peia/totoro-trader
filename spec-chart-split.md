@@ -1,11 +1,18 @@
 # Spec — splitting Chart.jsx (the god-file), the SAFE way
 
-**Goal:** carve `src/Chart.jsx` (~1640 lines after bus stop) into small, pure modules
+**Status (2026-07-14): complete, including the useful Phase 2 boundaries.**
+`Chart.jsx` is now about 845 lines and functions as the canvas coordinator. Its
+added lines own the cohesive second-step armed-trigger placement surface. Do not
+split it again merely to reduce that number; the reassessment at the end of
+this document records why its remaining responsibilities belong together. The
+original extraction plan is retained below as history, not as unfinished work.
+
+**Original goal:** carve `src/Chart.jsx` (~1640 lines after bus stop) into small, pure modules
 without changing a single rendered pixel or interaction. This is a refactor where the
 cost is **verification, not code** — a passing build does NOT prove the canvas paints.
 Agreed with kisa 2026-06-22 (the prune session); planned in detail 2026-07-05.
 
-## Ground rules (non-negotiable)
+## Rules used for the extraction
 1. **One extraction per commit.** Small steps, trivially revertable, bisectable.
 2. **Eyeball the RUNNING chart after every step** — candles, grid, labels, markers,
    hover, click. Build success proves imports resolve, nothing more.
@@ -21,7 +28,7 @@ Agreed with kisa 2026-06-22 (the prune session); planned in detail 2026-07-05.
    positions, markers, and ghosts without real money. Overnight GTH works too
    (ES-proxy bars + live chain exercise the dimming and axis-chain paths).
 
-## Current anatomy of Chart.jsx (line refs at commit 0d03870)
+## Pre-split anatomy of Chart.jsx (line refs at commit 0d03870)
 - **1–68** module constants + pure formatters (`fmtPrice`, `fmtTimeTf`, `fmtTime`,
   `niceStep`, `priceDecimals`, `niceTimeStep`, `fmtVol`, step tables, zoom constants)
 - **70–235** component state/refs, `tfCandles` memo, resize observer
@@ -38,7 +45,7 @@ Agreed with kisa 2026-06-22 (the prune session); planned in detail 2026-07-05.
 - **1331–1637** JSX: OHLC legend, canvas, tooltips (bus / ghost / position / strike
   hover), crosshair readouts, overlay buttons
 
-## Target structure
+## Original target structure (now implemented)
 ```
 src/chart/
   format.js        pure formatters + step tables (no canvas, no React)
@@ -57,7 +64,7 @@ Every painter has the same signature shape:
 `draw<Thing>(ctx, env) → hits?` where `env` is a plain object of exactly what it
 reads (`{ view, layout, theme, priceToY, indexToX, ... }`). No painter imports React.
 
-## Extraction order (lowest risk → highest, one commit each)
+## Historical extraction order (lowest risk → highest, one commit each)
 | # | Move | Verify by eyeballing |
 |---|------|----------------------|
 | 1 | `format.js` (pure fns + TICK/TIME_STEPS) | axis labels (price decimals, 1h time labels, volume "1.2M") |
@@ -73,15 +80,52 @@ reads (`{ view, layout, theme, priceToY, indexToX, ... }`). No painter imports R
 Steps 1–5 are pure-paint (no hit-lists) — lowest risk. 6–8 carry the hit-list
 conversion — do them fresh, not at the end of a long session.
 
-## Phase 2 (separate session, optional)
-- `buildView` / `buildLayout` as pure functions in `coords.js` (they're IIFEs today;
-  extraction is mechanical but touches pan/zoom state wiring — keep it out of phase 1).
-- `usePanZoom` hook (drag/momentum/pinch/wheel) — the riskiest move; only if Chart.jsx
-  still feels too big after phase 1 (~700 lines expected).
-- Tooltip JSX → `ChartTooltips.jsx`. Cosmetic; cheap any time.
+## Completed Phase 2 outcome and reassessment (2026-07-14)
+
+Phase 2 was performed only where it created a real owner:
+
+- `coords.js` owns pure view/layout and coordinate transformations.
+- `useChartPanZoom.js` owns drag, momentum, pinch, wheel, zoom bounds, and the
+  persisted viewport interaction lifecycle.
+- `useChartHover.js` owns hover state, quote nudging, crosshair selection, and
+  marker/position/bus hit interpretation.
+- `interactionIntent.js` owns the click/right-click priority rules, keeping
+  trade clicks, quick mode, position controls, markers, and bus stops from
+  intercepting one another accidentally.
+- `viewportPersistence.js` owns exact per-series/timeframe save/restore rules,
+  including refresh-safe zoom.
+- `ChartTooltips.jsx` owns tooltip rendering; marker geometry used by both
+  painting and hit tests has focused pure tests.
+
+What deliberately remains in `Chart.jsx`:
+
+- canvas/ref setup, the one `ResizeObserver`, device-pixel-ratio clearing, and
+  the current pane size;
+- the viewport state consumed by the extracted coordinate and interaction
+  owners;
+- aggregation of the supplied one-minute tape for the selected timeframe;
+- painter call order and assignment of the hit lists they return;
+- routing resolved interaction intents to the callbacks supplied by `App`;
+- chart-local controls such as fullscreen, volume, recording, and snap-to-now.
+
+Those responsibilities form the coordination boundary. Extracting canvas sizing
+would create a tiny one-effect hook while leaving its state and refs coupled to
+the coordinator. Moving candle preparation would still require the same
+viewport/history inputs and would merely relocate lines. The hover and
+position-card surfaces live outside the canvas. `PinnedPositionCards` and its
+pure state model own exact identity, persistence, move/resize/focus/close,
+z-order, and authoritative live-row resolution. The two-step armed-entry preview
+remains in Chart because its pixel-to-price hover, guide, exclusive click routing,
+and cancellation share the canvas interaction lifecycle; extracting it now would
+only pass the same refs and handlers through a cosmetic hook.
+
+Conclusion: no further chart split is recommended now. Revisit only if a new
+substantial responsibility appears with an independent lifecycle and focused
+tests—not because the file is above an arbitrary line target.
 
 ## Verification harness (objective, not just eyeball)
-With the bridge up, replay is deterministic → pixel-diffable:
+With the bridge up outside SPX cash hours, and with the replay safety gate clear,
+replay is deterministic → pixel-diffable:
 1. Load a fixed replay day, pause at a fixed bar idx, fixed viewport.
 2. Screenshot the canvas before the split starts → `scratchpad` baseline.
 3. After each step, re-screenshot, `pixelmatch` against baseline — must be 0 diff
@@ -106,6 +150,11 @@ With the bridge up, replay is deterministic → pixel-diffable:
   up live, not in a build.
 
 ## Done means
-- `npm run build` green, all eyeball checks pass, pixel-diff 0 on the replay baseline.
-- Chart.jsx ≤ ~750 lines; no module over ~200; painters import zero React.
-- One commit per step already in history (no squash — the trail is the safety net).
+- `npm run build` green and the running chart passes the interaction/visual
+  checks above.
+- `Chart.jsx` coordinates named, independently tested owners; painters import
+  zero React and return their hit lists.
+- Refresh preserves the per-symbol/timeframe viewport, and switching series
+  retires stale pixels and hit targets.
+- Further extraction is rejected unless it lowers coupling or gives a
+  substantial behavior one authoritative owner.

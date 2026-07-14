@@ -10,6 +10,8 @@ server/.basis-cache.json
 server/.trades.json
 server/.journal.json
 server/.journal-shots/
+server/.kill-lock.json
+server/.reverse-lock.json
 
 # machine-local Claude Code settings
 .claude/settings.local.json

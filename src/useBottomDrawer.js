@@ -5,7 +5,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 // edge materializes the panel (tf-bar + positions) after a 1.5s hover —
 // same rhythm as the left trades drawer — or instantly on click; it FADES
 // in ("for drama"). Once open it stays until she clicks off it or hits Esc
-// (never on mouse-away). A landing fill auto-peeks it ~5s unless she
+// (never on mouse-away). A closing fill auto-peeks it ~5s unless she
 // engages. Mobile keeps the always-visible layout (styles.css — touch has
 // no hover, and positions must not hide behind a gesture on the phone).
 //

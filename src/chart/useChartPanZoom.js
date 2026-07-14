@@ -1,12 +1,21 @@
-import { useCallback, useEffect, useRef } from 'react';
-import { BOTTOM_AXIS, DEFAULT_VISIBLE, MAX_VISIBLE, MIN_VISIBLE } from './coords.js';
+import { useCallback, useEffect, useLayoutEffect, useRef } from 'react';
+import { BOTTOM_AXIS } from './coords.js';
+import {
+  DEFAULT_CHART_VIEWPORT,
+  chartViewOffsetBounds,
+  clampPriceOffset,
+  clampPriceScale,
+  clampViewOffset,
+  clampVisibleCount,
+  readChartViewport,
+  writeChartViewport
+} from './viewportPersistence.js';
 
 export function useChartPanZoom({
   canvasRef,
   layout,
   view,
   chartHeight,
-  timeframe,
   tfLength,
   visibleCount,
   viewOffset,
@@ -15,12 +24,28 @@ export function useChartPanZoom({
   setVisibleCount,
   setViewOffset,
   setPriceOffset,
-  setPriceScale
+  setPriceScale,
+  viewportStorageKey,
+  resolveRestoredViewport
 }) {
   const pinchRef = useRef(null); // { startDist, startVisible }
   const dragRef = useRef(null); // { startX, lastX, lastT, startOffset, moved, vel }
   const momentumRef = useRef(null); // { vel, lastT, raf }
-  const suppressClickRef = useRef(false);
+  // Timestamp deadline for swallowing the compatibility click emitted after a
+  // completed drag. A deadline cannot poison some unrelated later click when a
+  // browser decides not to emit that compatibility event.
+  const suppressClickRef = useRef(0);
+  // Persistence is deliberately owned by the interaction hook: an async
+  // restore can then be canceled synchronously by the first fresh pan/zoom.
+  // status: pending (waiting for candles), applying, or ready (safe to save).
+  const persistenceRef = useRef({
+    key: null,
+    epoch: 0,
+    status: 'idle',
+    saved: null,
+    target: null,
+    completeAfterApply: true
+  });
 
   // refs that need fresh values inside RAF closures
   const tfLenRef = useRef(tfLength);
@@ -36,14 +61,100 @@ export function useChartPanZoom({
   }, []);
 
   const clampOffset = useCallback((o) => {
-    const want = Math.max(MIN_VISIBLE, Math.min(MAX_VISIBLE, visibleCountRef.current));
-    const max = Math.max(0, tfLenRef.current - visibleCountRef.current);
-    // allow scrolling past the live edge into empty future space (offset < 0)
-    const min = -Math.floor(want * 0.66);
-    if (o < min) return min;
-    if (o > max) return max;
-    return o;
+    return clampViewOffset(o, {
+      tfLength: tfLenRef.current,
+      visibleCount: visibleCountRef.current
+    });
   }, []);
+
+  const applyViewport = useCallback((target, epoch) => {
+    // Functional setters make a queued restore harmless if an interaction (or
+    // a new series key) advances the epoch before React applies the update.
+    setVisibleCount((current) => (
+      persistenceRef.current.epoch === epoch ? target.visibleCount : current
+    ));
+    setViewOffset((current) => (
+      persistenceRef.current.epoch === epoch ? target.viewOffset : current
+    ));
+    setPriceOffset((current) => (
+      persistenceRef.current.epoch === epoch ? target.priceOffset : current
+    ));
+    setPriceScale((current) => (
+      persistenceRef.current.epoch === epoch ? target.priceScale : current
+    ));
+  }, [setVisibleCount, setViewOffset, setPriceOffset, setPriceScale]);
+
+  const markViewportInteraction = useCallback(() => {
+    const state = persistenceRef.current;
+    state.epoch += 1;
+    state.status = 'ready';
+    state.saved = null;
+    state.target = null;
+  }, []);
+
+  // A key change means a genuinely different tape (symbol/replay day and
+  // timeframe). Reset immediately so the old tape's pan cannot flash/save
+  // under the new key, then restore once that tape's candles are ready.
+  useLayoutEffect(() => {
+    cancelMomentum();
+    const state = persistenceRef.current;
+    const epoch = state.epoch + 1;
+    const saved = readChartViewport(viewportStorageKey);
+    state.key = viewportStorageKey;
+    state.epoch = epoch;
+    state.saved = saved;
+    state.target = saved ? null : DEFAULT_CHART_VIEWPORT;
+    state.completeAfterApply = true;
+    state.status = saved ? 'pending' : 'applying';
+    applyViewport(DEFAULT_CHART_VIEWPORT, epoch);
+  }, [viewportStorageKey, cancelMomentum, applyViewport]);
+
+  useLayoutEffect(() => {
+    const state = persistenceRef.current;
+    if (
+      state.key !== viewportStorageKey ||
+      state.status !== 'pending' ||
+      tfLength <= 0
+    ) return;
+    const saved = state.saved;
+    const result = resolveRestoredViewport(saved);
+    const restored = result.viewport;
+    const epoch = state.epoch;
+    state.saved = result.complete ? null : saved;
+    state.target = restored;
+    state.completeAfterApply = result.complete;
+    state.status = 'applying';
+    applyViewport(restored, epoch);
+  }, [viewportStorageKey, tfLength, resolveRestoredViewport, applyViewport]);
+
+  // Do not persist the previous/default state between scheduling a restore and
+  // React committing it. Once all four values match, this render is safe.
+  useLayoutEffect(() => {
+    const state = persistenceRef.current;
+    const target = state.target;
+    if (
+      state.key !== viewportStorageKey ||
+      state.status !== 'applying' ||
+      !target ||
+      visibleCount !== target.visibleCount ||
+      viewOffset !== target.viewOffset ||
+      priceOffset !== target.priceOffset ||
+      priceScale !== target.priceScale
+    ) return;
+    state.status = state.completeAfterApply ? 'ready' : 'pending';
+    state.target = null;
+  }, [viewportStorageKey, visibleCount, viewOffset, priceOffset, priceScale]);
+
+  useLayoutEffect(() => {
+    const state = persistenceRef.current;
+    if (state.key !== viewportStorageKey || state.status !== 'ready') return;
+    writeChartViewport(viewportStorageKey, {
+      visibleCount,
+      viewOffset,
+      priceOffset,
+      priceScale
+    });
+  }, [viewportStorageKey, visibleCount, viewOffset, priceOffset, priceScale]);
 
   const startMomentum = useCallback((initialVel) => {
     if (Math.abs(initialVel) < 0.0008) return;
@@ -58,9 +169,10 @@ export function useChartPanZoom({
       const delta = m.vel * dt;
       setViewOffset((o) => {
         const next = clampOffset(o + delta);
-        const want = Math.max(MIN_VISIBLE, Math.min(MAX_VISIBLE, visibleCountRef.current));
-        const min = -Math.floor(want * 0.66);
-        const max = Math.max(0, tfLenRef.current - visibleCountRef.current);
+        const { min, max } = chartViewOffsetBounds({
+          tfLength: tfLenRef.current,
+          visibleCount: visibleCountRef.current
+        });
         if (next <= min || next >= max) {
           momentumRef.current = null;
         }
@@ -86,13 +198,11 @@ export function useChartPanZoom({
       // Plain wheel zooms the PRICE axis (see far strikes / full daily range);
       // ctrl/shift/meta-wheel keeps the old time zoom (candle count), which
       // also remains on two-finger pinch.
+      markViewportInteraction();
       if (e.ctrlKey || e.shiftKey || e.metaKey) {
-        setVisibleCount((v) => {
-          const next = Math.round(v * factor);
-          return Math.max(MIN_VISIBLE, Math.min(MAX_VISIBLE, next));
-        });
+        setVisibleCount((v) => clampVisibleCount(v * factor));
       } else {
-        setPriceScale((s) => Math.max(0.05, Math.min(20, s * factor)));
+        setPriceScale((s) => clampPriceScale(s * factor));
       }
     };
     canvas.addEventListener('wheel', onWheel, { passive: false });
@@ -123,8 +233,8 @@ export function useChartPanZoom({
       const dy = e.touches[0].clientY - e.touches[1].clientY;
       const dist = Math.hypot(dx, dy);
       const ratio = pinchRef.current.startDist / dist;
-      const next = Math.round(pinchRef.current.startVisible * ratio);
-      setVisibleCount(Math.max(MIN_VISIBLE, Math.min(MAX_VISIBLE, next)));
+      markViewportInteraction();
+      setVisibleCount(clampVisibleCount(pinchRef.current.startVisible * ratio));
       return;
     }
     if (e.touches.length === 1 && dragRef.current) {
@@ -132,15 +242,6 @@ export function useChartPanZoom({
       handleDragMove(e.touches[0].clientX, e.touches[0].clientY);
     }
   };
-
-  // reset zoom + scroll to default when timeframe changes
-  useEffect(() => {
-    setVisibleCount(DEFAULT_VISIBLE);
-    setViewOffset(0);
-    setPriceOffset(0);
-    setPriceScale(1);
-    cancelMomentum();
-  }, [timeframe, cancelMomentum]);
 
   // shared drag-move logic, used by mouse + single-finger touch
   const handleDragMove = useCallback(
@@ -159,18 +260,18 @@ export function useChartPanZoom({
       drag.lastX = clientX;
       drag.lastT = now;
       if (!drag.moved) return;
+      markViewportInteraction();
       // Drag started on the right price-axis gutter → zoom the price scale
       // (drag up = zoom in / bigger candles, drag down = zoom out).
       if (drag.axis) {
         const nextScale = drag.startScale * Math.exp(totalDy / 220);
-        setPriceScale(Math.max(0.05, Math.min(20, nextScale)));
+        setPriceScale(clampPriceScale(nextScale));
         return;
       }
       // Drag on the bottom time axis → stretch candles (TradingView-style):
       // drag right = fatter / fewer candles, drag left = skinnier / more.
       if (drag.timeAxis) {
-        const next = Math.round(drag.startVisible * Math.exp(-totalDx / 220));
-        setVisibleCount(Math.max(MIN_VISIBLE, Math.min(MAX_VISIBLE, next)));
+        setVisibleCount(clampVisibleCount(drag.startVisible * Math.exp(-totalDx / 220)));
         return;
       }
       // horizontal pan (candles)
@@ -179,11 +280,11 @@ export function useChartPanZoom({
       // vertical pan (price window): drag down → reveal higher prices above.
       const range = view.hi - view.lo;
       const pricePerPx = range / (layout.priceBot - layout.priceTop);
-      const clamp = range * 4; // keep the candles within reach
+      const limit = range * 4; // keep the candles within reach
       const nextOffset = drag.startPriceOffset + totalDy * pricePerPx;
-      setPriceOffset(Math.max(-clamp, Math.min(clamp, nextOffset)));
+      setPriceOffset(clampPriceOffset(nextOffset, limit));
     },
-    [layout, view, clampOffset]
+    [layout, view, clampOffset, markViewportInteraction]
   );
 
   const startDrag = useCallback(
@@ -219,7 +320,7 @@ export function useChartPanZoom({
     const vel = drag.vel;
     dragRef.current = null;
     if (moved) {
-      suppressClickRef.current = true;
+      suppressClickRef.current = performance.now() + 800;
       startMomentum(vel);
     }
     return { moved };
@@ -228,10 +329,11 @@ export function useChartPanZoom({
   // recenter the live candle + price line at the default (centered) home view
   const snapToNow = useCallback(() => {
     cancelMomentum();
+    markViewportInteraction();
     setViewOffset(0);
     setPriceOffset(0);
     setPriceScale(1);
-  }, [cancelMomentum]);
+  }, [cancelMomentum, markViewportInteraction]);
 
   return {
     pinchRef,
@@ -242,6 +344,7 @@ export function useChartPanZoom({
     handleDragMove,
     startDrag,
     endDrag,
-    snapToNow
+    snapToNow,
+    markViewportInteraction
   };
 }

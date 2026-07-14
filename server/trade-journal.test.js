@@ -40,16 +40,39 @@ const contract = {
   lastTradeDateOrContractMonth: '20260713',
 };
 
-test('order-status rows persist, broadcast once, and dedupe repeated status', () => {
+test('orderStatus before two split executions records only canonical execId rows', () => {
   const f = fixture();
   try {
     const order = { action: 'BUY', strike: 6000, right: 'C', expiry: '20260713', refAtSend: 2.4 };
+    f.orders.set(80, order);
     f.service.recordOrderStatus(80, order, 2, 2.5);
-    f.service.recordOrderStatus(80, order, 2, 2.5);
+    f.service.recordExecution(contract, {
+      execId: 'E1', orderId: 80, side: 'BOT', shares: 1, price: 2, avgPrice: 2,
+    }, true);
+    f.service.recordExecution(contract, {
+      execId: 'E2', orderId: 80, side: 'BOT', shares: 1, price: 3, avgPrice: 2.5,
+    }, true);
+    assert.deepEqual(f.service.trades.map((row) => row.execId), ['E1', 'E2']);
+    assert.deepEqual(f.service.trades.map((row) => row.price), [2, 3]);
+    assert.equal(f.service.trades.reduce((sum, row) => sum + row.qty, 0), 2);
+    assert.ok(f.service.trades.every((row) => row.ref === 2.4));
+    assert.equal(f.events.filter((event) => event.type === 'trade').length, 2);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('execution before orderStatus remains one canonical fill', () => {
+  const f = fixture();
+  try {
+    const order = { action: 'BUY', strike: 6000, right: 'C', expiry: '20260713' };
+    f.orders.set(80, order);
+    f.service.recordExecution(contract, {
+      execId: 'FIRST', orderId: 80, side: 'BOT', shares: 1, avgPrice: 2.5,
+    }, true);
+    f.service.recordOrderStatus(80, order, 1, 2.5);
     assert.equal(f.service.trades.length, 1);
-    assert.equal(f.service.trades[0].ref, 2.4);
-    assert.equal(f.events.filter((event) => event.type === 'trade').length, 1);
-    assert.equal(f.service.days()['20260713'].length, 1);
+    assert.equal(f.service.trades[0].execId, 'FIRST');
   } finally {
     f.cleanup();
   }
@@ -87,11 +110,12 @@ test('backfilled execution is routed to its own archived trade date', () => {
   }
 });
 
-test('notes and snapshots update the owned row and broadcast results', () => {
+test('notes and day-qualified snapshots update the owned row and broadcast results', () => {
   const f = fixture();
   try {
-    const order = { action: 'BUY', strike: 6000, right: 'C', expiry: '20260713' };
-    f.service.recordOrderStatus(80, order, 1, 2.5);
+    f.service.recordExecution(contract, {
+      execId: 'NOTE', orderId: 80, side: 'BOT', shares: 1, avgPrice: 2.5,
+    }, true);
     const id = f.service.trades[0].id;
     f.service.handleFillNote({ id, text: ' waited for the level ' });
     assert.equal(f.service.trades[0].note, 'waited for the level');
@@ -99,8 +123,9 @@ test('notes and snapshots update the owned row and broadcast results', () => {
       id,
       dataUrl: `data:image/png;base64,${Buffer.from('image').toString('base64')}`,
     });
-    assert.equal(f.service.trades[0].shot, `${id}.png`);
-    assert.equal(fs.readFileSync(path.join(f.root, 'shots', `${id}.png`), 'utf8'), 'image');
+    const file = `20260713${id}.png`;
+    assert.equal(f.service.trades[0].shot, file);
+    assert.equal(fs.readFileSync(path.join(f.root, 'shots', file), 'utf8'), 'image');
     assert.ok(f.events.some((event) => event.type === 'noteResult'));
     assert.ok(f.events.some((event) => event.type === 'shotResult'));
   } finally {
@@ -129,6 +154,71 @@ test('loading seeds execId dedupe from the whole archive', () => {
       execId: 'SEEN', orderId: 80, side: 'BOT', shares: 1, avgPrice: 2,
     }, true);
     assert.equal(service.trades.length, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('new IDs continue above the maximum ID in archived and current rows', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'totoro-journal-ids-'));
+  try {
+    fs.writeFileSync(path.join(root, 'journal.json'), JSON.stringify({
+      days: { 20260710: [{ id: 41, execId: 'OLD-41', ts: 100, action: 'BUY' }] },
+    }));
+    fs.writeFileSync(path.join(root, 'trades.json'), JSON.stringify({
+      date: '20260713',
+      trades: [{ id: 62, execId: 'CURRENT-62', ts: 900_000, action: 'BUY' }],
+    }));
+    const service = createTradeJournal({
+      tradesFile: path.join(root, 'trades.json'),
+      journalFile: path.join(root, 'journal.json'),
+      shotsDir: path.join(root, 'shots'),
+      today: () => '20260713',
+      tradeDateAt: () => '20260713',
+      parseExecutionTime: () => 1_000,
+      now: () => 1_000_000,
+      log: { log() {}, error() {} },
+    });
+    service.load();
+    service.recordExecution(contract, {
+      execId: 'NEXT', orderId: 80, side: 'BOT', shares: 1, avgPrice: 2,
+    }, true);
+    assert.equal(service.trades.at(-1).id, 63);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a legacy aggregate is replaced by the real execution without losing its note or shot', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'totoro-journal-legacy-'));
+  try {
+    fs.writeFileSync(path.join(root, 'trades.json'), JSON.stringify({
+      date: '20260713',
+      trades: [{
+        id: 17, orderId: 80, ts: 900_000, action: 'BUY', strike: 6000,
+        right: 'C', expiry: '20260713', qty: 2, price: 2.5,
+        note: 'keep me', shot: '17.png',
+      }],
+    }));
+    const service = createTradeJournal({
+      tradesFile: path.join(root, 'trades.json'),
+      journalFile: path.join(root, 'journal.json'),
+      shotsDir: path.join(root, 'shots'),
+      today: () => '20260713',
+      tradeDateAt: () => '20260713',
+      parseExecutionTime: () => 1_000,
+      now: () => 1_000_000,
+      log: { log() {}, error() {} },
+    });
+    service.load();
+    service.recordExecution(contract, {
+      execId: 'REAL', orderId: 80, side: 'BOT', shares: 1, avgPrice: 2,
+    }, true);
+    assert.equal(service.trades.length, 1);
+    assert.deepEqual(
+      { id: service.trades[0].id, execId: service.trades[0].execId, note: service.trades[0].note, shot: service.trades[0].shot },
+      { id: 17, execId: 'REAL', note: 'keep me', shot: '17.png' },
+    );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

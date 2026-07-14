@@ -1,139 +1,168 @@
-# Spec — multi-symbol Phase A: search → guest chart → nearest-weekly buy
+# Spec — exact per-browser guest instruments
 
-**Goal:** type a symbol (flagship: **SPCX** — SpaceX, Nasdaq since 2026-06-12, weeklies
-live since 06-16), the cockpit switches to that stock's chart + near-ATM option chain,
-and one click buys the nearest weekly call/put through the existing marketable-limit
-path. Phase B (watchlist with snapshot quotes) comes later; this spec is Phase A only.
+**Status (2026-07-14):** guest charting, execution, watchlist UI/polling,
+per-tab recovery, and bridge-side guest ownership are implemented. Runtime
+verification is not claimed here; this document describes the protocol and its
+limits.
 
-**Architecture in one line:** SPX stays the untouched home instrument; a new
-**guest-symbol layer** is added *beside* it, never inside it. When no guest is active
-the app is byte-identical to today.
+**Goal:** keep SPX as the home cockpit while a browser tab can choose one exact
+US-stock contract and use its stock chart, near-ATM option chain, nearest listed
+expiry, quotes, greeks, history, and limit-only option tickets. A symbol string
+alone is never enough to own or route a guest.
 
-## Hard stop-lines (violating any of these fails the task)
-1. **SPX behavior byte-identical when no guest is active.** Do not modify the basis
-   machinery, session logic, 16:15 roll, ES proxy, candle/watchdog logic, or any
-   existing SPX code path beyond the minimal seams listed below.
-2. **No new naked-MKT path.** Guest orders are marketable limits only; ⚡ red (MKT)
-   is SPX-only in Phase A — in guest mode the red arm is disabled with a toast.
-   Refuse any guest order without a live quote (same rule as today).
-3. **Bridge validates guest orders** against the discovered contract: strike must be
-   in the discovered strike list, expiry in the discovered expirations, else reject
-   with an orderAck reason. Never place a guessed contract.
-4. **Do not run `server/ibkr-server.js`** — the real bridge is live on :8787 with a
-   real gateway session (port + clientId clash). Verify with `npm run build`,
-   `npm test`, and new unit tests on pure helpers only.
-5. **Never `git push`.** Commit locally per step.
-6. Don't rename existing props/messages; additive changes only. Old clients must
-   keep working against the new bridge.
+## Non-negotiable rules
 
-## Bridge (`server/ibkr-server.js` + new `server/guest-symbol.js`)
+1. The SPX session, ES proxy, basis ladder, candle watchdog, and roll rules stay
+   independent of guest state.
+2. A guest order is always a positive `LMT`; no guest path can emit `MKT`. The
+   user may leave that limit resting—it is not required to cross the book.
+3. The bridge validates the strike and expiry against the exact discovered
+   resource before constructing an option contract.
+4. Guest state is scoped by browser identity, exact `{symbol, conId}` resource,
+   and resource generation. A late or foreign packet is discarded.
+5. One distinct guest resource is the current market-data capacity. Several tabs
+   may share that exact resource; a different one receives `CAPACITY`.
+6. While guest market-data startup/streaming is active, the line-heavy SPXW
+   chain pauses for every browser. SPX/ES/VIX, account truth, and basis fallbacks
+   keep running.
+7. Never test this feature by casually sending an order. Builds/unit tests are
+   safe; bridge restarts and PAPER orders require their own authorization.
 
-### New module `server/guest-symbol.js` (pure logic, unit-testable, no IB import)
-- `pickExpiry(expirations, nowMs)` → nearest expiration ≥ today (yyyymmdd strings);
-  after 16:00 ET on expiry day, advance to the next. (Stocks: no 16:15 roll.)
-- `deriveStrikeStep(strikes, spot)` → median gap of the ~10 strikes nearest spot
-  (SPCX will be 2.5 or 5; don't assume).
-- `strikeWindow(strikes, spot, n = 6)` → the n nearest strikes each side of spot
-  (subscription list — guests get a *narrower* chain than SPXW to respect kisa's
-  market-data line budget).
-- `validateOrder({ strike, right, expiry }, discovered)` → ok / reason.
+## Browser identity and protocol
 
-### Guest lifecycle (in ibkr-server.js, parallel to — not inside — the SPX code)
-- WS `{type:'symbolSearch', q}` → `ib.reqMatchingSymbols` →
-  `{type:'symbolSearchResult', q, matches:[{symbol, name, conId, secType, exchange, currency}]}`
-  (stocks only, US exchanges, max ~8).
-- WS `{type:'activateSymbol', symbol, conId}` →
-  1. tear down any previous guest subscriptions;
-  2. **pause the SPXW chain subscriptions** (keep SPX/ES/VIX index ticks and all
-     basis machinery — they cost few lines; the chain is the line hog). Restore the
-     chain on deactivate. Consequence to document in the snapshot: while a guest is
-     active overnight, options-implied basis falls back to the frozen capture —
-     acceptable, `basisSource` already reports it.
-  3. resolve the stock contract (`reqContractDetails`), subscribe ticks
-     (`reqMktData`) + 2 days of 1-min history (`reqHistoricalData`) feeding a new
-     guest candle series (reuse the `feedSeries` pattern — do not touch the SPX
-     series/watchdog; a parallel guest series + its own runaway guard);
-  4. `reqSecDefOptParams` → expirations + strikes; pick expiry via `pickExpiry`,
-     subscribe the `strikeWindow` chain with greeks (same tick handling shape as the
-     SPXW chain, separate reqId range + maps);
-  5. broadcast `{type:'guest', symbol, price, candles, greeks, expiry, strikeStep,
-     expirations, secType:'STK', settlement:'physical', live}` — same field shapes
-     as the SPX snapshot's equivalents so the client can reuse parsing. Recenter the
-     guest chain when spot drifts a full step beyond the window (mirror
-     `maybeRecenterChain`, guest-side).
-- WS `{type:'deactivateSymbol'}` → tear down guest subs, restore the SPXW chain.
-- Reconnect/restart: guest state is NOT persisted. After a bridge or socket restart
-  the client re-activates (client keeps the active symbol in memory and re-sends).
+`src/feed.js` creates a random per-tab client identity in `sessionStorage`. On a
+socket connection it sends `clientHello`; the bridge acknowledges before guest
+senders become available. A duplicated tab initially inherits the same storage,
+so the registry rotates colliding live identities rather than merging two sockets.
 
-### Orders
-- `{type:'order', symbol?, conId?, ...}` — absent `symbol` (or `symbol:'SPX'`) means
-  SPXW exactly as today (`spxwContract`). With a guest symbol: build the OPT contract
-  from discovered params (symbol, exchange SMART, currency USD, multiplier from
-  secdef, right/strike/expiry validated via `validateOrder`).
-- Fills/blotter/journal rows gain a `symbol` field (absent = SPXW for back-compat —
-  the Journal and TradeHistory must not break on old rows).
-- Positions from IBKR are account-wide already; `upsertPosition` keeps them all —
-  add `symbol` to the position payload so the client can filter chart overlays.
+The main client messages are:
 
-## Frontend
+- `clientHello {clientId}`
+- `symbolSearch {q}`
+- `activateSymbol {requestId, symbol, conId}`
+- `deactivateSymbol {requestId}`
+- guest `order`, `quote`, and `optHistory` requests carrying the selected symbol
+  (and exact conId where that request shape supports it)
 
-### Feed (`src/feed.js`)
-- New snapshot fields: `guest` (null | {symbol, price, candles, greeksMap, expiry,
-  strikeStep, live}), `searchResults`.
-- New senders: `searchSymbols(q)`, `activateSymbol(sym, conId)`, `deactivateSymbol()`.
-- Guest greeks land in a **separate guestGreeksMap** (same entry shape) — never
-  merged into the SPX map.
+An active resource has an exact key such as `SPY|756733` and a monotonically new
+`resourceGeneration`. Targeted guest envelopes carry both. `src/feed-model.js`
+accepts them only when they match the tab's acknowledged resource and generation.
+This fences callbacks that arrive after a deactivate/reactivate or reconnect.
 
-### App (`src/App.jsx`)
-- `activeSymbol` state: `'SPX'` (default) or the guest symbol. A compact **search
-  box in the header area** (desktop-first; mobile can wait): type → debounced
-  `symbolSearch` → dropdown of matches → pick = activate. An `[SPX]` chip always
-  offers one-tap return home (which deactivates the guest).
-- When a guest is active, the cockpit swaps data sources: price/candles/greeksMap/
-  expiry/strikeStep come from `feed.guest`. **Hidden/disabled in guest mode:**
-  replay, bus stop 🚏, rung, ⚡ red MKT arm, expected-move band, basis/`ES/SPX`
-  labels, VIX strip stays (it's global). Chart overlays (positions, markers) filter
-  to `p.symbol === activeSymbol` (SPX positions keep `symbol` undefined — treat
-  undefined as 'SPX').
-- **Strike snapping must use the guest's real grid**: replace hardcoded `5` at the
-  trade-click/hover call sites with `strikeStep` from the active source (SPX keeps 5).
-  `nearestOtmStrike(price, type, step)` already takes a step — thread it through.
-- **Nearest-weekly semantics**: in guest mode the chain/orders always target
-  `guest.expiry` (the discovered nearest weekly) — the header shows it as e.g.
-  `SPCX · W Jul 10` so it's never ambiguous which expiry a click buys.
-- **TradeModal**: show the symbol + expiry date prominently, and when
-  `settlement:'physical'`, a one-line warning: *“American-style, physically settled —
-  ITM at expiry becomes ±100 shares, not cash.”* Same qty/limit/TP/SL mechanics.
-- Order senders pass `symbol` when a guest is active. `resolveGreeks` gains a guest
-  branch (guest map first, mid fallback, model last — same ladder as today).
+## Registry ownership
 
-### Chart (`src/Chart.jsx`)
-- Needs no structural change: it already renders whatever candles/greeksMap/price it
-  receives. Pass `strikeStep` as a prop for hover snapping and axis-chain strike
-  spacing (SPX default 5 → the `STRIKE_STEPS`/`pxPer5` logic parameterizes on it).
-  Guard the few SPX literals (the `k % 5` style assumptions in axis chain).
+`server/guest-registry.js` is the single owner of:
 
-## Tests (must pass with `npm test` alongside the existing options-forward tests)
-- `guest-symbol.test.js`: expiry picking (before/after 16:00 on expiry day, weekend),
-  strike-step derivation (2.5 grid, 5 grid, mixed), strike window at the edge of the
-  list, order validation accept/reject.
-- A small feed-reducer test if cheap: `guest` message merges without disturbing SPX
-  snapshot fields.
+- socket ↔ client identity and handshake generation;
+- exact resource keys, owners, refcounts, startup state, and capacity;
+- activation request correlation and targeted acknowledgments/errors;
+- a 2.5-second disconnected-tab grace lease for ordinary reloads;
+- final resource teardown after the last owner releases;
+- tests that reject stale generations and foreign publication.
 
-## Manual check plan (for kisa + me, after merge — agent does NOT do this)
-1. Bridge restarted off-hours → app unchanged with no guest (SPX regression eyeball).
-2. Search "SPCX" → activate → stock candles render, chain premiums stream, header
-   shows `SPCX · W <date>`.
-3. Hover strikes: snapping lands on the real grid (2.5s if that's what secdef says).
-4. Paper-account buy of 1 nearest-weekly SPCX call via the modal → marketable limit
-   in the bridge log, fill reconciles, position line + markers draw on the guest
-   chart only.
-5. `[SPX]` chip → home: SPXW chain resubscribes, basis label returns, positions
-   filter back.
-6. ⚡ red arm in guest mode → disabled toast. Order for a bogus strike (dev tools) →
-   bridge rejects with reason.
+Two tabs that request the same `{symbol, conId}` share subscriptions and receive
+their own targeted messages. Releasing one does not tear down the other's resource.
+If a tab requests a different exact guest while capacity is occupied, its current
+cockpit is not silently stolen or replaced.
 
-## Out of scope (Phase B+ — do not build now)
-Watchlist + snapshot polling · multiple simultaneous guests · guest replay ·
-guest bus stops · guest expected-move · persistence of the active symbol ·
-mobile search UI · non-US symbols · futures/index guests.
+## Resource lifecycle
+
+After an accepted activation, `server/ibkr-server.js`:
+
+1. resolves the exact stock contract;
+2. requests stock ticks and two days of 1-minute history into a guest candle
+   series with its own generation guards and watchdog;
+3. requests option parameters for the exact underlying conId;
+4. chooses the nearest **listed** non-expired option date (not necessarily a
+   weekly), derives the real strike step, and streams a narrow near-ATM window;
+5. recenters the window as the stock moves;
+6. targets guest snapshots/ticks/greeks/history only to current owners.
+
+The globally shared SPXW chain is paused once the first guest's exact stock
+contract resolves and guest subscriptions begin, then restored only after the
+final guest resource stops. Overnight this can temporarily remove the
+options-implied basis input; `basisSource` honestly falls through to the
+frozen/estimated ladder.
+
+## Frontend state
+
+`App.jsx` keeps SPX as the default. It persists only a confirmed exact guest intent
+in `sessionStorage`, then restores it after the socket hello and bridge-live
+readiness signals. During activation, guest ordering is unavailable; the SPX
+cockpit is not relabelled as if the new resource were already ready.
+
+When confirmed, the active instrument supplies its own:
+
+- symbol, underlying price, tick timestamp, candles, expiry, and strike step;
+- option greeks/quotes and premium-history keys;
+- exact conId, resource key, and generation for frozen ticket identity.
+
+Ticket identity is captured when the modal opens. A later symbol/expiry/resource
+switch cannot retarget it. Execution rechecks the current exact resource and asks
+the user to reopen a stale ticket.
+
+Guest mode hides or disables SPX-only behavior: replay, bus stops, rung, day
+levels, armed SPX triggers, and naked-MKT lightning. It does calculate a guest
+expected-move band from that guest's prior close and near-ATM straddle; unlike
+SPX 0DTE, the width is priced to the selected listed expiry. The ⚡ control
+cycles `off ↔ amber` for a guest, so red is unreachable. Amber still needs a
+fresh ask and sends a marketable `LMT`; the ordinary guest ticket accepts any
+valid positive limit. Current behavior does not add a separate toast merely for
+skipping red in that cycle.
+
+Positions, marks, fills, chart overlays, and premium-history keys include symbol
+and expiry so visually identical contracts do not collide. Inactive guest
+positions remain visible in the portfolio, but their close/add/exit actions fail
+visibly until the matching guest session and expiry are active; no SPX fallback
+is allowed.
+
+## Watchlist
+
+The watchlist UI is frontend-owned, persisted in `localStorage`, normalized by
+`server/watchlist.js`, and refreshed with slow one-shot stock snapshots. It does
+not allocate a second streamed option chain and does not grant order authority.
+
+Its bridge-side polling state is **not per tab**: the bridge currently keeps one
+process-wide list, the latest wholesale `watchlist` message replaces that list,
+and `watchlistQuotes` is broadcast. Tabs on the same origin normally share the
+same persisted list, but two devices with different lists can overwrite one
+another's bridge poll set. This is separate from the exact guest registry and is
+a deliberate current limitation, not an order-routing authority leak.
+
+## Verification
+
+Automated coverage includes guest expiry/strike math, registry capacity/refcounts,
+duplicate identities, reload grace, stale-generation rejection, history ownership,
+feed reducer fencing, exact ticket persistence, and order validation. The standard
+checks are:
+
+```text
+npm test
+npm run build
+node --check server/ibkr-server.js
+```
+
+Manual two-browser checks, when a bridge window is authorized:
+
+1. Open the same exact guest in two tabs; both stream one shared resource.
+2. Release one tab; the other continues without a generation change.
+3. While SPY is owned, request a different guest from another tab; it receives
+   `CAPACITY` and neither cockpit is silently mutated.
+4. Reload a guest tab inside the grace window; it resumes the exact resource.
+5. Rapidly switch away and back; delayed packets from the old generation do not
+   alter price, greeks, history, or ticket identity.
+6. Return the final tab to SPX; the home chain restores once, without duplicate
+   subscriptions.
+
+A separately authorized PAPER order check should use a small positive guest LMT,
+verify the exact symbol/conId/expiry at IBKR, and confirm fills/positions remain
+symbol-scoped. This spec itself does not authorize that order.
+
+## Deliberate limits
+
+- one distinct streamed guest resource at a time (same-resource sharing allowed);
+- US-stock underlyings only;
+- no guest replay, bus stops, rung, day levels, armed SPX triggers, or naked MKT;
+- guest option streaming yields the global SPXW chain while active;
+- one process-wide watchlist poll set (latest wholesale update wins);
+- phone search remains secondary to the desktop cockpit.

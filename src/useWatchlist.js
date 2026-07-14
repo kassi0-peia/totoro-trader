@@ -10,7 +10,7 @@ import { useCallback, useEffect, useState } from 'react';
 // bridge sender (feed.setWatchlist) — distinct from this hook's own setter.
 const WATCHLIST_MAX = 12;
 
-export default function useWatchlist({ socketOpen, sendWatchlist }) {
+export default function useWatchlist({ socketOpen, live, sendWatchlist }) {
   const [watchlist, setWatchlist] = useState(() => {
     try {
       const raw = localStorage.getItem('tt.watchlist');
@@ -23,8 +23,8 @@ export default function useWatchlist({ socketOpen, sendWatchlist }) {
     try { localStorage.setItem('tt.watchlist', JSON.stringify(watchlist)); } catch {}
   }, [watchlist]);
   useEffect(() => {
-    if (socketOpen) sendWatchlist(watchlist);
-  }, [socketOpen, watchlist]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (socketOpen && live) sendWatchlist(watchlist);
+  }, [socketOpen, live, watchlist]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const addWatch = useCallback((sym) => {
     const s = String(sym || '').trim().toUpperCase();

@@ -100,9 +100,6 @@
   font-size: 12px;
 }
 
-/* Delta drift readout: quiet by default; amber once |Δ| decays below half
-   its entry size (decay-toward-zero only — rising delta is going ITM). */
-.pos-drift.drift-warn { color: #e6a23c; }
 .cell-label {
   font-size: 9px;
   color: var(--c-muted);
@@ -206,6 +203,26 @@
   animation: kill-pulse 0.6s ease-in-out infinite;
 }
 @keyframes kill-pulse { 50% { opacity: 0.75; } }
+
+.safety-kill-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: #fff;
+}
+.safety-kill-active { background: #b51f2c; }
+.safety-kill-error { background: #8f1521; }
+.safety-kill-ok { background: var(--c-profit, #5cb85c); color: #0a0c12; }
+.safety-kill-dismiss {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
 
 .acct-block {
   display: none;            /* desktop: feed status lives in the title block */

@@ -438,6 +438,10 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* Trade ticket and pinned TP/SL/TRAIL controls share native number steppers.
+   Keep every one of those browser-owned arrow wells dark. */
+.modal input[type="number"] { color-scheme: dark; }
+
 .limit-input:disabled {
   opacity: 0.4;
 }
@@ -448,6 +452,146 @@
 
 .pos-inspect {
   width: min(440px, 94vw);
+}
+
+/* Persistent position cards live in one pointer-transparent layer. Only the
+   cards themselves receive input, so right-click lightning remains available
+   everywhere else on the chart. The layer is above chart menus/drawers but
+   below emergency/help overlays. */
+.pinned-position-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  pointer-events: none;
+}
+
+.pos-pinned-card {
+  display: flex;
+  flex-direction: column;
+  min-width: min(340px, calc(100vw - 16px));
+  min-height: min(360px, calc(100vh - 16px));
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  margin: 0;
+  padding: 16px 18px;
+  overflow: auto;
+  resize: both;
+  pointer-events: auto;
+  animation: pinnedCardIn 160ms ease-out;
+}
+
+@keyframes pinnedCardIn {
+  from { opacity: 0; transform: translateY(5px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.pos-pinned-card .modal-head {
+  flex: 0 0 auto;
+  margin-bottom: 8px;
+  padding-bottom: 10px;
+}
+
+.pos-card-drag-handle {
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.pos-card-drag-handle:active { cursor: grabbing; }
+
+.pos-card-pin {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  color: var(--c-muted);
+  flex: 0 0 auto;
+}
+
+.pos-card-pin svg {
+  width: 15px;
+  height: 15px;
+  fill: currentColor;
+}
+
+.pos-card-close {
+  width: 28px;
+  height: 28px;
+  margin-left: auto;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--c-muted);
+  font-size: 19px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.pos-card-close:hover {
+  border-color: var(--c-border);
+  color: var(--c-text);
+  background: var(--c-surfaceAlt);
+}
+
+.pos-pinned-card .pos-inspect-graph {
+  flex: 1 1 150px;
+  min-height: 120px;
+  height: auto;
+}
+
+.pos-pinned-card .greek-grid,
+.pos-pinned-card .pos-greek-strip,
+.pos-pinned-card .qty-row {
+  flex: 0 0 auto;
+}
+
+.pos-pinned-card .qty-row,
+.pos-pinned-card .order-kind {
+  flex-wrap: wrap;
+}
+
+.pos-pinned-card .order-kind {
+  flex: 1 1 260px;
+  justify-content: flex-end;
+}
+
+.pos-card-unavailable {
+  flex: 1 1 auto;
+  min-height: 180px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px;
+  color: var(--c-muted);
+  text-align: center;
+  line-height: 1.5;
+}
+
+.pos-card-unavailable b {
+  color: var(--c-text);
+  font-size: 13px;
+}
+
+.pos-card-unavailable span {
+  max-width: 330px;
+  font-size: 10px;
+}
+
+@media (max-width: 720px) {
+  .pos-pinned-card {
+    resize: none;
+    padding: 12px 14px;
+  }
+  .pos-pinned-card .modal-head { gap: 7px; }
+  .pos-pinned-card .modal-type { font-size: 11px; }
+  .pos-pinned-card .modal-strike { font-size: 22px; }
+  .pos-pinned-card .modal-sym { font-size: 10px; letter-spacing: 0.06em; }
+  .pos-pinned-card .modal-exp { letter-spacing: 0.08em; }
+  .pos-pinned-card .limit-input { width: 70px; }
 }
 
 /* Replay mode (desktop-only practice controls) */
@@ -632,6 +776,41 @@
   /* Override .modal's modalIn — it animated transform to scale(1), flashing the
      card full-size for 220ms before snapping back to 0.7. End the pop-in at 0.7. */
   animation: hoverCardIn 180ms cubic-bezier(0.2, 0.9, 0.3, 1.1);
+}
+
+.pos-greek-strip {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  padding-top: 9px;
+  border-top: 1px solid var(--c-border);
+  color: var(--pos-greek-color);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.pos-greek-strip > span {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 4px;
+}
+
+.pos-greek-strip i {
+  font-size: 9px;
+  font-style: normal;
+  letter-spacing: 0.08em;
+  opacity: 0.68;
+}
+
+.pos-greek-strip b {
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 @keyframes hoverCardIn {
