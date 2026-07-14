@@ -117,6 +117,52 @@ test('short leg (sell to open, buy back cheaper) realizes a gain', () => {
   assert.equal(s.wins, 1);
 });
 
+test('separate round trips through the same contract remain separate wins and losses', () => {
+  const fills = [
+    row('BUY', 6300, 'C', 2.0),
+    row('SELL', 6300, 'C', 4.0), // +200, flat
+    row('BUY', 6300, 'C', 3.0),
+    row('SELL', 6300, 'C', 1.0), // -200, flat again
+  ];
+  const s = dayStats(fills, '20260710');
+  assert.equal(s.pl, 0);
+  assert.equal(s.realizedLegs, 2);
+  assert.equal(s.wins, 1);
+  assert.equal(s.losses, 1);
+  const journal = journalStats({ '20260709': fills }, '20260710');
+  assert.equal(journal.winRate, 0.5);
+  assert.equal(journal.avgWin, 200);
+  assert.equal(journal.avgLoss, -200);
+});
+
+test('a fill crossing through flat closes one episode and opens the reverse remainder', () => {
+  const fills = [
+    row('BUY', 6300, 'P', 2.0, 1, { expiry: '20260710' }),
+    row('SELL', 6300, 'P', 3.0, 2, { expiry: '20260710' }),
+  ];
+  const current = dayStats(fills, '20260710');
+  assert.equal(current.pl, 100, 'the flattened long episode is realized');
+  assert.equal(current.realizedLegs, 1);
+  assert.equal(current.openLegs, 1, 'the remaining one-lot short is still open');
+
+  const settled = dayStats(fills, '20260711');
+  assert.equal(settled.pl, 400, 'the remaining short later expires worthlessly for +$300');
+  assert.equal(settled.realizedLegs, 2);
+  assert.equal(settled.openLegs, 0);
+});
+
+test('malformed journal rows are ignored instead of becoming synthetic sells', () => {
+  const good = [row('BUY', 6300, 'C', 2), row('SELL', 6300, 'C', 3)];
+  const bad = [
+    { ...row('BUY', 6300, 'C', 99), action: 'HOLD' },
+    { ...row('BUY', 6300, 'C', 99), qty: true },
+    { ...row('BUY', 6300, 'C', 99), price: '99' },
+  ];
+  const s = dayStats([...good, ...bad], '20260710');
+  assert.equal(s.pl, 100);
+  assert.equal(s.realizedLegs, 1);
+});
+
 test('mergeToday overlays the live blotter on the journal copy of today', () => {
   const journal = { '20260709': [row('BUY', 6300, 'C', 2.0)], '20260710': [row('BUY', 1, 'C', 1.0)] };
   const live = [row('BUY', 6310, 'C', 1.0), row('SELL', 6310, 'C', 2.0)];

@@ -80,20 +80,28 @@ export default function ChartTooltips({
         const pct = filled && p.entryPremium ? ((exitPrem - p.entryPremium) / p.entryPremium) * 100 * plSign(p) : 0;
         const kind = isClosed ? 'CLOSED' : p.status === 'open' ? 'OPEN' : (p.status || '').toUpperCase();
         const c = p.type === 'call' ? theme.up : theme.down;
-        // Underlying price at entry: recorded for in-session opens, but null for
-        // positions rebuilt from server truth (the blotter keeps only premiums).
-        // Fall back to the candle covering the fill minute (≈ the SPX-equiv then),
-        // shown with a ~ to flag it as the bar price, not the exact tick.
-        const entryAt = p.entryPrice != null ? p.entryPrice : (() => {
-          if (p.openedAt == null || !tfCandles.length) return null;
+        const candleCloseAt = (ts) => {
+          if (ts == null || !tfCandles.length) return null;
           const bMs = timeframe * 60 * 1000;
-          const bucket = Math.floor(p.openedAt / bMs) * bMs;
+          const bucket = Math.floor(ts / bMs) * bMs;
           let lo = 0, hi = tfCandles.length - 1, di = -1;
           while (lo <= hi) { const mid = (lo + hi) >> 1; const ct = tfCandles[mid].t; if (ct === bucket) { di = mid; break; } if (ct < bucket) lo = mid + 1; else hi = mid - 1; }
           if (di < 0) di = lo - 1;
           return di >= 0 ? tfCandles[di].close : null;
-        })();
+        };
+        // Underlying price at entry: recorded for in-session opens, but null for
+        // positions rebuilt from server truth (the blotter keeps only premiums).
+        // Fall back to the candle covering the fill minute (≈ the SPX-equiv then),
+        // shown with a ~ to flag it as the bar price, not the exact tick.
+        const entryAt = p.entryPrice != null ? p.entryPrice : candleCloseAt(p.openedAt);
         const entryApprox = p.entryPrice == null && entryAt != null;
+        // Closed execution rows likewise contain no underlying tick. Never label
+        // today's live price as a historical exit after refresh; use the close's
+        // candle and mark it approximate, or show an honest em dash if unavailable.
+        const exitAt = isClosed
+          ? (p.exitPrice != null ? p.exitPrice : candleCloseAt(p.closedAt))
+          : price;
+        const exitApprox = isClosed && p.exitPrice == null && exitAt != null;
         return (
           <div
             className="chart-tooltip marker-tooltip"
@@ -110,7 +118,7 @@ export default function ChartTooltips({
               <span className="tt-kind">{kind}</span>
             </div>
             <div className="tt-row"><span>Entry @</span><b>{entryAt != null ? `${entryApprox ? '~' : ''}${entryAt.toFixed(2)}` : '—'}</b></div>
-            <div className="tt-row"><span>{isClosed ? 'Exit @' : 'Mark @'}</span><b>{(p.exitPrice ?? price).toFixed(2)}</b></div>
+            <div className="tt-row"><span>{isClosed ? 'Exit @' : 'Mark @'}</span><b>{exitAt != null ? `${exitApprox ? '~' : ''}${exitAt.toFixed(2)}` : '—'}</b></div>
             <div className="tt-row"><span>Entry Prem</span><b>{filled ? `$${p.entryPremium.toFixed(2)}` : 'filling…'}</b></div>
             <div className="tt-row"><span>{isClosed ? 'Exit Prem' : 'Mark Prem'}</span><b>${exitPrem.toFixed(2)}</b></div>
             <div className="tt-row"><span>Qty</span><b>×{p.qty}</b></div>
