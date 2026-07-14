@@ -81,21 +81,24 @@ test('randomPastWeekday chooses a local weekday 3–60 days back', () => {
   );
 });
 
-test('timeToExpiryYearsAt counts down to the contract date at local 16:00', () => {
-  const before = new Date(2026, 6, 13, 15, 0).getTime();
+test('timeToExpiryYearsAt counts down to the contract date at New York 16:00', () => {
+  // July is EDT: 15:00 New York = 19:00Z and the 16:00 cutoff = 20:00Z.
+  // Use an absolute instant so this assertion is identical on UTC CI and a
+  // Toronto development machine.
+  const before = Date.parse('2026-07-13T19:00:00.000Z');
   const oneHour = 1 / (365 * 24);
   assert.ok(Math.abs(timeToExpiryYearsAt('20260713', before) - oneHour) < 1e-12);
 });
 
 test('timeToExpiryYearsAt includes the weekend for a later weekly contract', () => {
-  // Friday 15:00 -> Monday 16:00 is 73 hours, not the next one-hour 4 PM.
-  const friday = new Date(2026, 6, 10, 15, 0).getTime();
+  // Friday 15:00 New York -> Monday 16:00 New York is 73 hours.
+  const friday = Date.parse('2026-07-10T19:00:00.000Z');
   const seventyThreeHours = 73 / (365 * 24);
   assert.ok(Math.abs(timeToExpiryYearsAt('20260713', friday) - seventyThreeHours) < 1e-12);
 });
 
 test('timeToExpiryYearsAt clamps settled and malformed contracts to zero', () => {
-  const afterExpiry = new Date(2026, 6, 13, 17, 0).getTime();
+  const afterExpiry = Date.parse('2026-07-13T21:00:00.000Z'); // 17:00 New York
   assert.equal(timeToExpiryYearsAt('20260713', afterExpiry), 0);
   assert.equal(timeToExpiryYearsAt('20260231', afterExpiry), 0);
   assert.equal(timeToExpiryYearsAt(null, afterExpiry), 0);
