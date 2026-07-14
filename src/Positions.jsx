@@ -1,4 +1,5 @@
 import React from 'react';
+import { entryDeltaOf, liveDeltaOf, deltaDecayed, fmtDelta } from './drift.js';
 import { plDollars, plSign } from './pl.js';
 
 function plOf(pos) {
@@ -129,6 +130,13 @@ export default function Positions({ positions, theme, onClose, onReverse, onCanc
           const tag = p.status === 'pending' ? 'FILLING' : p.status === 'closing' ? 'CLOSING' : null;
           const { live, dollars, pct } = plOf(p);
           const flash = flashOf(p);
+          // Delta drift: entry Δ (bridge-stamped on the leg's fills) vs live Δ.
+          // Absent whenever either end is unknown — old bridge, backfilled
+          // fills, replay (fills are null there), or no streamed greeks.
+          const entryDelta = entryDeltaOf(p.fills);
+          const liveDelta = liveDeltaOf(p.greeksLive);
+          const drift = p.status === 'open' && entryDelta != null && liveDelta != null;
+          const decayed = drift && deltaDecayed(entryDelta, liveDelta);
           return (
             <div
               className={`pos-row${p.status === 'open' ? ' pos-row-click' : ''}${flash.cls}`}
@@ -156,6 +164,17 @@ export default function Positions({ positions, theme, onClose, onReverse, onCanc
                       {p.dayQuote?.dayLow != null ? p.dayQuote.dayLow.toFixed(2) : '—'}<span style={{ color: theme.muted }}> – </span>{p.dayQuote?.dayHigh != null ? p.dayQuote.dayHigh.toFixed(2) : '—'}
                     </span>
                   </span>
+                  {drift && (
+                    <span
+                      className={`pos-cell pos-drift${decayed ? ' drift-warn' : ''}`}
+                      data-tip={decayed
+                        ? 'Delta at entry vs now — decayed below half, the lotto is dying'
+                        : 'Delta at entry vs now'}
+                    >
+                      <span className="cell-label">Δ</span>
+                      <span style={{ whiteSpace: 'nowrap' }}>{fmtDelta(entryDelta)}→{fmtDelta(liveDelta)}</span>
+                    </span>
+                  )}
                   <span className="pos-cell pos-pl" style={{ color: dollars == null ? theme.muted : dollars >= 0 ? theme.profit : theme.loss }}>
                     {dollars == null ? (
                       <span data-tip={`No live feed for ${p.symbol ?? 'this symbol'} — open its tab for live marks`}>—</span>
