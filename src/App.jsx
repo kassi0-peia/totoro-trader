@@ -21,12 +21,12 @@ import { greeks as bsGreeks, nearestOtmStrike, realizedVol } from './options.js'
 import { classifyRegime } from './regime.js';
 import { expiryCutoffMs, suggestTimetable, displayRows, scanTouch } from './busstop.js';
 import BusStopPanel from './BusStopPanel.jsx';
-import { THEMES } from './themes.js';
 import { plDollars } from './pl.js';
 import { buildOpenOrder, buildQuickOrder } from './order-payload.js';
 import { chimeFill, chimeAlert } from './sounds.js';
 import { deriveDayLevels } from './levels.js';
 import useReplayController from './app/useReplayController.js';
+import useCockpitSettings from './app/useCockpitSettings.js';
 import {
   EMPTY_ARR,
   EMPTY_GREEKS,
@@ -42,20 +42,26 @@ import {
 let posSeq = 1;
 
 export default function App() {
-  const [themeKey, setThemeKey] = useState(() => {
-    try { const k = localStorage.getItem('tt.theme'); if (k && THEMES[k]) return k; } catch {}
-    return 'forest';
-  });
-  const [neutralChrome, setNeutralChrome] = useState(() => {
-    try { return localStorage.getItem('tt.neutralChrome') === '1'; } catch {}
-    return false;
-  });
-  const theme = THEMES[themeKey];
-  // Under neutral chrome the chart paints a black background (grid stays neutral too).
-  const chartTheme = useMemo(
-    () => (neutralChrome ? { ...theme, bg: '#0a0a0c', grid: '#17171a' } : theme),
-    [theme, neutralChrome]
-  );
+  const {
+    themeKey,
+    setThemeKey,
+    neutralChrome,
+    setNeutralChrome,
+    theme,
+    chartTheme,
+    axisChain,
+    setAxisChain,
+    rungButton,
+    setRungButton,
+    showOvn,
+    setShowOvn,
+    showPositions,
+    setShowPositions,
+    showMarkers,
+    setShowMarkers,
+    dayLevelsOn,
+    setDayLevelsOn,
+  } = useCockpitSettings();
   // Timeframe — restored per symbol (tt.tf:SPX here; guests restore in the
   // layout-memory effect below). First-ever visit keeps the 1m default.
   const [timeframe, setTimeframe] = useState(() => {
@@ -120,27 +126,6 @@ export default function App() {
   useEffect(() => {
     try { localStorage.setItem('tt.drawerView', drawerView); } catch {}
   }, [drawerView]);
-  // Opt-in tools (kisa's rule: dormant until toggled, in the gear panel).
-  const [axisChain, setAxisChain] = useState(() => {
-    try { return localStorage.getItem('tt.axischain') === '1'; } catch { return false; }
-  });
-  const [rungButton, setRungButton] = useState(() => {
-    try { return localStorage.getItem('tt.rung') === '1'; } catch { return false; }
-  });
-  const [showOvn, setShowOvn] = useState(() => {
-    try { const v = localStorage.getItem('tt.showOvn'); return v == null ? true : v === '1'; } catch { return true; }
-  });
-  const [showPositions, setShowPositions] = useState(() => {
-    try { const v = localStorage.getItem('tt.showPositions'); return v == null ? true : v === '1'; } catch { return true; }
-  });
-  const [showMarkers, setShowMarkers] = useState(() => {
-    try { const v = localStorage.getItem('tt.showMarkers'); return v == null ? true : v === '1'; } catch { return true; }
-  });
-  // Day levels: opt-in overlay (kisa 2026-07-13 "day levels have to have a
-  // toggle i guess") — PDH/PDL/PDC + today's open from 1D history. SPX-only.
-  const [dayLevelsOn, setDayLevelsOn] = useState(() => {
-    try { return localStorage.getItem('tt.dayLevels') === '1'; } catch { return false; }
-  });
   const [quickMode, setQuickMode] = useState(false); // ⚡ right-click quick trade — per session, not persisted
   // 🚏 Bus Stop: called (price, time) coordinates. Stops persist (localStorage,
   // per-browser — the calibration record is the point); the arm toggle doesn't.
@@ -160,16 +145,6 @@ export default function App() {
   // and the chart menu arms/disarms. Hook is called below, once its live-tape
   // and guest inputs (feed/guest/activeSymbol/showToast) are in scope.
   const [chartMenu, setChartMenu] = useState(null); // {x, y, price, alertId, alertPrice}
-  useEffect(() => {
-    try {
-      localStorage.setItem('tt.axischain', axisChain ? '1' : '0');
-      localStorage.setItem('tt.rung', rungButton ? '1' : '0');
-      localStorage.setItem('tt.showOvn', showOvn ? '1' : '0');
-      localStorage.setItem('tt.showPositions', showPositions ? '1' : '0');
-      localStorage.setItem('tt.showMarkers', showMarkers ? '1' : '0');
-      localStorage.setItem('tt.dayLevels', dayLevelsOn ? '1' : '0');
-    } catch {}
-  }, [axisChain, rungButton, showOvn, showPositions, showMarkers, dayLevelsOn]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [now, setNow] = useState(Date.now());
   const [pulse, setPulse] = useState(false);
@@ -510,24 +485,6 @@ export default function App() {
   const priceStaleSecs = Math.round(priceStaleMs / 1000);
 
   priceRef.current = feed.price;
-
-  useEffect(() => {
-    const root = document.documentElement;
-    Object.entries(theme).forEach(([k, v]) => {
-      if (typeof v === 'string') root.style.setProperty(`--c-${k}`, v);
-    });
-    // Neutral chrome: off-chart UI uses soft dark grey instead of the theme's
-    // tinted surfaces. The chart keeps full theme colors (painted on canvas).
-    if (neutralChrome) {
-      root.style.setProperty('--c-bg', '#0a0a0b');
-      root.style.setProperty('--c-surface', '#101012');
-      root.style.setProperty('--c-surfaceAlt', '#161618');
-      root.style.setProperty('--c-border', '#242427');
-    }
-  }, [theme, neutralChrome]);
-
-  useEffect(() => { try { localStorage.setItem('tt.theme', themeKey); } catch {} }, [themeKey]);
-  useEffect(() => { try { localStorage.setItem('tt.neutralChrome', neutralChrome ? '1' : '0'); } catch {} }, [neutralChrome]);
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 800);
