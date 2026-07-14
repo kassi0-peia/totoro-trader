@@ -43,6 +43,28 @@ export function feedCandleSeries(series, price, {
   return series.candles[series.candles.length - 1];
 }
 
+// Historical replies and live ticks can interleave during startup. Keep the
+// reply in a staging array, then merge it with the live candles accumulated
+// since the request began; live wins for the current (possibly partial) bucket.
+export function finishHistoricalSeed(series, historical, {
+  maxCandles = Infinity,
+  now = Date.now(),
+  candleMs = CANDLE_MS,
+} = {}) {
+  const byTime = new Map();
+  for (const candle of Array.isArray(historical) ? historical : []) {
+    if (Number.isFinite(candle?.t)) byTime.set(candle.t, candle);
+  }
+  for (const candle of Array.isArray(series?.candles) ? series.candles : []) {
+    if (Number.isFinite(candle?.t)) byTime.set(candle.t, candle);
+  }
+  let candles = [...byTime.values()].sort((a, b) => a.t - b.t);
+  if (candles.length > maxCandles) candles = candles.slice(-maxCandles);
+  series.candles = candles;
+  series.edge = nextCandleEdge(now, candleMs);
+  return candles;
+}
+
 export function parseHistTime(time) {
   if (typeof time === 'number') return time * 1000;
   const s = String(time);

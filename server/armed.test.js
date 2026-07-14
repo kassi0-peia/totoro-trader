@@ -2,37 +2,84 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { validateArmedOrder, armedTriggered } from './armed.js';
 
-const ctx = { price: 7480, expiry: '20260713' };
+const ctx = { price: 7480, expiry: '20260713', contractAvailable: true };
 
 test('a valid call arm above the market passes and is stamped with the expiry', () => {
-  const v = validateArmedOrder({ id: 'a1', level: 7500, strike: 7505, right: 'C', dir: 'up' }, ctx);
+  const v = validateArmedOrder({ id: 'a1', level: 7500, strike: 7505, right: 'C', dir: 'up', expiry: ctx.expiry }, ctx);
   assert.equal(v.ok, true);
   assert.equal(v.armed.expiry, '20260713');
   assert.equal(v.armed.strike, 7505);
 });
 
 test('a valid put arm below the market passes', () => {
-  const v = validateArmedOrder({ id: 'a2', level: 7460, strike: 7455, right: 'P', dir: 'down' }, ctx);
+  const v = validateArmedOrder({ id: 'a2', level: 7460, strike: 7455, right: 'P', dir: 'down', expiry: ctx.expiry }, ctx);
   assert.equal(v.ok, true);
 });
 
-test('side rules: call must arm up with strike beyond; put mirrors', () => {
-  assert.equal(validateArmedOrder({ level: 7500, strike: 7495, right: 'C', dir: 'up' }, ctx).ok, false);
-  assert.equal(validateArmedOrder({ level: 7500, strike: 7505, right: 'C', dir: 'down' }, ctx).ok, false);
-  assert.equal(validateArmedOrder({ level: 7460, strike: 7465, right: 'P', dir: 'down' }, ctx).ok, false);
-  assert.equal(validateArmedOrder({ level: 7460, strike: 7455, right: 'P', dir: 'up' }, ctx).ok, false);
+test('either option right can fire on either crossing direction', () => {
+  const combinations = [
+    { id: 'up-call', level: 7500, strike: 7505, right: 'C', dir: 'up', expiry: ctx.expiry },
+    { id: 'up-put', level: 7500, strike: 7450, right: 'P', dir: 'up', expiry: ctx.expiry },
+    { id: 'down-call', level: 7460, strike: 7500, right: 'C', dir: 'down', expiry: ctx.expiry },
+    { id: 'down-put', level: 7460, strike: 7455, right: 'P', dir: 'down', expiry: ctx.expiry },
+  ];
+  for (const armed of combinations) assert.equal(validateArmedOrder(armed, ctx).ok, true);
+});
+
+test('contract geometry remains OTM at the trigger, independent of direction', () => {
+  assert.equal(validateArmedOrder({ id: 'side-1', level: 7500, strike: 7495, right: 'C', dir: 'up', expiry: ctx.expiry }, ctx).ok, false);
+  assert.equal(validateArmedOrder({ id: 'side-2', level: 7500, strike: 7505, right: 'P', dir: 'up', expiry: ctx.expiry }, ctx).ok, false);
+  assert.equal(validateArmedOrder({ id: 'side-3', level: 7460, strike: 7455, right: 'C', dir: 'down', expiry: ctx.expiry }, ctx).ok, false);
+  assert.equal(validateArmedOrder({ id: 'side-4', level: 7460, strike: 7465, right: 'P', dir: 'down', expiry: ctx.expiry }, ctx).ok, false);
+});
+
+test('SPXW armed strikes stay on the five-point grid', () => {
+  assert.deepEqual(
+    validateArmedOrder({ id: 'off-grid', level: 7500, strike: 7501, right: 'C', dir: 'up', expiry: ctx.expiry }, ctx),
+    { ok: false, reason: 'strike is off the SPXW 5-point grid' },
+  );
+});
+
+test('a contract known to be absent from the streamed chain is rejected', () => {
+  const armed = { id: 'missing', level: 7500, strike: 7505, right: 'C', dir: 'up', expiry: ctx.expiry };
+  assert.deepEqual(
+    validateArmedOrder(armed, { ...ctx, contractAvailable: false }),
+    { ok: false, reason: 'contract is not available in the live SPXW chain' },
+  );
+  assert.equal(validateArmedOrder(armed, { ...ctx, contractAvailable: undefined }).ok, true);
+});
+
+test('crossing direction must be inferred from the current displayed price', () => {
+  const base = { id: 'direction', level: 7500, strike: 7505, right: 'C', expiry: ctx.expiry };
+  assert.equal(validateArmedOrder({ ...base, dir: 'down' }, ctx).ok, false);
+  assert.equal(validateArmedOrder({ ...base, dir: 'up' }, { ...ctx, price: 7500 }).ok, false);
 });
 
 test('a trigger more than 10% from the market is fenced out', () => {
-  assert.equal(validateArmedOrder({ level: 8500, strike: 8505, right: 'C', dir: 'up' }, ctx).ok, false);
-  assert.equal(validateArmedOrder({ level: 6600, strike: 6595, right: 'P', dir: 'down' }, ctx).ok, false);
+  assert.equal(validateArmedOrder({ id: 'far-1', level: 8500, strike: 8505, right: 'C', dir: 'up', expiry: ctx.expiry }, ctx).ok, false);
+  assert.equal(validateArmedOrder({ id: 'far-2', level: 6600, strike: 6595, right: 'P', dir: 'down', expiry: ctx.expiry }, ctx).ok, false);
+});
+
+test('a persisted arm can never roll forward onto a different expiry', () => {
+  const base = { id: 'old', level: 7500, strike: 7505, right: 'C', dir: 'up' };
+  assert.deepEqual(
+    validateArmedOrder(base, ctx),
+    { ok: false, reason: 'armed expiry is stale or missing' },
+  );
+  assert.deepEqual(
+    validateArmedOrder({ ...base, expiry: '20260712' }, ctx),
+    { ok: false, reason: 'armed expiry is stale or missing' },
+  );
 });
 
 test('garbage is rejected, never thrown on', () => {
-  for (const bad of [null, {}, { level: 'x', strike: 7505, right: 'C', dir: 'up' },
-    { level: 7500, strike: -1, right: 'C', dir: 'up' },
-    { level: 7500, strike: 7505, right: 'Q', dir: 'up' },
-    { level: 7500, strike: 7505, right: 'C', dir: 'sideways' }]) {
+  const valid = { id: 'a-safe', level: 7500, strike: 7505, right: 'C', dir: 'up', expiry: ctx.expiry };
+  for (const bad of [null, {}, { ...valid, level: '7500' }, { ...valid, level: true },
+    { ...valid, strike: '7505' }, { ...valid, strike: false },
+    { ...valid, strike: -1 }, { ...valid, right: 'Q' }, { ...valid, dir: 'sideways' },
+    { ...valid, id: 123 }, { ...valid, id: {} }, { ...valid, id: 'two words' },
+    { ...valid, id: 'x'.repeat(123) }, { ...valid, expiry: 20260713 },
+    { ...valid, expiry: '20260231' }]) {
     assert.equal(validateArmedOrder(bad, ctx).ok, false);
   }
 });

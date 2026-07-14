@@ -25,6 +25,14 @@ export function createTradeJournal({
   let tradeSeq = 0;
   const seenExecIds = new Set();
 
+  function seedRows(rows) {
+    for (const trade of rows || []) {
+      const id = Number(trade?.id);
+      if (Number.isSafeInteger(id) && id > tradeSeq) tradeSeq = id;
+      if (trade?.execId) seenExecIds.add(trade.execId);
+    }
+  }
+
   function saveJournal() {
     try {
       atomicWriteSync(journalFile, JSON.stringify({ days: journal }));
@@ -50,15 +58,8 @@ export function createTradeJournal({
       const data = JSON.parse(fs.readFileSync(journalFile, 'utf8'));
       if (!data?.days || typeof data.days !== 'object') return;
       journal = data.days;
-      let seeded = 0;
-      for (const rows of Object.values(journal)) {
-        for (const trade of rows || []) {
-          if (trade?.execId) {
-            seenExecIds.add(trade.execId);
-            seeded++;
-          }
-        }
-      }
+      for (const rows of Object.values(journal)) seedRows(rows);
+      const seeded = seenExecIds.size;
       log.log(`[ibkr] journal: ${Object.keys(journal).length} day(s) loaded, ${seeded} execIds seeded`);
     } catch {}
   }
@@ -67,10 +68,9 @@ export function createTradeJournal({
     tradesDate = today();
     try {
       const data = JSON.parse(fs.readFileSync(tradesFile, 'utf8'));
+      if (Array.isArray(data.trades)) seedRows(data.trades);
       if (data.date === tradesDate && Array.isArray(data.trades)) {
         trades = data.trades;
-        tradeSeq = trades.reduce((max, trade) => Math.max(max, trade.id || 0), 0);
-        for (const trade of trades) if (trade.execId) seenExecIds.add(trade.execId);
         log.log(`[ibkr] loaded ${trades.length} trade(s) for ${tradesDate}`);
       } else if (data.date && Array.isArray(data.trades) && data.trades.length && !journal[data.date]) {
         journal[data.date] = data.trades;
@@ -93,38 +93,11 @@ export function createTradeJournal({
     }
   }
 
-  function recordOrderStatus(orderId, order, filled, avgFillPrice) {
-    rollToday();
-    if (order.recorded) return;
-    const duplicate = trades.some((trade) => (
-      trade.execId
-      && trade.orderId === orderId
-      && trade.action === order.action
-      && trade.strike === order.strike
-      && trade.right === order.right
-    ));
-    if (duplicate) {
-      order.recorded = true;
-      return;
-    }
-    order.recorded = true;
-    const trade = {
-      id: ++tradeSeq,
-      orderId,
-      ts: now(),
-      action: order.action,
-      strike: order.strike,
-      right: order.right,
-      expiry: order.expiry,
-      qty: filled,
-      price: avgFillPrice,
-      ...(order.symbol && order.symbol !== 'SPX' ? { symbol: order.symbol } : {}),
-      ...(order.refAtSend > 0 ? { ref: order.refAtSend } : {}),
-    };
-    trades.push(trade);
-    if (trades.length > 1000) trades = trades.slice(-1000);
-    saveTrades();
-    broadcast({ type: 'trade', trade });
+  function recordOrderStatus() {
+    // Intentionally no ledger write. orderStatus reports an aggregate filled
+    // quantity and average, so recording it alongside split execDetails rows
+    // counts the same contracts twice. Executions are the authoritative rows;
+    // reqExecutions backfills any that arrive while the bridge is disconnected.
   }
 
   function recordExecution(contract, execution, live = false) {
@@ -137,28 +110,40 @@ export function createTradeJournal({
     const expiry = String(contract.lastTradeDateOrContractMonth || '').slice(0, 8);
     const symbol = String(contract.symbol || '') !== 'SPX' ? String(contract.symbol || '') : null;
     const qty = execution.shares ?? 0;
-    const price = execution.avgPrice ?? execution.price ?? 0;
-    seenExecIds.add(execId);
+    // `avgPrice` is cumulative for the whole order. Each execId row must carry
+    // that execution's own price or split fills distort the cash-flow ledger.
+    const price = execution.price ?? execution.avgPrice ?? 0;
     if (!(strike > 0) || !qty) return;
-
-    const duplicate = trades.some((trade) => (
-      !trade.execId
-      && trade.orderId === execution.orderId
-      && trade.strike === strike
-      && trade.right === right
-      && trade.action === action
-      && trade.qty === qty
-    ));
-    if (duplicate) return;
+    seenExecIds.add(execId);
     const order = getOrder(execution.orderId);
     if (order) order.recorded = true;
     rollToday();
     const currentTime = now();
+    const ts = live ? currentTime : Math.min(parseExecutionTime(execution.time), currentTime);
+    const rowDate = tradeDateAt(ts);
+    const targetRows = rowDate === tradesDate
+      ? trades
+      : (journal[rowDate] || (journal[rowDate] = []));
+    // A journal written by an older bridge can still contain the aggregate
+    // orderStatus fallback. Replace that one derived row with the first real
+    // execution, retaining its ID and user-authored metadata. Later split
+    // executions get their own IDs and can never be hidden by the aggregate.
+    const legacyIndex = targetRows.findIndex((trade) => (
+      !trade?.execId
+      && trade.orderId === execution.orderId
+      && trade.action === action
+      && trade.strike === strike
+      && trade.right === right
+    ));
+    const legacy = legacyIndex >= 0 ? targetRows.splice(legacyIndex, 1)[0] : null;
+    const legacyId = Number(legacy?.id);
+    const id = Number.isSafeInteger(legacyId) && legacyId > 0 ? legacyId : ++tradeSeq;
     const trade = {
-      id: ++tradeSeq,
+      ...(legacy || {}),
+      id,
       orderId: execution.orderId,
       execId,
-      ts: live ? currentTime : Math.min(parseExecutionTime(execution.time), currentTime),
+      ts,
       action,
       strike,
       right,
@@ -170,15 +155,11 @@ export function createTradeJournal({
       ...deltaAtFill(contract, live),
     };
 
-    const rowDate = tradeDateAt(trade.ts);
     if (rowDate !== tradesDate) {
-      const rows = journal[rowDate] || (journal[rowDate] = []);
-      if (!rows.some((row) => row.execId === execId)) {
-        rows.push(trade);
-        rows.sort((a, b) => (a.ts || 0) - (b.ts || 0));
-        saveJournal();
-        log.log(`[ibkr] backfilled fill routed to journal ${rowDate}: ${action} ${strike}${right}`);
-      }
+      targetRows.push(trade);
+      targetRows.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+      saveJournal();
+      log.log(`[ibkr] backfilled fill routed to journal ${rowDate}: ${action} ${strike}${right}`);
       return;
     }
     trades.push(trade);
@@ -218,7 +199,12 @@ export function createTradeJournal({
     if (!match) return;
     const found = findRow(id);
     if (!found) return;
-    const file = `${id}.${match[1] === 'jpeg' ? 'jpg' : match[1]}`;
+    const extension = match[1] === 'jpeg' ? 'jpg' : match[1];
+    // The HTTP shot route intentionally accepts digits only. Prefixing the
+    // globally unique row ID with YYYYMMDD keeps the filename day-qualified
+    // without breaking that traversal-safe route; old stored names stay valid.
+    const dayPrefix = /^\d{8}$/.test(String(found.day)) ? String(found.day) : '';
+    const file = `${dayPrefix}${id}.${extension}`;
     try {
       fs.mkdirSync(shotsDir, { recursive: true });
       fs.writeFileSync(path.join(shotsDir, file), Buffer.from(match[2], 'base64'));

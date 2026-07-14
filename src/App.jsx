@@ -1,10 +1,11 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import Header from './Header.jsx';
 import Chart from './Chart.jsx';
 import Positions from './Positions.jsx';
 import TradeHistory from './TradeHistory.jsx';
 import TradeModal from './TradeModal.jsx';
 import PositionModal from './PositionModal.jsx';
+import PinnedPositionCards from './PinnedPositionCards.jsx';
 import ReplayBar from './ReplayBar.jsx';
 import ThemePanel from './ThemePanel.jsx';
 import TimeframeBar, { TF_OPTIONS } from './TimeframeBar.jsx';
@@ -17,7 +18,7 @@ import useBottomDrawer from './useBottomDrawer.js';
 import ChartMenu from './ChartMenu.jsx';
 import HelpOverlay from './HelpOverlay.jsx';
 import { useIbkrFeed, liveGreeks, liveQuote } from './feed.js';
-import { greeks as bsGreeks, nearestOtmStrike, realizedVol } from './options.js';
+import { greeks as bsGreeks, nearestOtmStrike, replayVolAt } from './options.js';
 import { classifyRegime } from './regime.js';
 import { expiryCutoffMs, suggestTimetable, displayRows, scanTouch } from './busstop.js';
 import BusStopPanel from './BusStopPanel.jsx';
@@ -25,19 +26,54 @@ import { plDollars } from './pl.js';
 import { chimeFill, chimeAlert } from './sounds.js';
 import { deriveDayLevels } from './levels.js';
 import useReplayController from './app/useReplayController.js';
+import { replayAccess, replayBlocksLiveOrders, shouldExitReplay } from './app/replayAccess.js';
 import useCockpitSettings from './app/useCockpitSettings.js';
 import useOrderActions from './app/useOrderActions.js';
+import {
+  armedPlacementReducer,
+  armedPlacementStrikeOnGrid,
+  armedQuoteIsMonitored,
+  beginArmedPlacement,
+  completeArmedPlacement,
+} from './app/armedPlacement.js';
+import { killBannerFor } from './app/killDisplay.js';
+import { freshQuoteMid } from './order-payload.js';
 import {
   EMPTY_ARR,
   EMPTY_GREEKS,
   IVOL_FALLBACK,
   MID_FRESH_MS,
   SPXW_STRIKE_STEP,
+  freshUnderlyingPriceForFill,
+  inactivePositionSnapshotGreeks,
   optHistKey,
-  posKey,
+  readGuestIntent,
+  resolveExactGuestMatch,
   rightOf,
+  shouldPeekBottomForFill,
   timeToExpiryYearsAt,
+  writeGuestIntent,
 } from './app/helpers.js';
+import {
+  closeLocalPositionEpisode,
+  deriveClosedChartAnnotations,
+  fillsForPosition,
+  filterChartPositions,
+  positionHasCloseRef,
+  reconcilePositions,
+  removePositionCloseRef,
+} from './app/positionModel.js';
+import {
+  loadPinnedCardState,
+  pinnedCardReducer,
+  savePinnedCardState,
+  topPinnedCard,
+} from './app/pinnedPositionCards.js';
+
+function browserViewport() {
+  if (typeof window === 'undefined') return { width: 1280, height: 800 };
+  return { width: window.innerWidth, height: window.innerHeight };
+}
 
 export default function App() {
   const {
@@ -70,11 +106,54 @@ export default function App() {
     return 1;
   });
   const [positions, setPositions] = useState([]);
+  const positionsRef = useRef(positions);
+  positionsRef.current = positions;
   const [pending, setPending] = useState(null);
-  const [inspectId, setInspectId] = useState(null); // position id shown in the inspect modal (click/touch)
   const [hoverPos, setHoverPos] = useState(null);   // { id, x, y } — hover card over a position row
   const cardHoveredRef = useRef(false);             // mouse is over the floating hover card itself
   const cardHideRef = useRef(null);                 // pending 0.5s dismiss after leaving the card
+  // Persistent position cards store only exact contract identity + layout. Live
+  // rows are resolved from `inspectablePositions` at render time below; restoring
+  // this state can never synthesize a position or an order.
+  const pinnedViewportRef = useRef(browserViewport());
+  const [pinnedCardState, dispatchPinnedCard] = useReducer(
+    pinnedCardReducer,
+    null,
+    () => loadPinnedCardState(typeof localStorage === 'undefined' ? null : localStorage, pinnedViewportRef.current),
+  );
+  const pinnedCards = pinnedCardState.cards;
+  const topCard = topPinnedCard(pinnedCardState);
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      savePinnedCardState(typeof localStorage === 'undefined' ? null : localStorage, pinnedCardState);
+    }, 120);
+    return () => clearTimeout(timer);
+  }, [pinnedCardState]);
+  useEffect(() => {
+    const resize = () => {
+      pinnedViewportRef.current = browserViewport();
+      dispatchPinnedCard({ type: 'viewport', viewport: pinnedViewportRef.current });
+    };
+    window.addEventListener('resize', resize);
+    return () => window.removeEventListener('resize', resize);
+  }, []);
+  const pinPosition = useCallback((position) => {
+    if (!position || position.status !== 'open') return;
+    setHoverPos(null);
+    dispatchPinnedCard({ type: 'open', position, viewport: pinnedViewportRef.current });
+  }, []);
+  const focusPinnedCard = useCallback((key) => {
+    dispatchPinnedCard({ type: 'focus', key, viewport: pinnedViewportRef.current });
+  }, []);
+  const movePinnedCard = useCallback((key, x, y) => {
+    dispatchPinnedCard({ type: 'move', key, x, y, viewport: pinnedViewportRef.current });
+  }, []);
+  const resizePinnedCard = useCallback((key, width, height) => {
+    dispatchPinnedCard({ type: 'resize', key, width, height, viewport: pinnedViewportRef.current });
+  }, []);
+  const dismissPinnedCard = useCallback((key) => {
+    dispatchPinnedCard({ type: 'close', key, viewport: pinnedViewportRef.current });
+  }, []);
   // Slide-in drawer: today's fills over the chart. Open/closed state is
   // layout memory (tt.drawerOpen) — if she trades with it pinned open, it
   // greets her open on the next load.
@@ -105,8 +184,9 @@ export default function App() {
   }, [tradesPeek, drawerMounted]);
   // ── Bottom drawer (kisa 2026-07-10: "hide everything below the chart") ──
   // Invisible bottom band + footer: hover 1.5s or click to reveal the panel;
-  // clicks-off/Esc close it; a fill auto-peeks it ~5s. All the state, refs,
-  // timers, click-away and dwell handlers live in useBottomDrawer.
+  // clicks-off/Esc close it; a closing fill auto-peeks it ~5s. Opening fills
+  // stay quiet so entering a position never covers the chart. All timers,
+  // click-away and dwell handlers live in useBottomDrawer.
   const { bottomOpen, setBottomOpen, bottomShown, peekBottom, armBottom, disarmBottom, toggleBottom, bottomZoneRef, bottomPeekTimer, footerRef } = useBottomDrawer();
   // ── Trades-drawer view: today's blotter ↔ multi-day journal (history) ──
   // The history view (equity curve + daily P/L) renders INSIDE the drawer;
@@ -143,12 +223,13 @@ export default function App() {
   // and the chart menu arms/disarms. Hook is called below, once its live-tape
   // and guest inputs (feed/guest/activeSymbol/showToast) are in scope.
   const [chartMenu, setChartMenu] = useState(null); // {x, y, price, alertId, alertPrice}
+  const [armPlacement, dispatchArmPlacement] = useReducer(armedPlacementReducer, null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [now, setNow] = useState(Date.now());
   const [toast, setToast] = useState(null); // { text, kind: 'ok'|'err' }
 
   const moveHistRef = useRef([]);
-  const priceRef = useRef(0);
+  const fillUnderlyingRef = useRef(new Map());
   const toastTimer = useRef(null);
 
   const showToast = useCallback((text, kind = 'ok') => {
@@ -168,16 +249,28 @@ export default function App() {
   // (clientRef → {px, kind}) so the fill toast can say what hurrying cost.
   const refAtSendRef = useRef({});
   const [fillFlash, setFillFlash] = useState(null);
-  const markFillFlash = useCallback((msg) => {
+  const markFillFlash = useCallback((msg, { revealDrawer = true } = {}) => {
     setFillFlash({ strike: msg.strike, right: msg.right, expiry: msg.expiry, symbol: msg.symbol ?? 'SPX', action: msg.action, ts: Date.now() });
-    peekBottom(); // a fill always shows itself: auto-peek the bottom drawer
+    if (revealDrawer) peekBottom();
   }, [peekBottom]);
 
   // Apply IBKR order lifecycle events to local positions. Entry/exit prices come
   // from IBKR's reported avgFillPrice — never local estimates.
-  const handleOrderEvent = useCallback((msg) => {
+  const handleOrderEvent = useCallback((msg, authority = {}) => {
+    if (msg.type === 'reverseState') {
+      if (msg.phase === 'COMPLETE') {
+        showToast(`REVERSE: close proven, ${msg.closedQty ?? msg.requestedQty ?? ''} target contract${(msg.closedQty ?? msg.requestedQty) === 1 ? '' : 's'} submitted as LMT`, 'ok');
+      } else if (msg.phase === 'PARTIAL' || msg.phase === 'FAILED') {
+        showToast(`REVERSE stopped — ${msg.reason || 'no reopen was sent'}`, 'err');
+      }
+      return;
+    }
     if (msg.type === 'orderAck' && msg.accepted === false) {
-      setPositions((prev) => prev.map((p) => (p.openRef === msg.clientRef ? { ...p, status: 'rejected', note: msg.reason } : p)));
+      setPositions((prev) => prev.map((p) => {
+        if (p.openRef === msg.clientRef) return { ...p, status: 'rejected', note: msg.reason };
+        if (positionHasCloseRef(p, msg.clientRef)) return removePositionCloseRef(p, msg.clientRef, msg.reason);
+        return p;
+      }));
       showToast(`Order rejected: ${msg.reason}`, 'err');
       return;
     }
@@ -195,6 +288,10 @@ export default function App() {
     }
     // ⚔ armed-order lifecycle (setArmed referenced at call time — declared
     // below, deliberately NOT in this callback's deps: setters are stable).
+    if (msg.type === 'armedCleared') {
+      setArmed((list) => (list.length ? [] : list));
+      return;
+    }
     if (msg.type === 'armedFired') {
       setArmed((l) => l.filter((a) => a.id !== msg.id));
       chimeAlert();
@@ -209,7 +306,7 @@ export default function App() {
     if (msg.type === 'orderError') {
       setPositions((prev) => prev.map((p) => {
         if (p.openRef === msg.clientRef && p.status === 'pending') return { ...p, status: 'rejected', note: msg.reason };
-        if (p.closeRef === msg.clientRef && p.status === 'closing') return { ...p, status: 'open', note: msg.reason };
+        if (positionHasCloseRef(p, msg.clientRef)) return removePositionCloseRef(p, msg.clientRef, msg.reason);
         return p;
       }));
       showToast(`Order error: ${msg.reason}`, 'err');
@@ -224,15 +321,9 @@ export default function App() {
       // position the parent opened.
       const childMatch = typeof msg.clientRef === 'string' && msg.clientRef.match(/^(.*):(tp|sl)$/);
       if (childMatch && msg.status === 'Filled' && (msg.remaining === 0 || msg.remaining == null)) {
-        const base = childMatch[1];
-        const px = priceRef.current;
-        setPositions((prev) => prev.map((p) => {
-          if (p.openRef === base && p.status === 'open') {
-            const dollars = plDollars(p, msg.avgFillPrice, p.entryPremium ?? 0);
-            return { ...p, status: 'closed', exitPremium: msg.avgFillPrice, exitPrice: px, closedPL: dollars, closedAt: Date.now() };
-          }
-          return p;
-        }));
+        const px = freshUnderlyingPriceForFill(msg, fillUnderlyingRef.current);
+        const closedAt = Date.now();
+        setPositions((prev) => closeLocalPositionEpisode(prev, msg, { exitPrice: px, closedAt }));
         showToast(`BRACKET ${childMatch[2].toUpperCase()} FILLED ${msg.strike}${msg.right} @ $${Number(msg.avgFillPrice).toFixed(2)}`, 'ok');
         chimeFill();
         markFillFlash(msg);
@@ -241,7 +332,7 @@ export default function App() {
       if (msg.status === 'Cancelled' || msg.status === 'ApiCancelled') {
         setPositions((prev) => prev.map((p) => {
           if (p.openRef === msg.clientRef && p.status === 'pending') return { ...p, status: 'rejected', note: 'canceled' };
-          if (p.closeRef === msg.clientRef && p.status === 'closing') return { ...p, status: 'open', note: 'close canceled' };
+          if (positionHasCloseRef(p, msg.clientRef)) return removePositionCloseRef(p, msg.clientRef, 'close canceled');
           return p;
         }));
         showToast(`CANCELED ${msg.action} ${msg.strike}${msg.right}`, 'ok');
@@ -249,19 +340,32 @@ export default function App() {
       }
       const done = msg.status === 'Filled' && (msg.remaining === 0 || msg.remaining == null);
       if (!done) return;
-      const px = priceRef.current;
-      setPositions((prev) => prev.map((p) => {
-        if (p.openRef === msg.clientRef && p.status === 'pending') {
-          return { ...p, status: 'open', entryPremium: msg.avgFillPrice, entryPrice: px, openedAt: Date.now() };
-        }
-        // 'closing' = active close in flight; 'open' with a closeRef = a resting
-        // attached exit (TP/SL) that just filled.
-        if (p.closeRef === msg.clientRef && (p.status === 'closing' || p.status === 'open')) {
-          const dollars = plDollars(p, msg.avgFillPrice, p.entryPremium ?? 0);
-          return { ...p, status: 'closed', exitPremium: msg.avgFillPrice, exitPrice: px, closedPL: dollars, closedAt: Date.now() };
-        }
-        return p;
-      }));
+      const px = freshUnderlyingPriceForFill(msg, fillUnderlyingRef.current);
+      const filledAt = Date.now();
+      const fillPositionsRevision = Number.isSafeInteger(authority.positionsRevision)
+        && authority.positionsRevision >= 0
+        ? authority.positionsRevision
+        : null;
+      setPositions((prev) => {
+        const withOpenedFill = prev.map((p) => {
+          if (p.openRef !== msg.clientRef || p.status !== 'pending') return p;
+          return {
+            ...p,
+            status: 'open',
+            entryPremium: msg.avgFillPrice,
+            entryPrice: px,
+            openedAt: filledAt,
+            fillPositionsRevision,
+            awaitingPositionAuthority: true,
+          };
+        });
+        // 'closing' = an active close in flight; 'open' with the exact ref = a
+        // resting attached exit. One fill may flatten several scale-in rows.
+        return closeLocalPositionEpisode(withOpenedFill, msg, {
+          exitPrice: px,
+          closedAt: filledAt,
+        });
+      });
       // Fill quality: how far the fill landed from the price seen at send —
       // the number that teaches which moments are expensive to hurry.
       const sent = refAtSendRef.current[msg.clientRef];
@@ -269,11 +373,12 @@ export default function App() {
       const refNote = d != null ? ` · ${d >= 0 ? '+' : '−'}$${Math.abs(d).toFixed(2)} vs ${sent.kind}@send` : '';
       showToast(`FILLED ${msg.action} ${msg.strike}${msg.right} ×? @ $${Number(msg.avgFillPrice).toFixed(2)}${refNote}`.replace('×?', `×${msg.filled}`), 'ok');
       chimeFill();
-      markFillFlash(msg);
+      markFillFlash(msg, { revealDrawer: shouldPeekBottomForFill(msg, positionsRef.current) });
     }
   }, [showToast, markFillFlash]);
 
-  const feed = useIbkrFeed({ onOrderEvent: handleOrderEvent });
+  const [guestEvent, setGuestEvent] = useState(null);
+  const feed = useIbkrFeed({ onOrderEvent: handleOrderEvent, onGuestEvent: setGuestEvent });
 
   // Replay owns its tape clock and simulated book in a controller that receives
   // only replay/journal bridge operations—never sendOrder.
@@ -300,6 +405,7 @@ export default function App() {
     toggleGhosts,
   } = useReplayController({
     replayDays: feed.replayDays,
+    historyErrors: feed.historyErrors,
     journal: feed.journal,
     requestReplayDay: feed.requestReplayDay,
     requestJournal: feed.requestJournal,
@@ -317,9 +423,35 @@ export default function App() {
   // once the bridge has confirmed it (feed.guest matches) — until then the cockpit
   // stays on SPX so a pending activation can't blank the chart. When no guest is
   // active every SPX code path below is byte-identical to before.
+  const [savedGuestIntent] = useState(readGuestIntent);
   const [activeSymbol, setActiveSymbol] = useState('SPX');
-  const guestActive = activeSymbol !== 'SPX' && !!feed.guest && feed.guest.symbol === activeSymbol;
+  const activeConIdRef = useRef(savedGuestIntent?.conId ?? null);
+  const pendingGuestRequestRef = useRef(null);
+  const pendingSymbolResolutionRef = useRef(null);
+  const guestActive = activeSymbol !== 'SPX'
+    && !!feed.guest
+    && feed.guest.symbol === activeSymbol
+    && Number(feed.guest.conId) === Number(activeConIdRef.current);
+  const guestPending = activeSymbol !== 'SPX' && !guestActive;
   const guest = guestActive ? feed.guest : null;
+
+  // SPX history is globally resolvable. A guest history request is valid only
+  // while this tab owns that guest's exact registry context; inactive cards keep
+  // their cached graph and live snapshot marks without firing ambiguous requests.
+  const canRefreshPositionHistory = useCallback((position) => {
+    const symbol = position?.symbol ?? 'SPX';
+    return symbol === 'SPX' || (guestActive && symbol === activeSymbol);
+  }, [guestActive, activeSymbol]);
+  const refreshPositionHistory = useCallback((position) => {
+    if (!canRefreshPositionHistory(position)) return false;
+    const symbol = position?.symbol ?? 'SPX';
+    return feed.requestOptHistory({
+      ...(symbol !== 'SPX' ? { symbol } : {}),
+      strike: position.strike,
+      right: rightOf(position.type),
+      expiry: position.expiry,
+    });
+  }, [canRefreshPositionHistory, feed.requestOptHistory]);
 
   // ⏰ price alerts: state + persistence + the live-crossing effect (see useAlerts).
   const [alerts, setAlerts] = useAlerts({ feedPrice: feed.price, guestPrice: guest?.price, guestActive, activeSymbol, showToast });
@@ -334,7 +466,14 @@ export default function App() {
     try {
       const v = JSON.parse(localStorage.getItem('tt.armed') || '[]');
       if (Array.isArray(v)) {
-        return v.filter((a) => a && Number.isFinite(a.level) && Number.isFinite(a.strike) && (a.right === 'C' || a.right === 'P')).slice(0, ARMED_MAX_CLIENT);
+        return v.filter((a) => a
+          && typeof a.id === 'string'
+          && Number.isFinite(a.level) && a.level > 0
+          && armedPlacementStrikeOnGrid(a.strike, 5)
+          && (a.right === 'C' || a.right === 'P')
+          && (a.dir === 'up' || a.dir === 'down')
+          && /^\d{8}$/.test(a.expiry)
+        ).slice(0, ARMED_MAX_CLIENT);
       }
     } catch {}
     return [];
@@ -345,6 +484,78 @@ export default function App() {
   useEffect(() => {
     if (feed.socketOpen) feed.sendArmed(armed);
   }, [feed.socketOpen, armed]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Replay replaces the live book on screen, so it is available only after
+  // IBKR has explicitly finished recovering both positions and working orders,
+  // and only while that confirmed book (plus local send races/arms) is empty.
+  // RTH is stronger: hide the entry entirely while SPX cash is trading.
+  const replayGate = useMemo(() => replayAccess({
+    rth: feed.rth,
+    portfolioReady: feed.portfolioReady,
+    positions: feed.positions,
+    positionsRevision: feed.positionsRevision,
+    orders: feed.orders,
+    localPositions: positions,
+    armed,
+    killState: feed.killState,
+    reverseState: feed.reverseState,
+  }), [feed.rth, feed.portfolioReady, feed.positions, feed.positionsRevision, feed.orders, feed.killState, feed.reverseState, positions, armed]);
+
+  const clearReplayTransient = useCallback(() => {
+    // Never let an unsent live ticket/menu turn into a replay ticket (or a
+    // replay ticket turn back into a live one after a forced exit).
+    setPending(null);
+    setChartMenu(null);
+    dispatchArmPlacement({ type: 'cancel' });
+    setHoverPos(null);
+    setBusPanelId(null);
+    setQuickMode(false);
+    setBusArmed(false);
+  }, []);
+
+  const replaySurfaceOpen = replayBarOpen || replay != null;
+  const replayTransitionBlocked = replayBlocksLiveOrders({ replayBarOpen, replay, replayActive });
+  useEffect(() => {
+    if (!shouldExitReplay({ replayBarOpen, replay, access: replayGate })) return;
+    clearReplayTransient();
+    exitReplay();
+    showToast(`Replay exited — ${replayGate.reason}`, 'err');
+  }, [replaySurfaceOpen, replayGate.allowed, replayGate.reason, clearReplayTransient, exitReplay, showToast]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const blockedReplayToast = useCallback(() => {
+    showToast(replayGate.reason || 'Replay is unavailable right now', 'err');
+  }, [replayGate.reason, showToast]);
+
+  const toggleReplaySafe = useCallback(() => {
+    // Closing replay is always permitted. Opening it must re-check the current
+    // gate even though the visible button is disabled, guarding stale callbacks.
+    if (!replaySurfaceOpen && !replayGate.allowed) { blockedReplayToast(); return; }
+    clearReplayTransient();
+    toggleReplay();
+  }, [replaySurfaceOpen, replayGate.allowed, blockedReplayToast, clearReplayTransient, toggleReplay]);
+
+  const loadReplayDaySafe = useCallback((date) => {
+    if (!replayGate.allowed) { blockedReplayToast(); return; }
+    clearReplayTransient();
+    loadDay(date);
+  }, [replayGate.allowed, blockedReplayToast, clearReplayTransient, loadDay]);
+
+  const loadReplayMysterySafe = useCallback(() => {
+    if (!replayGate.allowed) { blockedReplayToast(); return; }
+    clearReplayTransient();
+    loadMystery();
+  }, [replayGate.allowed, blockedReplayToast, clearReplayTransient, loadMystery]);
+
+  const exitReplaySafe = useCallback(() => {
+    clearReplayTransient();
+    exitReplay();
+  }, [clearReplayTransient, exitReplay]);
+
+  const changeReplayDaySafe = useCallback(() => {
+    if (!replayGate.allowed) { exitReplaySafe(); blockedReplayToast(); return; }
+    clearReplayTransient();
+    changeDay();
+  }, [replayGate.allowed, exitReplaySafe, blockedReplayToast, clearReplayTransient, changeDay]);
   // The cockpit's data source. In guest mode price/candles/greeksMap/expiry/
   // strikeStep come from feed.guest; otherwise the SPX feed, untouched. Replay is
   // disabled in guest mode, so these never collide with replay's own price/time.
@@ -371,39 +582,128 @@ export default function App() {
 
   // Return home: deactivate the guest and snap the cockpit back to SPX.
   const goHome = useCallback(() => {
+    // Quick mode is a symbol-scoped intent. In particular, never let SPX's red
+    // MKT arm hide as a guest limit and silently reappear when SPX returns.
+    setQuickMode(false);
+    setBusArmed(false);
+    setBusPanelId(null);
+    setChartMenu(null);
+    setPending(null);
+    dispatchArmPlacement({ type: 'cancel' });
+    pendingGuestRequestRef.current = null;
+    pendingSymbolResolutionRef.current = null;
     activeConIdRef.current = null;
     setActiveSymbol('SPX');
+    writeGuestIntent(null);
     feed.deactivateSymbol();
-  }, [feed]);
-
-  // The conId the user picked for the active guest — kept so we can re-activate
-  // after a reconnect (the bridge doesn't persist guest state).
-  const activeConIdRef = useRef(null);
+  }, [feed.deactivateSymbol]);
 
   // Activate a searched symbol: tell the bridge, and optimistically flip the
   // active symbol so the header chip + gating update immediately (the cockpit
   // itself waits for feed.guest to confirm via guestActive).
   const activateGuest = useCallback((symbol, conId) => {
     const sym = String(symbol || '').toUpperCase();
-    if (!sym || sym === 'SPX') return;
-    activeConIdRef.current = conId ?? null;
+    const exactConId = Number(conId);
+    if (!sym || sym === 'SPX') return null;
+    if (!Number.isSafeInteger(exactConId) || exactConId <= 0) {
+      // Watchlist/open-position tabs know only the visible ticker. Resolve it
+      // through the same targeted search, and activate only if exactly one exact
+      // conId comes back; ambiguity returns the user to explicit search choice.
+      pendingSymbolResolutionRef.current = sym;
+      if (!feed.searchSymbols(sym)) {
+        pendingSymbolResolutionRef.current = null;
+        showToast('Symbol lookup was not sent — guest transport is not ready', 'err');
+        return null;
+      }
+      return 'resolving';
+    }
+    pendingSymbolResolutionRef.current = null;
+    // Menus/tickets/bus panels contain coordinates from the old chart. Never
+    // let a symbol switch reinterpret one of those coordinates on a new chain.
+    // Position hover/inspect cards deliberately remain untouched: they carry
+    // their own position identity and are safe to keep looking at.
+    if (replaySurfaceOpen) exitReplaySafe();
+    setQuickMode(false);
+    setBusArmed(false);
+    setBusPanelId(null);
+    setChartMenu(null);
+    setPending(null);
+    dispatchArmPlacement({ type: 'cancel' });
+    const existingIsSame = feed.guest?.symbol === sym && Number(feed.guest?.conId) === exactConId;
+    if (!existingIsSame && (activeSymbol !== 'SPX' || feed.guest)) feed.deactivateSymbol();
+    const requestId = feed.activateSymbol(sym, exactConId);
+    if (!requestId) {
+      showToast('Symbol switch was not sent — guest transport is not ready', 'err');
+      return null;
+    }
+    pendingGuestRequestRef.current = requestId;
+    activeConIdRef.current = exactConId;
     setActiveSymbol(sym);
-    feed.activateSymbol(sym, conId);
-  }, [feed]);
+    return requestId;
+  }, [activeSymbol, feed.activateSymbol, feed.deactivateSymbol, feed.guest, feed.searchSymbols, showToast, replaySurfaceOpen, exitReplaySafe]);
+
+  useEffect(() => {
+    const requested = pendingSymbolResolutionRef.current;
+    const result = feed.searchResults;
+    if (!requested || !result || String(result.q || '').trim().toUpperCase() !== requested) return;
+    const resolved = resolveExactGuestMatch(requested, result.matches);
+    pendingSymbolResolutionRef.current = null;
+    if (resolved.status === 'exact') {
+      activateGuest(resolved.match.symbol, resolved.match.conId);
+    } else {
+      showToast(
+        resolved.status === 'none'
+          ? `${requested} could not be resolved to an optionable US stock`
+          : `${requested} has multiple contracts — choose the exact search result`,
+        'err',
+      );
+    }
+  }, [feed.searchResults, activateGuest, showToast]);
+
+  useEffect(() => {
+    if (guestEvent?.type !== 'guestActivationAck') return;
+    if (guestEvent.requestId !== pendingGuestRequestRef.current) return;
+    if (guestEvent.accepted) return;
+    pendingGuestRequestRef.current = null;
+    const current = feed.guest;
+    if (current?.symbol && Number.isSafeInteger(Number(current.conId))) {
+      activeConIdRef.current = Number(current.conId);
+      setActiveSymbol(current.symbol);
+    } else {
+      activeConIdRef.current = null;
+      setActiveSymbol('SPX');
+      writeGuestIntent(null);
+    }
+    showToast(`Symbol switch failed: ${guestEvent.reason || guestEvent.code || 'guest unavailable'}`, 'err');
+  }, [guestEvent, feed.guest, showToast]);
+
+  // Persist only a bridge-confirmed exact identity, per tab. A symbol by itself
+  // is not enough to recover or route a contract safely after reload.
+  useEffect(() => {
+    if (!guestActive || !feed.guest) return;
+    pendingGuestRequestRef.current = null;
+    writeGuestIntent({ symbol: feed.guest.symbol, conId: feed.guest.conId });
+  }, [guestActive, feed.guest?.symbol, feed.guest?.conId]);
+
+  useEffect(() => {
+    if (!feed.live) pendingGuestRequestRef.current = null;
+  }, [feed.live]);
 
   // Re-activate after a bridge/socket reconnect: guest state is NOT persisted on
   // the bridge, so when the socket comes back and we still intend a guest, resend
   // the activation (the client keeps the active symbol + conId in memory).
   useEffect(() => {
     if (activeSymbol === 'SPX') return;
-    if (!feed.socketOpen) return;
-    if (feed.guest && feed.guest.symbol === activeSymbol) return;
-    feed.activateSymbol(activeSymbol, activeConIdRef.current);
-  }, [feed.socketOpen, activeSymbol]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (!feed.socketOpen || !feed.guestClientReady || !feed.live || pendingGuestRequestRef.current) return;
+    if (feed.guest && feed.guest.symbol === activeSymbol
+        && Number(feed.guest.conId) === Number(activeConIdRef.current)) return;
+    const requestId = feed.activateSymbol(activeSymbol, activeConIdRef.current);
+    if (requestId) pendingGuestRequestRef.current = requestId;
+  }, [feed.socketOpen, feed.guestClientReady, feed.live, feed.guest?.symbol, feed.guest?.conId, activeSymbol]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Watchlist (multi-symbol Phase B): state + persistence + socket re-send +
   // add/remove all live in useWatchlist. feed.setWatchlist is the bridge sender.
-  const { watchlist, addWatch, removeWatch } = useWatchlist({ socketOpen: feed.socketOpen, sendWatchlist: feed.setWatchlist });
+  const { watchlist, addWatch, removeWatch } = useWatchlist({ socketOpen: feed.socketOpen, live: feed.live, sendWatchlist: feed.setWatchlist });
 
   // ── Layout memory (invisible — localStorage tt.* keys, matching the pattern
   // above): last timeframe PER SYMBOL, and the active symbol itself. ──
@@ -425,28 +725,17 @@ export default function App() {
     try { localStorage.setItem(`tt.tf:${activeSymbol}`, String(timeframe)); } catch {}
   }, [activeSymbol, timeframe]);
 
-  // Active symbol: read the saved value ONCE before the persist effect below
-  // can overwrite it with the boot default ('SPX'), then re-activate it a
-  // single time after the feed first reports live — through the same
-  // symbol-only activateGuest path the watchlist uses. One shot per page
-  // load; anything she does afterwards wins.
-  const [savedSymbol] = useState(() => {
-    try { return localStorage.getItem('tt.activeSymbol'); } catch { return null; }
-  });
-  useEffect(() => {
-    try { localStorage.setItem('tt.activeSymbol', activeSymbol); } catch {}
-  }, [activeSymbol]);
+  // Restore the exact per-tab intent once the hello handshake and IBKR are both
+  // ready. Old symbol-only localStorage is deliberately ignored.
   const symRestoredRef = useRef(false);
   useEffect(() => {
-    if (symRestoredRef.current || !feed.socketOpen || !feed.live) return;
-    symRestoredRef.current = true;
-    if (
-      savedSymbol && savedSymbol !== 'SPX' && activeSymbol === 'SPX' &&
-      /^[A-Z][A-Z0-9.]{0,11}$/.test(savedSymbol)
-    ) {
-      activateGuest(savedSymbol, null);
+    if (symRestoredRef.current || !feed.socketOpen || !feed.guestClientReady || !feed.live) return;
+    if (savedGuestIntent && activeSymbol === 'SPX') {
+      if (activateGuest(savedGuestIntent.symbol, savedGuestIntent.conId)) symRestoredRef.current = true;
+    } else {
+      symRestoredRef.current = true;
     }
-  }, [feed.socketOpen, feed.live]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [feed.socketOpen, feed.guestClientReady, feed.live]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Keep marks honest for open positions outside the streamed chain: nudge a
   // snapshot quote every 30 s (server caches + dedupes) so P/L reflects the
@@ -481,7 +770,12 @@ export default function App() {
   const priceStale = priceStaleMs > PRICE_STALE_MS;
   const priceStaleSecs = Math.round(priceStaleMs / 1000);
 
-  priceRef.current = feed.price;
+  fillUnderlyingRef.current = new Map([
+    ['SPX', { price: feed.price, ts: feed.tickTs }],
+    ...(guestActive && guest?.symbol
+      ? [[guest.symbol, { price: guest.price, ts: guest.lastTickTs }]]
+      : []),
+  ]);
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 800);
@@ -500,7 +794,12 @@ export default function App() {
   // else changing (the idle-cockpit CPU tax kisa felt as sticky hover).
   // Replay keeps exact time — the tape drives it, not the clock.
   const tSlow = Math.floor(now / 30_000) * 30_000;
-  const T = useMemo(() => timeToExpiryYearsAt(replayActive ? replayNow : tSlow), [tSlow, replayActive, replayNow]);
+  const modelNow = replayActive ? replayNow : tSlow;
+  const modelExpiry = replayActive ? replay?.date : cockpitExpiry;
+  const T = useMemo(
+    () => timeToExpiryYearsAt(modelExpiry, modelNow),
+    [modelExpiry, modelNow]
+  );
 
   // Regime read (trend vs chop) over the trailing ~60m of the cockpit's 1-min
   // candles. Recompute on the 30s tSlow clock and whenever a NEW bar opens
@@ -516,18 +815,14 @@ export default function App() {
 
   // Model sigma, vol-aware (kisa's weekend pick, 2026-07-11): the flat 18%
   // guess overpriced everything when real vol sat near 11% (mark-audit).
-  // Live: VIX is the market's own 30-day sigma → vix/100. Replay: the
-  // replayed day's OWN realized vol from its 1-min returns — the day knows
-  // itself better than today's VIX knows it. The old 0.18 survives only as
-  // the nothing-known fallback (cold start, no VIX tick yet).
+  // Live: VIX is the market's own 30-day sigma → vix/100. Replay samples only
+  // the bars revealed through replay.idx; future bars and today's VIX are both
+  // off-limits. The old 0.18 survives as the nothing-known/flat fallback.
   const ivol = useMemo(() => {
-    if (replayActive) {
-      const rv = realizedVol(replay.candles);
-      if (rv > 0) return rv;
-    }
+    if (replayActive) return replayVolAt(replay.candles, replay.idx, IVOL_FALLBACK);
     const v = feed.vix?.last ?? feed.vix?.close;
     return v > 0 ? v / 100 : IVOL_FALLBACK;
-  }, [replayActive, replay?.candles, feed.vix]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [replayActive, replay?.candles, replay?.idx, feed.vix]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Upper bound for an OTM option that has no fresh quote of its own. Option
   // value is monotonic in strike, so an OTM call can't be worth more than a
@@ -540,28 +835,32 @@ export default function App() {
     if (!greeksMap || S == null) return null;
     const otm = type === 'call' ? strike > S : strike < S;
     if (!otm) return null; // ITM: intrinsic dominates, the model is fine there
-    let best = null; // the nearest money-ward strike with a live mid
+    let best = null; // { strike, mid } for the nearest money-ward live quote
     for (const g of greeksMap.values()) {
       if (g.type !== type) continue;
       const moneyWard = type === 'call' ? g.strike < strike : g.strike > strike;
       if (!moneyWard) continue;
-      const ts = g.tickTs ?? g.snapshotTs;
-      if (!(g.bid > 0 && g.ask >= g.bid && ts != null && now - ts < MID_FRESH_MS)) continue;
+      const mid = freshQuoteMid(g, now, MID_FRESH_MS);
+      if (mid == null) continue;
       const closer = best == null || (type === 'call' ? g.strike > best.strike : g.strike < best.strike);
-      if (closer) best = g;
+      if (closer) best = { strike: g.strike, mid };
     }
-    return best ? (best.bid + best.ask) / 2 : null;
+    return best?.mid ?? null;
   };
 
   // `symbol` marks WHICH instrument this strike belongs to (default: the active
   // cockpit). A guest position is only marked against the guest chain when the
   // guest is currently active AND the position is that guest's — an SPX position
   // keeps marking against SPX even while a guest cockpit is up.
-  const resolveGreeks = (strike, type, expiry = null, symbol = activeSymbol) => {
+  const resolveGreeks = (strike, type, expiry = null, symbol = activeSymbol, conId = null) => {
+    const contractExpiry = expiry ?? modelExpiry;
+    const contractT = contractExpiry === modelExpiry
+      ? T
+      : timeToExpiryYearsAt(contractExpiry, modelNow);
     // Replay mode prices everything with the model at the replayed time —
     // live quotes belong to the present and would poison the practice tape.
     if (replayActive) {
-      const g = bsGreeks({ S: dispPrice, K: strike, T, sigma: ivol, type });
+      const g = bsGreeks({ S: dispPrice, K: strike, T: contractT, sigma: ivol, type });
       return { ...g, source: 'replay' };
     }
     // A position on a symbol with NO live feed (a guest that isn't the active
@@ -570,14 +869,11 @@ export default function App() {
     // 2026-07-10). No data → no mark: premium null, the row shows —, P/L
     // contributions freeze at entry until the symbol's cockpit is active again.
     if (symbol !== 'SPX' && !(guestActive && symbol === activeSymbol)) {
-      // The 30s snapshot poller keeps an inactive symbol's marks honest;
-      // greeks need the live chain, so they stay zero — P/L only needs the
-      // premium. Stale (>90s) or missing → the honest no-mark dash.
-      const q = feed.posQuotes?.[`${symbol}|${strike}|${rightOf(type)}|${expiry}`];
-      if (q && q.bid != null && q.ask != null && now - q.ts < 90_000) {
-        return { premium: (q.bid + q.ask) / 2, delta: 0, gamma: 0, theta: 0, vega: 0, source: 'snapshot' };
-      }
-      return { premium: null, delta: 0, gamma: 0, theta: 0, vega: 0, source: 'nodata' };
+      // The 30s exact-contract snapshot poller keeps inactive marks and, when
+      // IBKR supplies model fields, Greeks honest. Missing fields remain null
+      // (the card renders —); stale (>90s) snapshots become no-data entirely.
+      const q = feed.posQuotes?.[conId != null ? `conId:${conId}` : `${symbol}|${strike}|${rightOf(type)}|${expiry}`];
+      return inactivePositionSnapshotGreeks(q, now, 90_000);
     }
     // Guest mode: mark against the guest chain with the SAME ladder SPX uses —
     // fresh bid/ask mid first, then the model tick, then flat-IV BS. No 16:15
@@ -587,16 +883,15 @@ export default function App() {
       const S = guest.price;
       const gLive = liveGreeks(feed.guestGreeksMap, strike, type);
       const gq = liveQuote(feed.guestGreeksMap, strike, type);
-      const gFresh = gq && gq.bid > 0 && gq.ask >= gq.bid && gq.tickTs != null && now - gq.tickTs < MID_FRESH_MS;
-      if (gFresh) {
-        const mid = (gq.bid + gq.ask) / 2;
-        if (gLive) return { premium: mid, delta: gLive.delta, gamma: gLive.gamma, theta: gLive.theta, vega: gLive.vega, source: 'mid' };
-        const g = bsGreeks({ S, K: strike, T, sigma: ivol, type });
-        return { ...g, premium: mid, source: 'mid' };
+      const quoteMid = freshQuoteMid(gq, now, MID_FRESH_MS);
+      if (quoteMid != null) {
+        const mid = quoteMid;
+        if (gLive) return { premium: mid, delta: gLive.delta, gamma: gLive.gamma, theta: gLive.theta, vega: gLive.vega, iv: gLive.iv, source: 'mid' };
+        const g = bsGreeks({ S, K: strike, T: contractT, sigma: ivol, type });
+        return { ...g, premium: mid, source: 'quote-model' };
       }
-      if (gLive) return { premium: gLive.premium, delta: gLive.delta, gamma: gLive.gamma, theta: gLive.theta, vega: gLive.vega, source: 'ibkr' };
-      const g = bsGreeks({ S, K: strike, T, sigma: ivol, type });
-      if (gq && gq.bid != null && gq.ask != null) return { ...g, premium: (gq.bid + gq.ask) / 2, source: 'quote' };
+      if (gLive) return { premium: gLive.premium, delta: gLive.delta, gamma: gLive.gamma, theta: gLive.theta, vega: gLive.vega, iv: gLive.iv, source: 'ibkr' };
+      const g = bsGreeks({ S, K: strike, T: contractT, sigma: ivol, type });
       return { ...g, source: 'bs' };
     }
     // The greeks map is keyed by strike+right only and always holds the chain's
@@ -616,25 +911,23 @@ export default function App() {
     // points away from the options market's parity — measured $150+/contract of
     // phantom P/L on 2026-07-02 (holiday) AND 2026-07-05 (normal overnight),
     // mark-audit.js. Greeks still come from the model; only the premium moves.
-    // Freshness gate (tickTs from the bridge, snapshotTs for far-strike polls)
-    // so a dead quote can never poison the mark; zero-bid wings excluded.
-    const freshTs = q?.tickTs ?? q?.snapshotTs;
-    const fresh = q && q.bid > 0 && q.ask >= q.bid && freshTs != null && now - freshTs < MID_FRESH_MS;
-    if (fresh) {
-      const mid = (q.bid + q.ask) / 2;
-      if (live) return { premium: mid, delta: live.delta, gamma: live.gamma, theta: live.theta, vega: live.vega, source: 'mid' };
-      const g = bsGreeks({ S: feed.price, K: strike, T, sigma: ivol, type });
-      return { ...g, premium: mid, source: 'mid' };
+    // Both sides carry their own bridge timestamp. Requiring both prevents a
+    // fresh bid from laundering an old ask (or vice versa); crossed and
+    // zero-bid books are excluded from midpoint marks.
+    const quoteMid = freshQuoteMid(q, now, MID_FRESH_MS);
+    if (quoteMid != null) {
+      const mid = quoteMid;
+      if (live) return { premium: mid, delta: live.delta, gamma: live.gamma, theta: live.theta, vega: live.vega, iv: live.iv, source: 'mid' };
+      const g = bsGreeks({ S: feed.price, K: strike, T: contractT, sigma: ivol, type });
+      return { ...g, premium: mid, source: 'quote-model' };
     }
     if (live) {
-      return { premium: live.premium, delta: live.delta, gamma: live.gamma, theta: live.theta, vega: live.vega, source: 'ibkr' };
+      return { premium: live.premium, delta: live.delta, gamma: live.gamma, theta: live.theta, vega: live.vega, iv: live.iv, source: 'ibkr' };
     }
-    // No model premium, but a real quote (e.g. snapshot for a far strike):
-    // mark at the bid/ask mid — the flat-IV model misprices wings badly.
-    const g = bsGreeks({ S: feed.price, K: strike, T, sigma: ivol, type });
-    if (q && q.bid != null && q.ask != null) {
-      return { ...g, premium: (q.bid + q.ask) / 2, source: 'quote' };
-    }
+    // No model premium and no fresh two-sided quote. The flat-IV model
+    // misprices wings badly, so keep the existing money-ward cap/intrinsic
+    // fallback instead of reviving a stale midpoint.
+    const g = bsGreeks({ S: feed.price, K: strike, T: contractT, sigma: ivol, type });
     // No quote at all for this strike (a far wing the market isn't disseminating
     // overnight). The flat-IV model overprices such wings — measured ~$0.9 on a
     // 7600 call worth ~$0.1, i.e. phantom P/L. Bound an OTM mark by the nearest
@@ -653,95 +946,69 @@ export default function App() {
   // Reconcile local optimistic lifecycle with IBKR-authoritative positions so a
   // position opened on any device shows everywhere. Server truth drives which
   // positions are open; local records add entry price / greeks / lifecycle tags.
-  const mergedPositions = useMemo(() => {
-    const server = feed.positions || [];
-    const localWorkingByKey = new Map();
-    for (const p of positions) {
-      if (p.status === 'open' || p.status === 'closing' || p.status === 'pending') {
-        localWorkingByKey.set(posKey(p.strike, rightOf(p.type), p.expiry), p);
-      }
-    }
-    // For positions entered via another path (mobile IBKR app, TWS, etc.) there's
-    // no local handleExecute timestamp — derive openedAt + entryPremium from the
-    // earliest matching BUY in the trade blotter so the chart can still draw
-    // an entry marker at the right time.
-    const earliestBuy = (strike, right, expiry) => {
-      const buys = (feed.trades || [])
-        .filter((t) => t.strike === strike && t.right === right && t.expiry === expiry && t.action === 'BUY')
-        .sort((a, b) => a.ts - b.ts);
-      return buys[0] || null;
-    };
-    const out = [];
-    const usedKeys = new Set();
-    // 1. server-truth open positions, enriched with local lifecycle where present
-    for (const sp of server) {
-      const k = posKey(sp.strike, sp.right, sp.expiry);
-      usedKeys.add(k);
-      const loc = localWorkingByKey.get(k);
-      const buy = !loc ? earliestBuy(sp.strike, sp.right, sp.expiry) : null;
-      out.push({
-        id: loc?.id ?? `srv:${sp.conId}`,
-        source: 'ibkr',
-        // Instrument symbol so chart overlays can filter to the active symbol.
-        // SPXW positions carry symbol 'SPX' (or undefined on old rows) — both
-        // read as SPX downstream. Guest equities carry their real symbol.
-        symbol: sp.symbol ?? 'SPX',
-        type: sp.right === 'C' ? 'call' : 'put',
-        side: sp.qty > 0 ? 'long' : 'short',
-        strike: sp.strike,
-        qty: Math.abs(sp.qty),
-        expiry: sp.expiry,
-        status: loc?.status === 'closing' ? 'closing' : 'open',
-        entryPremium: loc?.entryPremium ?? sp.avgPremium ?? buy?.price ?? null,
-        entryPrice: loc?.entryPrice ?? null,
-        openedAt: loc?.openedAt ?? buy?.ts ?? null,
-        closeRef: loc?.closeRef ?? null,
-        note: loc?.note ?? null
-      });
-    }
-    // 2. local pending orders not yet on the server (optimistic, this device only)
-    for (const p of positions) {
-      if (p.status !== 'pending') continue;
-      if (usedKeys.has(posKey(p.strike, rightOf(p.type), p.expiry))) continue;
-      out.push(p);
-    }
-    // 3. local closed/rejected history (this device)
-    for (const p of positions) {
-      if (p.status === 'closed' || p.status === 'rejected') out.push(p);
-    }
-    return out;
-  }, [positions, feed.positions, feed.trades]);
+  const mergedPositions = useMemo(() => reconcilePositions({
+    localPositions: positions,
+    serverPositions: feed.positions,
+    trades: feed.trades,
+  }), [positions, feed.positions, feed.trades]);
 
   // Every individual fill for a leg (each added lot is its own blotter row), so
   // chart markers + the hover card can show them all, not just the blended entry.
-  const legFills = (p) => (replayActive ? null : (feed.trades || []).filter((t) =>
-    t.strike === p.strike && t.right === rightOf(p.type) &&
-    t.expiry === p.expiry && t.action === (p.side === 'long' ? 'BUY' : 'SELL') &&
-    // Match instrument too — a guest and an SPX leg can collide on strike/expiry.
-    (t.symbol ?? 'SPX') === (p.symbol ?? 'SPX')));
-
   const positionsLive = useMemo(() => {
     const source = replayActive ? replayPositions : mergedPositions;
     return source.map((p) => {
-      const fills = legFills(p);
+      const fills = replayActive ? null : fillsForPosition(p, feed.trades);
       if (p.status === 'closed' || p.status === 'rejected') return fills ? { ...p, fills } : p;
       const psym = p.symbol ?? 'SPX';
+      let dayQuote = null;
+      if (!replayActive) {
+        if (psym === 'SPX') {
+          // The SPX chain map belongs only to the bridge's current expiry.
+          // Never show tomorrow's same-strike range/IV on an expired leg.
+          if (!p.expiry || !feed.expiry || p.expiry === feed.expiry) {
+            dayQuote = liveQuote(feed.greeksMap, p.strike, p.type);
+          }
+        } else if (guestActive && psym === activeSymbol && (!p.expiry || !guest?.expiry || p.expiry === guest.expiry)) {
+          // guestGreeksMap belongs only to the active guest cockpit.
+          dayQuote = liveQuote(feed.guestGreeksMap, p.strike, p.type);
+        } else {
+          // Inactive guests have exact, contract-keyed snapshots. Preserve only
+          // fields IBKR actually supplied; missing range/model fields render —.
+          dayQuote = feed.posQuotes?.[p.conId != null ? `conId:${p.conId}` : `${psym}|${p.strike}|${rightOf(p.type)}|${p.expiry}`] ?? null;
+        }
+      }
       return {
         ...p,
         fills,
-        greeksLive: resolveGreeks(p.strike, p.type, replayActive ? null : p.expiry, psym),
-        // The day quote reads from the instrument's own chain.
-        dayQuote: replayActive ? null : liveQuote(psym === 'SPX' ? feed.greeksMap : feed.guestGreeksMap, p.strike, p.type)
+        greeksLive: resolveGreeks(p.strike, p.type, replayActive ? null : p.expiry, psym, p.conId),
+        // The day quote reads only from this position's own symbol + expiry.
+        dayQuote
       };
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mergedPositions, replayActive, replayPositions, dispPrice, feed.greeksMap, feed.guestGreeksMap, guestActive, feed.trades, T]);
+  }, [mergedPositions, replayActive, replayPositions, dispPrice, feed.greeksMap, feed.guestGreeksMap, feed.posQuotes, feed.expiry, guestActive, guest?.expiry, activeSymbol, feed.trades, T]);
+
+  // Refresh-safe close history for the chart only. The bridge's execution
+  // ledger can reconstruct a fully flat round trip (including every split
+  // fill), while feed.positions remains the sole source of open-position truth.
+  // Existing local closed rows win one-to-one so a live close never paints a
+  // duplicate ray while this same execution history arrives.
+  const recoveredClosedAnnotations = useMemo(
+    () => replayActive ? EMPTY_ARR : deriveClosedChartAnnotations(feed.trades, positions),
+    [replayActive, feed.trades, positions]
+  );
+  const inspectablePositions = useMemo(
+    () => recoveredClosedAnnotations.length
+      ? [...positionsLive, ...recoveredClosedAnnotations]
+      : positionsLive,
+    [positionsLive, recoveredClosedAnnotations]
+  );
 
   // Strikes the snapshot poller keeps fresh (open positions only; replay
-  // positions are imaginary and get no real quotes). SPX positions only — the
-  // far-strike poller hits the SPXW chain, so quoting a guest strike there would
-  // resolve the wrong contract and poison the SPX greeks map. Guest positions
-  // stay fresh via the guest chain's own streaming window.
+  // positions are imaginary and get no real quotes). SPX positions include
+  // money-ward neighbors for honest wing bounds. An active guest stays fresh
+  // through its streamed chain; an inactive guest gets one targeted contract
+  // snapshot by conId, never a guest strike sent through the SPXW path.
   //
   // Quote each position's OWN strike at its OWN expiry (threading the expiry —
   // else a non-current-expiry leg would be quoted against the wrong contract),
@@ -759,7 +1026,7 @@ export default function App() {
         // 2026-07-10, the TSLA follow-up). The ACTIVE guest's legs stream
         // via its chain — don't double-quote them.
         if (guestActive && psym === activeSymbol) return [];
-        return [{ symbol: psym, strike: p.strike, right, expiry: p.expiry }];
+        return [{ symbol: psym, strike: p.strike, right, expiry: p.expiry, conId: p.conId }];
       }
       const stepToMoney = p.type === 'call' ? -SPXW_STRIKE_STEP : SPXW_STRIKE_STEP;
       return [0, 1, 2].map((n) => ({ strike: p.strike + n * stepToMoney, right, expiry: p.expiry }));
@@ -770,15 +1037,8 @@ export default function App() {
   // and markers shouldn't keep sitting on today's chart).
   const activeExpiry = replayActive ? replay?.date : cockpitExpiry;
   const chartPositions = useMemo(
-    () => positionsLive.filter((p) => {
-      if (p.expiry !== activeExpiry) return false;
-      // Filter to the active instrument: a position with no symbol (old SPXW rows)
-      // reads as 'SPX'. In guest mode only the guest's own positions draw; on home
-      // only SPX positions draw.
-      const psym = p.symbol ?? 'SPX';
-      return psym === activeSymbol;
-    }),
-    [positionsLive, activeExpiry, activeSymbol]
+    () => filterChartPositions(inspectablePositions, { symbol: activeSymbol, expiry: activeExpiry }),
+    [inspectablePositions, activeExpiry, activeSymbol]
   );
 
   // Fetch deep history when a higher timeframe is selected (5m → 1 week …
@@ -837,7 +1097,7 @@ export default function App() {
   // wider than a 0DTE band by construction.
   const expectedMove = useMemo(() => {
     if (replayActive) return null; // no chain in the past
-    const mid = (q) => (q && q.bid != null && q.ask != null ? (q.bid + q.ask) / 2 : q?.premium ?? null);
+    const mid = (q) => freshQuoteMid(q, now, MID_FRESH_MS) ?? q?.premium ?? null;
     if (guestActive) {
       if (!guest || !Number.isFinite(guest.prevClose) || !Number.isFinite(guest.price) || !strikeStep) return null;
       const atm = Math.round(guest.price / strikeStep) * strikeStep;
@@ -852,7 +1112,7 @@ export default function App() {
     const p = mid(liveQuote(feed.greeksMap, atm, 'put'));
     if (c == null || p == null) return null;
     return { anchor: feed.spxClose, width: c + p };
-  }, [feed.live, feed.price, feed.greeksMap, feed.spxClose, guestActive, guest, feed.guestGreeksMap, strikeStep]);
+  }, [replayActive, feed.live, feed.price, feed.greeksMap, feed.spxClose, guestActive, guest, feed.guestGreeksMap, strikeStep, now]);
 
   // 🚏 Drop a bus stop: her mind's-eye (price, time) coordinate, snapped to the
   // minute and a quarter point. The timetable (contract suggestions) is computed
@@ -938,7 +1198,13 @@ export default function App() {
     if (replayActive) {
       return positionsLive.reduce((s, p) => {
         if (p.status === 'closed') return s + (p.closedPL ?? 0);
-        if (p.status === 'open') return s + ((p.greeksLive?.premium ?? 0) - (p.entryPremium ?? 0)) * 100 * p.qty;
+        if (p.status === 'open') {
+          return s + plDollars(
+            p,
+            p.greeksLive?.premium ?? p.entryPremium ?? 0,
+            p.entryPremium ?? 0
+          );
+        }
         return s;
       }, 0);
     }
@@ -996,17 +1262,101 @@ export default function App() {
     refAtSendRef,
     replay,
     replayActive,
+    replayTransitionBlocked,
     replayNow,
     resolveGreeks,
     setArmed,
     setBusStops,
-    setInspectId,
     setPending,
     setPositions,
     setReplayPositions,
     showToast,
     strikeStep,
   });
+  const orderSurfaceExecutionEnabled = replayActive
+    || (!replayTransitionBlocked && feed.executionEnabled);
+
+  const exactArmContractAvailable = useCallback((strike, right) => {
+    if (activeSymbol !== 'SPX' || guestActive || cockpitExpiry !== feed.expiry) return false;
+    const type = right === 'C' ? 'call' : right === 'P' ? 'put' : null;
+    const quote = type ? liveQuote(feed.greeksMap, strike, type) : null;
+    // quoteResult rows are one-shot snapshots outside the monitored SPXW
+    // chain. They can price a modal, but the bridge cannot continuously watch
+    // them for an armed fire, so only streamed rows are eligible here.
+    return armedQuoteIsMonitored(quote);
+  }, [activeSymbol, guestActive, cockpitExpiry, feed.expiry, feed.greeksMap]);
+
+  const beginArmTriggerPlacement = useCallback((contract) => {
+    const exact = { ...contract, expiry: cockpitExpiry };
+    const available = exactArmContractAvailable(exact.strike, exact.right);
+    const result = beginArmedPlacement(exact, {
+      activeSymbol,
+      guestActive,
+      replayActive: replaySurfaceOpen,
+      live: feed.live,
+      executionEnabled: !replayTransitionBlocked && feed.executionEnabled,
+      currentExpiry: cockpitExpiry,
+      armedCount: armed.length,
+      maxArmed: ARMED_MAX_CLIENT,
+      contractAvailable: available,
+      strikeStep,
+    });
+    if (!result.ok) {
+      showToast(result.reason, 'err');
+      return result;
+    }
+    setChartMenu(null);
+    setHoverPos(null);
+    setBusArmed(false);
+    dispatchArmPlacement({ type: 'begin', placement: result.placement });
+    return result;
+  }, [activeSymbol, guestActive, replaySurfaceOpen, feed.live, feed.executionEnabled, replayTransitionBlocked, cockpitExpiry, armed.length, strikeStep, exactArmContractAvailable, showToast]);
+
+  const placeArmTrigger = useCallback((rawLevel) => {
+    if (!armPlacement) return false;
+    const level = Math.round(Number(rawLevel) * 100) / 100;
+    const result = completeArmedPlacement(armPlacement, {
+      activeSymbol,
+      guestActive,
+      replayActive: replaySurfaceOpen,
+      live: feed.live,
+      executionEnabled: !replayTransitionBlocked && feed.executionEnabled,
+      currentExpiry: cockpitExpiry,
+      armedCount: armed.length,
+      maxArmed: ARMED_MAX_CLIENT,
+      contractAvailable: exactArmContractAvailable(armPlacement.strike, armPlacement.right),
+      strikeStep,
+      level,
+      marketPrice: cockpitPrice,
+    });
+    if (!result.ok) {
+      showToast(result.reason, 'err');
+      return false;
+    }
+    const armedOrder = { id: String(Date.now()), ...result.armed };
+    setArmed((list) => (list.length >= ARMED_MAX_CLIENT ? list : [...list, armedOrder]));
+    dispatchArmPlacement({ type: 'complete' });
+    showToast(
+      `⚔ armed: SPX ${armedOrder.dir === 'up' ? '↑' : '↓'} ${armedOrder.level.toFixed(2)} → BUY 1 ${armedOrder.strike}${armedOrder.right} LMT`,
+      'ok',
+    );
+    return true;
+  }, [armPlacement, activeSymbol, guestActive, replaySurfaceOpen, feed.live, feed.executionEnabled, replayTransitionBlocked, cockpitExpiry, armed.length, strikeStep, cockpitPrice, exactArmContractAvailable, showToast]);
+
+  const cancelArmPlacement = useCallback(() => {
+    dispatchArmPlacement({ type: 'cancel' });
+  }, []);
+
+  // A placement draft belongs to one live SPX cockpit/expiry. Any seam change
+  // cancels it before the old chart coordinate can be interpreted elsewhere.
+  useEffect(() => {
+    if (!armPlacement) return;
+    if (activeSymbol !== 'SPX' || guestActive || replaySurfaceOpen || !feed.live
+      || !feed.executionEnabled || replayTransitionBlocked
+      || armPlacement.expiry !== cockpitExpiry || armed.length >= ARMED_MAX_CLIENT) {
+      dispatchArmPlacement({ type: 'cancel' });
+    }
+  }, [armPlacement, activeSymbol, guestActive, replaySurfaceOpen, feed.live, feed.executionEnabled, replayTransitionBlocked, cockpitExpiry, armed.length]);
 
   // ── Keyboard layer (invisible cockpit controls — src/useHotkeys.js) ──
   // 1..N timeframes · Esc closes the top-most transient · Space snaps the
@@ -1018,6 +1368,8 @@ export default function App() {
   // only drives the banner.
   const KILL_ARM_MS = 2000;
   const [killArmed, setKillArmed] = useState(false);
+  const [dismissedKillKey, setDismissedKillKey] = useState(null);
+  const [dismissedReverseKey, setDismissedReverseKey] = useState(null);
   const killArmRef = useRef(0);
   const killTimerRef = useRef(null);
   useHotkeys({
@@ -1044,7 +1396,12 @@ export default function App() {
       if (pending) return;
       if (chartMenu) return;
       if (document.querySelector('.replay-cal-pop')) return;
-      if (inspectId != null) { setInspectId(null); return; }
+      if (armPlacement) { cancelArmPlacement(); return; }
+      if (topCard) {
+        dispatchPinnedCard({ type: 'close-top', viewport: pinnedViewportRef.current });
+        return;
+      }
+      if (hoverPos != null) { setHoverPos(null); return; }
       if (busPanelId != null) { setBusPanelId(null); return; }
       if (searchPopover.isOpen()) { searchPopover.close(); return; }
       if (bottomOpen) { setBottomOpen(false); return; }
@@ -1079,6 +1436,7 @@ export default function App() {
     onTicket: (type) => {
       // C/P work in replay too — practice tickets are the point of replay.
       if (!hotkeysLive) return false;
+      if (armPlacement) return false;
       if (pending || chartMenu) return false; // a ticket/menu is already up
       const hov = chartApiRef.current?.hover;
       const S = replayActive ? dispPrice : cockpitPrice;
@@ -1132,6 +1490,26 @@ export default function App() {
   // distinguishes the two visually.
   const acctLabel = feed.accountType === 'paper' ? 'PAPER' : feed.accountType === 'live' ? 'LIVE' : '—';
   const acctColor = feed.accountType ? theme.profit : theme.muted;
+  const killBanner = killBannerFor(feed.killState);
+  const showKillBanner = killBanner
+    && (!killBanner.dismissible || dismissedKillKey !== killBanner.key);
+  const reverseState = feed.reverseState;
+  const reverseBanner = reverseState && (
+    reverseState.active
+    || reverseState.routingLocked
+    || reverseState.phase === 'PARTIAL'
+    || reverseState.phase === 'FAILED'
+  ) ? {
+      key: `${reverseState.transactionId ?? 'reverse'}:${reverseState.updatedAt ?? reverseState.phase}`,
+      dismissible: !reverseState.active && !reverseState.routingLocked,
+      text: reverseState.active
+        ? `REVERSE ${String(reverseState.phase || '').replaceAll('_', ' ')} — normal routing is locked`
+        : reverseState.routingLocked
+          ? `REVERSE STOPPED — ${reverseState.reason || 'broker truth is uncertain'} · run KILL to recover`
+          : `REVERSE STOPPED — ${reverseState.reason || 'no reopen was sent'}`,
+    } : null;
+  const showReverseBanner = reverseBanner
+    && (!reverseBanner.dismissible || dismissedReverseKey !== reverseBanner.key);
 
   return (
     <div className="app" style={{ background: theme.bg, color: theme.text }}>
@@ -1140,6 +1518,32 @@ export default function App() {
       )}
       {killArmed && (
         <div className="safety-banner safety-kill" role="alert">⚠ SHIFT+ESC AGAIN — FLATTEN EVERYTHING</div>
+      )}
+      {showKillBanner && (
+        <div className={`safety-banner safety-kill-state safety-kill-${killBanner.kind}`} role="alert">
+          <span>{killBanner.text}</span>
+          {killBanner.dismissible && (
+            <button
+              type="button"
+              className="safety-kill-dismiss"
+              onClick={() => setDismissedKillKey(killBanner.key)}
+              aria-label="Dismiss KILL result"
+            >×</button>
+          )}
+        </div>
+      )}
+      {showReverseBanner && (
+        <div className={`safety-banner safety-kill-state safety-kill-${reverseState.active ? 'active' : 'error'}`} role="alert">
+          <span>{reverseBanner.text}</span>
+          {reverseBanner.dismissible && (
+            <button
+              type="button"
+              className="safety-kill-dismiss"
+              onClick={() => setDismissedReverseKey(reverseBanner.key)}
+              aria-label="Dismiss REVERSE result"
+            >×</button>
+          )}
+        </div>
       )}
 
       <Header
@@ -1195,8 +1599,12 @@ export default function App() {
             regime={regime}
             theme={theme}
             replayOn={replay != null || replayBarOpen}
+            replayDisabled={!replayGate.allowed}
+            replayTip={replayGate.reason}
             // Replay is SPX-only (disabled in guest mode). VIX stays (global).
-            onReplay={guestActive ? null : toggleReplay}
+            // During SPX cash hours it disappears entirely; overnight account
+            // risk leaves it visible-but-disabled with an exact explanation.
+            onReplay={activeSymbol === 'SPX' && !replayGate.hidden ? toggleReplaySafe : null}
           />
           {/* One control line (kisa, 2026-07-09): acct · 🚏 · ⚡ · 🔍, right-aligned
               under the ATM strip. The acct cluster moved up from its old float
@@ -1206,7 +1614,7 @@ export default function App() {
             <div className={`chart-acct${axisChain ? ' chart-acct--axis' : ''}`}>
               <span className="acct-badge" style={{ color: '#0a0c12', background: acctColor }} data-tip={feed.account ? `IBKR account ${feed.account}` : 'no account connected'}>{acctLabel}</span>
               <span className="chart-acct-id" data-tip={feed.account ? `IBKR account ${feed.account}` : 'no account connected'}>{feed.account || (feed.live ? '…' : 'no acct')}</span>
-              {!replayActive && !guestActive && (
+              {!replaySurfaceOpen && activeSymbol === 'SPX' && !guestActive && (
                 <button
                   className={`acct-bus-btn${busArmed ? ' active' : ''}`}
                   onClick={() => setBusArmed((v) => !v)}
@@ -1220,17 +1628,21 @@ export default function App() {
                   🚏
                 </button>
               )}
-              {!replayActive && (
+              {!replaySurfaceOpen && (
                 <button
                   className={`acct-quick-btn${quickMode ? ' active' : ''}${quickMode === 'market' && !guestActive ? ' market' : ''}`}
-                  // In guest mode the red MKT arm is unreachable (Phase A: guest
-                  // orders are marketable limits only) — the cycle is off ↔ limit.
-                  onClick={() => setQuickMode((v) => (guestActive
+                  disabled={guestPending}
+                  // In guest mode the red MKT arm is unreachable. This QUICK-mode
+                  // cycle is off ↔ amber marketable limit; an ordinary guest ticket
+                  // may use any positive limit and rest on the book.
+                  onClick={() => !guestPending && setQuickMode((v) => (guestActive
                     ? (v ? false : 'limit')
                     : (v === 'limit' ? 'market' : v === 'market' ? false : 'limit')))}
                   aria-label="Toggle quick trade mode"
                   data-tip={
-                    guestActive
+                    guestPending
+                      ? `${activeSymbol} options are still loading — quick trade is locked`
+                      : guestActive
                       ? (quickMode
                         ? 'Quick mode ARMED — right-click a strike = 1-lot marketable limit (ask + 1 tick). The ⚡ red MKT arm is SPX-only. Click to disarm.'
                         : 'Quick mode: right-click a strike = 1-lot marketable limit. (Red MKT is SPX-only in guest mode.) Click to arm.')
@@ -1245,10 +1657,10 @@ export default function App() {
                 </button>
               )}
             </div>
-            {!replayActive && (
+            {!replaySurfaceOpen && (
               <SymbolSearch
                 activeSymbol={activeSymbol}
-                guestPending={activeSymbol !== 'SPX' && !guestActive}
+                guestPending={guestPending}
                 results={feed.searchResults}
                 onSearch={feed.searchSymbols}
                 onActivate={activateGuest}
@@ -1273,11 +1685,11 @@ export default function App() {
               theme={theme}
               replay={replay}
               loading={replayLoading}
-              onLoad={loadDay}
-              onMystery={loadMystery}
+              onLoad={loadReplayDaySafe}
+              onMystery={loadReplayMysterySafe}
               onSet={setReplayPatch}
-              onChangeDay={changeDay}
-              onExit={exitReplay}
+              onChangeDay={changeReplayDaySafe}
+              onExit={exitReplaySafe}
               ghosts={dayGhosts ? { total: dayGhosts.inSession.length, outside: dayGhosts.outside, on: ghostsOn } : null}
               onToggleGhosts={toggleGhosts}
             />
@@ -1304,10 +1716,11 @@ export default function App() {
                   setHoverPos(null); // Chart already applied its 0.5s grace before emitting null
                 }
               }}
-              onInspectPosition={(p) => { setHoverPos(null); setInspectId(p.id); }}
+              onInspectPosition={pinPosition}
+              highlightPositionId={hoverPos?.id ?? null}
               ghostFills={visibleGhosts}
               busStops={guestActive ? EMPTY_ARR : chartBusStops}
-              busArmed={busArmed && !replayActive && !guestActive}
+              busArmed={busArmed && !replayActive && activeSymbol === 'SPX' && !guestActive}
               onDropBusStop={handleDropBusStop}
               onSelectBusStop={(s) => setBusPanelId(s.id)}
               greeksMap={replayActive ? EMPTY_GREEKS : cockpitGreeksMap}
@@ -1320,17 +1733,27 @@ export default function App() {
               beLine={beLine}
               dayLevelsOn={dayLevelsOn}
               onToggleDayLevels={replayActive || guestActive ? null : () => setDayLevelsOn((v) => !v)}
-              onRung={rungButton && !guestActive ? buyNextRung : null}
+              onRung={rungButton && !replayTransitionBlocked && (replayActive || (activeSymbol === 'SPX' && !guestActive)) ? buyNextRung : null}
               showOvn={guestActive ? false : showOvn}
               showPositions={showPositions}
               showMarkers={showMarkers}
-              quickMode={guestActive && quickMode === 'market' ? 'limit' : quickMode}
+              quickMode={guestPending ? false : guestActive && quickMode === 'market' ? 'limit' : quickMode}
+              armPlacement={armPlacement}
+              onPlaceArmTrigger={placeArmTrigger}
+              onCancelArmPlacement={cancelArmPlacement}
               alerts={chartAlerts}
               armed={replayActive || activeSymbol !== 'SPX' ? EMPTY_ARR : armed}
-              onMenu={setChartMenu}
+              onMenu={replayTransitionBlocked ? null : setChartMenu}
               apiRef={chartApiRef}
               fillFlash={chartFillFlash}
               source={replayActive || guestActive ? 'SPX' : feed.live ? feed.source : 'SPX'}
+              seriesIdentity={
+                replayActive
+                  ? `replay:${replay.date}`
+                  : guestActive
+                    ? `live:${activeSymbol}`
+                    : `live:SPX:ovn-${showOvn ? 'on' : 'off'}`
+              }
             />
             {toast && (
               <div className={`fill-toast fill-${toast.kind}`} role="status">{toast.text}</div>
@@ -1380,8 +1803,8 @@ export default function App() {
             )}
           </div>
           {/* Bottom drawer: everything below the chart, folded (kisa 2026-07-10).
-              The band is invisible chrome — hover peeks, click pins, fills
-              auto-peek via markFillFlash. Mobile: statically open (styles.css). */}
+              The band is invisible chrome — hover peeks, click pins, closing
+              fills auto-peek via markFillFlash. Mobile: statically open. */}
           <div
             ref={bottomZoneRef}
             className={`bottom-zone${bottomShown ? ' open' : ''}`}
@@ -1401,19 +1824,19 @@ export default function App() {
                 onChange={setTimeframe}
                 theme={theme}
                 onCloseAll={closeAllPositions}
-                canCloseAll={(replayActive || feed.executionEnabled) && positionsLive.some((p) => p.status === 'open')}
+                canCloseAll={orderSurfaceExecutionEnabled && positionsLive.some((p) => p.status === 'open')}
               />
               <Positions
-                positions={positionsLive}
+                positions={inspectablePositions}
                 theme={theme}
                 onClose={closePosition}
                 onReverse={reversePosition}
                 onCancelOrder={cancelOrder}
                 onCancelWorkingOrder={cancelWorkingOrder}
-                onInspect={(p) => setInspectId(p.id)}
+                onInspect={pinPosition}
                 onHoverPos={(p, x, y) => setHoverPos(p ? { id: p.id, x, y } : null)}
                 workingOrders={replayActive ? [] : feed.orders}
-                executionEnabled={replayActive ? true : feed.executionEnabled}
+                executionEnabled={orderSurfaceExecutionEnabled}
                 funds={feed.funds}
                 dayPL={dayPL}
                 fillFlash={replayActive ? null : fillFlashFresh}
@@ -1433,7 +1856,7 @@ export default function App() {
             strike={mStrike}
             live={feed.live}
             replayActive={replayActive}
-            executionEnabled={feed.executionEnabled}
+            executionEnabled={orderSurfaceExecutionEnabled}
             onBuy={(type) => { setChartMenu(null); handleRequestTrade({ strike: mStrike, type }); }}
             onSell={(type) => { setChartMenu(null); handleRequestTrade({ strike: mStrike, type, side: 'sell' }); }}
             onAlert={(price) => {
@@ -1443,15 +1866,8 @@ export default function App() {
               showToast(`⏰ alert armed at ${p.toFixed(2)}`, 'ok');
             }}
             onRemoveAlert={(id) => { setAlerts((l) => l.filter((a) => a.id !== id)); setChartMenu(null); }}
-            canArm={!replayActive && !guestActive && feed.live && feed.executionEnabled && armed.length < ARMED_MAX_CLIENT}
-            armPrice={cockpitPrice}
-            onArm={(type, dir, price) => {
-              const level = Math.round(price * 100) / 100;
-              const strike = nearestOtmStrike(level, type, 5);
-              setArmed((l) => (l.length >= ARMED_MAX_CLIENT ? l : [...l, { id: String(Date.now()), level, dir, strike, right: type === 'call' ? 'C' : 'P' }]));
-              setChartMenu(null);
-              showToast(`⚔ armed: buy 1 ${strike}${type === 'call' ? 'C' : 'P'} if SPX crosses ${level.toFixed(2)}`, 'ok');
-            }}
+            canArm={!replaySurfaceOpen && activeSymbol === 'SPX' && !guestActive && feed.live && feed.executionEnabled && armed.length < ARMED_MAX_CLIENT}
+            onArm={beginArmTriggerPlacement}
             onDisarm={(id) => { setArmed((l) => l.filter((a) => a.id !== id)); setChartMenu(null); showToast('⚔ disarmed', 'ok'); }}
             onClose={() => setChartMenu(null)}
           />
@@ -1460,39 +1876,58 @@ export default function App() {
       <TradeModal
         pending={pending}
         theme={theme}
-        series={pending && !replayActive ? feed.optHist[optHistKey(activeSymbol, pending.strike, rightOf(pending.type))] : null}
-        onRefresh={replayActive ? null : (p) => feed.requestOptHistory({ ...(guestActive ? { symbol: activeSymbol } : {}), strike: p.strike, right: rightOf(p.type), expiry: cockpitExpiry })}
+        series={pending && !replayActive ? feed.optHist[optHistKey(pending.symbol ?? activeSymbol, pending.strike, rightOf(pending.type), pending.expiry)] : null}
+        onRefresh={replayActive ? null : (p) => feed.requestOptHistory({
+          ...((p.symbol ?? 'SPX') !== 'SPX' ? { symbol: p.symbol, conId: p.underlyingConId } : {}),
+          strike: p.strike,
+          right: rightOf(p.type),
+          expiry: p.expiry,
+        })}
         onCancel={() => setPending(null)}
         onExecute={handleExecute}
-        executionEnabled={replayActive ? true : feed.executionEnabled}
+        executionEnabled={orderSurfaceExecutionEnabled}
         accountType={feed.accountType}
-        guest={guestActive}
+        guest={(pending?.symbol ?? 'SPX') !== 'SPX'}
+      />
+
+      <PinnedPositionCards
+        cards={pinnedCards}
+        positions={inspectablePositions}
+        theme={theme}
+        optHist={feed.optHist}
+        socketOpen={feed.socketOpen}
+        portfolioReady={feed.portfolioReady}
+        replayActive={replayActive}
+        executionEnabled={orderSurfaceExecutionEnabled}
+        trailOk={!!feed.caps?.trail}
+        onFocus={focusPinnedCard}
+        onMove={movePinnedCard}
+        onResize={resizePinnedCard}
+        onDismiss={dismissPinnedCard}
+        onRefresh={refreshPositionHistory}
+        canRefresh={canRefreshPositionHistory}
+        onAttachExit={attachExit}
       />
 
       {(() => {
-        const ip = inspectId != null ? positionsLive.find((p) => p.id === inspectId) ?? null : null;
-        const hp = ip == null && hoverPos != null ? positionsLive.find((p) => p.id === hoverPos.id) ?? null : null;
-        const shown = ip ?? hp;
+        const shown = hoverPos != null ? inspectablePositions.find((p) => p.id === hoverPos.id) ?? null : null;
         if (!shown) return null;
-        const fills = shown.fills ?? null; // blotter rows for this leg, attached in positionsLive
+        const fills = shown.fills ?? null; // exact opening executions when recovered; live blotter rows otherwise
         return (
           <PositionModal
             pos={shown}
             fills={fills}
             theme={theme}
-            anchor={ip ? null : { x: hoverPos.x, y: hoverPos.y }}
-            series={feed.optHist[optHistKey(shown.symbol ?? 'SPX', shown.strike, rightOf(shown.type))]}
-            quote={liveQuote((shown.symbol ?? 'SPX') === 'SPX' ? feed.greeksMap : feed.guestGreeksMap, shown.strike, shown.type)}
-            onClose={() => setInspectId(null)}
-            onRefresh={(p) => feed.requestOptHistory({ ...((shown.symbol ?? 'SPX') !== 'SPX' ? { symbol: shown.symbol } : {}), strike: p.strike, right: rightOf(p.type), expiry: p.expiry })}
-            onAttachExit={attachExit}
-            executionEnabled={feed.executionEnabled}
+            anchor={{ x: hoverPos.x, y: hoverPos.y }}
+            series={feed.optHist[optHistKey(shown.symbol ?? 'SPX', shown.strike, rightOf(shown.type), shown.expiry)]}
+            quote={shown.dayQuote ?? null}
+            onRefresh={canRefreshPositionHistory(shown) ? refreshPositionHistory : null}
+            executionEnabled={orderSurfaceExecutionEnabled}
             trailOk={!!feed.caps?.trail}
             onActivate={() => {
               if (cardHideRef.current) { clearTimeout(cardHideRef.current); cardHideRef.current = null; }
               cardHoveredRef.current = false;
-              setHoverPos(null);
-              setInspectId(shown.id); // click the card → open the pinned order window (TP·SL, close)
+              pinPosition(shown);
             }}
             onHoverChange={(over) => {
               cardHoveredRef.current = over;

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { startReplayRequest } from './app/useReplayController.js';
+import { replayLoadingError, startReplayRequest } from './app/useReplayController.js';
 
 test('offline replay request reports the problem without creating loading state', () => {
   const calls = [];
@@ -30,4 +30,14 @@ test('accepted replay request returns the loading state after the send succeeds'
     { date: '20260709', candles: [], idx: 0, speed: 2, playing: false, blind: true },
   );
   assert.deepEqual(calls, ['20260710', '20260709']);
+});
+
+test('a keyed bridge error applies only to the empty replay loading shell', () => {
+  const error = { date: '20260710', reason: 'IBKR disconnected' };
+  const errors = { 'replay-day:20260710': error };
+
+  assert.equal(replayLoadingError({ date: '20260710', candles: [] }, errors), error);
+  assert.equal(replayLoadingError({ date: '20260710', candles: [{ t: 1 }] }, errors), null);
+  assert.equal(replayLoadingError({ date: '20260709', candles: [] }, errors), null);
+  assert.equal(replayLoadingError(null, errors), null);
 });

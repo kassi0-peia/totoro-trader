@@ -1,6 +1,6 @@
 import React, { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } from 'react';
-import { snapStrike } from './options.js';
 import { aggregateCandles } from './candles.js';
+import { liveQuote } from './feed-model.js';
 import { fmtVol } from './chart/format.js';
 import ChartTooltips from './chart/ChartTooltips.jsx';
 import { useChartHover } from './chart/useChartHover.js';
@@ -24,8 +24,32 @@ import {
 } from './chart/coords.js';
 import { drawMarkers } from './chart/draw/markers.js';
 import { drawBusStops } from './chart/draw/busstops.js';
+import {
+  resolveChartClickIntent,
+  resolveChartContextTarget
+} from './chart/interactionIntent.js';
+import {
+  chartViewportStorageKey,
+  resolveChartViewportRestore
+} from './chart/viewportPersistence.js';
+import { resolveArmedTrigger } from './app/armedPlacement.js';
 
-const MARKER_HALF = 4;
+function clearCanvasSurface(canvas, size, background) {
+  if (!canvas) return null;
+  const dpr = window.devicePixelRatio || 1;
+  if (canvas.width !== Math.floor(size.w * dpr) || canvas.height !== Math.floor(size.h * dpr)) {
+    canvas.width = Math.floor(size.w * dpr);
+    canvas.height = Math.floor(size.h * dpr);
+    canvas.style.width = size.w + 'px';
+    canvas.style.height = size.h + 'px';
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, size.w, size.h);
+  ctx.fillStyle = background;
+  ctx.fillRect(0, 0, size.w, size.h);
+  return ctx;
+}
 
 export default function Chart({
   candles,
@@ -42,6 +66,7 @@ export default function Chart({
   onAddPosition = null,
   onHoverPosition = null,
   onInspectPosition = null,
+  highlightPositionId = null,
   ghostFills = [],
   busStops = [],
   busArmed = false,
@@ -58,6 +83,9 @@ export default function Chart({
   showPositions = true,
   showMarkers = true,
   quickMode = false,
+  armPlacement = null,
+  onPlaceArmTrigger = null,
+  onCancelArmPlacement = null,
   onToggleAxisChain = null,
   alerts = [],
   armed = [],
@@ -67,7 +95,8 @@ export default function Chart({
   onToggleDayLevels = null,
   onMenu = null,
   apiRef = null,
-  fillFlash = null
+  fillFlash = null,
+  seriesIdentity = 'default'
 }) {
   const wrapRef = useRef(null);
   const canvasRef = useRef(null);
@@ -87,14 +116,33 @@ export default function Chart({
     } catch {}
   }, [showVolume]);
   const [recording, setRecording] = useState(false);    // screen-capture clip in progress
+  const [armCursor, setArmCursor] = useState(null);     // exclusive trigger-level preview
   const recRef = useRef(null);                          // active MediaRecorder
-  const markerHitsRef = useRef([]); // [{ x, y, half, position, kind }]
+  const markerHitsRef = useRef([]); // point markers + closed-trade connector segments
   const ghostHitsRef = useRef([]);  // decision-replay ghost fills: [{ x, y, half, fill }]
   const busHitsRef = useRef([]);    // bus-stop markers: [{ x, y, half, stop }]
   const closeHitsRef = useRef([]);  // ✕ boxes on position lines: [{ x0, y0, x1, y1, position }]
   const addHitsRef = useRef([]);    // + boxes on position lines: [{ x0, y0, x1, y1, position }]
   const posLabelHitsRef = useRef([]); // strike P/L label chips: [{ x0, y0, x1, y1, position }]
-  const dprRef = useRef(window.devicePixelRatio || 1);
+  const touchClickRef = useRef(null); // manually handled tap awaiting its compatibility click
+
+  const clearHitLists = useCallback(() => {
+    markerHitsRef.current = [];
+    ghostHitsRef.current = [];
+    busHitsRef.current = [];
+    closeHitsRef.current = [];
+    addHitsRef.current = [];
+    posLabelHitsRef.current = [];
+  }, []);
+
+  const currentHitLists = () => ({
+    close: closeHitsRef.current,
+    add: addHitsRef.current,
+    markers: markerHitsRef.current,
+    ghosts: ghostHitsRef.current,
+    buses: busHitsRef.current,
+    labels: posLabelHitsRef.current
+  });
 
   // aggregate 1-minute candles into the selected timeframe. De-duplicate by
   // timestamp first (the bridge can emit overlapping history on reconnect) and
@@ -114,16 +162,42 @@ export default function Chart({
     return [...histCandles.filter((c) => c.t < cutoff), ...local];
   }, [candles, timeframe, histCandles, showOvn]);
 
-  // when a new candle ticks in, keep historical view anchored (don't slide forward).
-  const prevTfLenRef = useRef(tfCandles.length);
+  const viewportStorageKey = useMemo(
+    () => chartViewportStorageKey(seriesIdentity, timeframe),
+    [seriesIdentity, timeframe]
+  );
+
+  // Restored offsets go through the exact same bounds as live interaction.
+  // The vertical-pan bound depends on this tape's visible candle range, so it
+  // is derived only after the horizontal viewport and price zoom are clamped.
+  const resolveRestoredViewport = useCallback(
+    (saved) => resolveChartViewportRestore(saved, tfCandles),
+    [tfCandles]
+  );
+
+  // When candles append at the RIGHT edge, keep a historical view anchored.
+  // Deep history is prepended asynchronously and must not count as new live
+  // bars—the prior length-only check shifted the viewport by the whole backfill.
+  const prevTapeEdgeRef = useRef({
+    key: viewportStorageKey,
+    lastT: tfCandles[tfCandles.length - 1]?.t ?? null
+  });
   useEffect(() => {
-    const prev = prevTfLenRef.current;
-    const cur = tfCandles.length;
-    if (cur > prev && viewOffset > 0) {
-      setViewOffset((o) => o + (cur - prev));
+    const prev = prevTapeEdgeRef.current;
+    const lastT = tfCandles[tfCandles.length - 1]?.t ?? null;
+    if (
+      prev.key === viewportStorageKey &&
+      prev.lastT != null &&
+      lastT != null &&
+      lastT > prev.lastT &&
+      viewOffset > 0
+    ) {
+      let appended = 0;
+      for (let i = tfCandles.length - 1; i >= 0 && tfCandles[i].t > prev.lastT; i--) appended += 1;
+      if (appended) setViewOffset((o) => o + appended);
     }
-    prevTfLenRef.current = cur;
-  }, [tfCandles.length, viewOffset]);
+    prevTapeEdgeRef.current = { key: viewportStorageKey, lastT };
+  }, [tfCandles, viewportStorageKey, viewOffset]);
 
   // resize observer
   useLayoutEffect(() => {
@@ -167,7 +241,8 @@ export default function Chart({
     cursor,
     updateHover,
     clearStrikeHover,
-    handlePointerLeave
+    handlePointerLeave,
+    resetHover
   } = useChartHover({
     canvasRef,
     layout,
@@ -191,22 +266,12 @@ export default function Chart({
   // draw
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas || !view || !layout) return;
-    const dpr = window.devicePixelRatio || 1;
-    dprRef.current = dpr;
-    if (canvas.width !== Math.floor(size.w * dpr) || canvas.height !== Math.floor(size.h * dpr)) {
-      canvas.width = Math.floor(size.w * dpr);
-      canvas.height = Math.floor(size.h * dpr);
-      canvas.style.width = size.w + 'px';
-      canvas.style.height = size.h + 'px';
+    if (!canvas) return;
+    const ctx = clearCanvasSurface(canvas, size, theme.bg);
+    if (!view || !layout) {
+      clearHitLists();
+      return;
     }
-    const ctx = canvas.getContext('2d');
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, size.w, size.h);
-
-    // background
-    ctx.fillStyle = theme.bg;
-    ctx.fillRect(0, 0, size.w, size.h);
 
     // ── DRAW ORDER IS Z-ORDER ────────────────────────────────────────────────
     // Each painter below is called in the exact sequence the original inline
@@ -243,13 +308,13 @@ export default function Chart({
     const bucketMs = timeframe * 60 * 1000;
     const tToIdx = makeTToIdx(tfCandles, view, bucketMs);
     {
-      const mHits = drawMarkers(ctx, { view, layout, theme, priceToY, indexToX, positions, showMarkers, ghostFills, tToIdx });
+      const mHits = drawMarkers(ctx, { view, layout, theme, priceToY, indexToX, positions, showMarkers, ghostFills, tToIdx, highlightPositionId });
       markerHitsRef.current = mHits.markers;
       ghostHitsRef.current = mHits.ghosts;
     }
 
     busHitsRef.current = drawBusStops(ctx, { view, layout, theme, priceToY, indexToX, price, busStops, tfCandles, tToIdx, bucketMs });
-  }, [candles, price, positions, theme, size, view, layout, priceToY, indexToX, timeframe, showMarkers, showVolume, expectedMove, alerts, armed, dayLevels, beLine, axisChain, strikeStep, greeksMap, ivol, timeToExpiryYears, source, showPositions, ghostFills, busStops]);
+  }, [candles, price, positions, theme, size, view, layout, priceToY, indexToX, timeframe, showMarkers, showVolume, expectedMove, alerts, armed, dayLevels, beLine, axisChain, strikeStep, greeksMap, ivol, timeToExpiryYears, source, showPositions, ghostFills, busStops, highlightPositionId, tfCandles, clearHitLists]);
 
   const {
     pinchRef,
@@ -260,13 +325,13 @@ export default function Chart({
     handleDragMove,
     startDrag,
     endDrag,
-    snapToNow
+    snapToNow,
+    markViewportInteraction
   } = useChartPanZoom({
     canvasRef,
     layout,
     view,
     chartHeight: size.h,
-    timeframe,
     tfLength: tfCandles.length,
     visibleCount,
     viewOffset,
@@ -275,8 +340,35 @@ export default function Chart({
     setVisibleCount,
     setViewOffset,
     setPriceOffset,
-    setPriceScale
+    setPriceScale,
+    viewportStorageKey,
+    resolveRestoredViewport
   });
+
+  // A changed series/timeframe invalidates both the pixels and every hit/hover
+  // coordinate produced for the previous tape. Clear synchronously before the
+  // browser can show the old chart under the new cockpit label; the draw effect
+  // repopulates the surface and hit lists immediately afterward.
+  const surfaceKeyRef = useRef(viewportStorageKey);
+  useLayoutEffect(() => {
+    if (surfaceKeyRef.current === viewportStorageKey) return;
+    surfaceKeyRef.current = viewportStorageKey;
+    clearHitLists();
+    resetHover();
+    touchClickRef.current = null;
+    clearCanvasSurface(canvasRef.current, size, theme.bg);
+  }, [viewportStorageKey, size, theme.bg, clearHitLists, resetHover]);
+
+  // Canvas pixels persist independently of React. When the tape goes empty,
+  // explicitly paint a blank background and retire the old hit targets instead
+  // of leaving a convincing-but-stale chart on screen.
+  useLayoutEffect(() => {
+    if (view) return;
+    clearHitLists();
+    resetHover();
+    touchClickRef.current = null;
+    clearCanvasSurface(canvasRef.current, size, theme.bg);
+  }, [view, size, theme.bg, clearHitLists, resetHover]);
 
   // Record a clip of the CHART CANVAS directly (canvas.captureStream) — no
   // permission prompt at all. The old getDisplayMedia path died silently in the
@@ -319,12 +411,29 @@ export default function Chart({
 
   const handlePointerDown = (e) => {
     if (e.pointerType !== 'mouse') return;
+    if (armPlacement) {
+      e.preventDefault();
+      return;
+    }
     canvasRef.current?.setPointerCapture?.(e.pointerId);
     startDrag(e.clientX, e.clientY);
   };
 
   const handlePointerMove = (e) => {
     if (e.pointerType !== 'mouse') return;
+    if (armPlacement) {
+      const canvas = canvasRef.current;
+      if (!canvas || !layout || !view) { setArmCursor(null); return; }
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      if (x < 0 || x > layout.chartW || y < layout.priceTop || y > layout.priceBot) {
+        setArmCursor(null);
+        return;
+      }
+      setArmCursor({ x, y, price: yToPrice(y) });
+      return;
+    }
     if (dragRef.current) {
       handleDragMove(e.clientX, e.clientY);
       if (dragRef.current.moved) clearStrikeHover();
@@ -335,82 +444,62 @@ export default function Chart({
 
   const handlePointerUp = (e) => {
     if (e.pointerType !== 'mouse') return;
+    if (armPlacement) return;
     endDrag();
+  };
+
+  const handlePointerCancel = (e) => {
+    if (armPlacement) {
+      setArmCursor(null);
+      return;
+    }
+    handlePointerUp(e);
   };
 
   const handleClick = (clientX, clientY) => {
     const canvas = canvasRef.current;
-    if (!canvas || !layout) return;
+    if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
     const x = clientX - rect.left;
     const y = clientY - rect.top;
-    if (x < 0 || x > layout.chartW || y < layout.priceTop || y > layout.priceBot) return;
-    // ✕ on a position line → close that position (marketable limit, via App)
-    for (const c of closeHitsRef.current) {
-      if (x >= c.x0 && x <= c.x1 && y >= c.y0 && y <= c.y1) {
-        onClosePosition?.(c.position);
-        return;
-      }
-    }
-    // + on a position line → add one contract to that leg (marketable limit, via App)
-    for (const a of addHitsRef.current) {
-      if (x >= a.x0 && x <= a.x1 && y >= a.y0 && y <= a.y1) {
-        onAddPosition?.(a.position);
-        return;
-      }
-    }
-    // Fill chevron → pin that leg's card (same window as the strike P/L chip).
-    // The hit still swallows the click either way, so a marker press can never
-    // fall through and place a trade on the candle underneath.
-    for (const m of markerHitsRef.current) {
-      if (Math.abs(x - m.x) <= m.half && Math.abs(y - m.y) <= m.half) {
-        onInspectPosition?.(m.position);
-        return;
-      }
-    }
-    // Ghost fills are annotations — swallow the click so it can't trade through.
-    for (const g of ghostHitsRef.current) {
-      if (Math.abs(x - g.x) <= g.half && Math.abs(y - g.y) <= g.half) return;
-    }
-    // Bus-stop marker → open its timetable card. Swallows the click either way
-    // so a stop press can never fall through and place a trade.
-    for (const b of busHitsRef.current) {
-      if (Math.abs(x - b.x) <= b.half && Math.abs(y - b.y) <= b.half) {
-        onSelectBusStop?.(b.stop);
-        return;
-      }
-    }
-    // strike P/L label chip → open the inspect/order window (TP·SL exit, close)
-    for (const b of posLabelHitsRef.current) {
-      if (x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1) {
-        onInspectPosition?.(b.position);
-        return;
-      }
-    }
-    // Trading clicks only at the live candle and rightward (history is read-only).
-    const di = view.baseIdx + Math.floor(x / layout.candleW);
-    // 🚏 armed: a click drops a bus stop at the (price, time) coordinate instead
-    // of opening the trade modal. The time extrapolates into the empty future
-    // space at the current timeframe (same math as the crosshair readout);
-    // validation (must be future, before settle) lives in App, which can toast.
-    if (busArmed && onDropBusStop) {
-      const lastT = tfCandles.length ? tfCandles[tfCandles.length - 1].t : null;
-      const tAtX = di >= 0 && di < tfCandles.length
-        ? tfCandles[di].t
-        : (lastT != null ? lastT + (di - (tfCandles.length - 1)) * timeframe * 60000 : null);
-      if (tAtX != null) onDropBusStop({ price: yToPrice(y), t: tAtX });
-      return;
-    }
-    if (di < tfCandles.length - 1) return;
-    const rawPrice = yToPrice(y);
-    const type = rawPrice > price ? 'call' : 'put';
-    const strike = snapStrike(rawPrice, strikeStep);
-    onRequestTrade({ strike, type });
+    const intent = resolveChartClickIntent({
+      x,
+      y,
+      layout,
+      view,
+      tfCandles,
+      timeframe,
+      price,
+      strikeStep,
+      busArmed: busArmed && !!onDropBusStop,
+      armPlacement: !!armPlacement,
+      hits: currentHitLists()
+    });
+    if (!intent) return;
+
+    if (intent.kind === 'close-position') onClosePosition?.(intent.position);
+    else if (intent.kind === 'add-position') onAddPosition?.(intent.position);
+    else if (intent.kind === 'inspect-position') onInspectPosition?.(intent.position);
+    else if (intent.kind === 'select-bus-stop') onSelectBusStop?.(intent.stop);
+    else if (intent.kind === 'drop-bus-stop') onDropBusStop?.(intent.point);
+    else if (intent.kind === 'request-trade') onRequestTrade?.({ strike: intent.strike, type: intent.type });
+    else if (intent.kind === 'place-arm-trigger') onPlaceArmTrigger?.(intent.level);
   };
 
   const handleClickEvent = (e) => {
-    if (suppressClickRef.current) {
-      suppressClickRef.current = false;
+    const now = performance.now();
+    const touchClick = touchClickRef.current;
+    if (touchClick) {
+      touchClickRef.current = null;
+      if (
+        now <= touchClick.until &&
+        Math.abs(e.clientX - touchClick.x) <= 8 &&
+        Math.abs(e.clientY - touchClick.y) <= 8
+      ) return;
+    }
+    const suppressUntil = Number(suppressClickRef.current) || 0;
+    suppressClickRef.current = 0;
+    if (now <= suppressUntil) {
       return;
     }
     handleClick(e.clientX, e.clientY);
@@ -418,6 +507,8 @@ export default function Chart({
 
   const handleTouchEnd = (e) => {
     if (pinchRef.current) {
+      e.preventDefault();
+      suppressClickRef.current = performance.now() + 800;
       if (e.touches.length === 0) pinchRef.current = null;
       return;
     }
@@ -425,10 +516,45 @@ export default function Chart({
       const { moved } = endDrag();
       if (!moved) {
         const t = e.changedTouches[0];
-        if (t) handleClick(t.clientX, t.clientY);
+        if (t) {
+          // Handle the tap now for reliable PWA touch response, then swallow
+          // the browser's compatibility click at this same coordinate.
+          e.preventDefault();
+          touchClickRef.current = {
+            x: t.clientX,
+            y: t.clientY,
+            until: performance.now() + 800
+          };
+          handleClick(t.clientX, t.clientY);
+        }
       }
     }
   };
+
+  const handleTouchCancel = (e) => {
+    e.preventDefault();
+    pinchRef.current = null;
+    dragRef.current = null;
+    touchClickRef.current = null;
+    suppressClickRef.current = performance.now() + 800;
+  };
+
+  const handleArmTouchEnd = (e) => {
+    e.preventDefault();
+    const touch = e.changedTouches[0];
+    if (!touch) return;
+    touchClickRef.current = {
+      x: touch.clientX,
+      y: touch.clientY,
+      until: performance.now() + 800,
+    };
+    handleClick(touch.clientX, touch.clientY);
+  };
+
+  useEffect(() => {
+    setArmCursor(null);
+    if (armPlacement) resetHover();
+  }, [armPlacement?.strike, armPlacement?.right, armPlacement?.expiry, resetHover]);
 
   // OHLCV legend data: hovered candle, else the latest one (TradingView-style).
   const ohlc = (() => {
@@ -443,6 +569,13 @@ export default function Chart({
     return { c, chg, chgPct, up: c.close >= c.open };
   })();
 
+  const armPreviewLevel = armCursor?.price != null
+    ? Math.round(armCursor.price * 100) / 100
+    : null;
+  const armPreview = armPlacement && armPreviewLevel != null
+    ? resolveArmedTrigger(armPlacement, { level: armPreviewLevel, marketPrice: price })
+    : null;
+
   // Imperative surface for App's keyboard layer: Space = snapToNow, C/P read
   // the hovered strike (only the tradeable live-edge hover counts — history
   // hovers are read-only, same rule as clicks). Re-assigned every render so
@@ -450,7 +583,7 @@ export default function Chart({
   if (apiRef) {
     apiRef.current = {
       snapToNow,
-      hover: hover && hover.future ? { strike: hover.strike, type: hover.type } : null,
+      hover: !armPlacement && hover && hover.future ? { strike: hover.strike, type: hover.type } : null,
       // 📸 one still frame of the tape, downscaled for the journal (fill
       // snapshots). webp where the browser can encode it; toDataURL silently
       // falls back to png elsewhere — the bridge accepts both.
@@ -471,7 +604,7 @@ export default function Chart({
   }
 
   return (
-    <div className={`chart-wrap${fullscreen ? ' fullscreen' : ''}`} ref={wrapRef}>
+    <div className={`chart-wrap${fullscreen ? ' fullscreen' : ''}${armPlacement ? ' arm-placement' : ''}`} ref={wrapRef}>
       {ohlc && (
         <div className="ohlc-legend">
           <span className="ohlc-pair" style={{ color: ohlc.up ? theme.up : theme.down }}>
@@ -489,38 +622,60 @@ export default function Chart({
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
-        onPointerCancel={handlePointerUp}
-        onPointerLeave={handlePointerLeave}
+        onPointerCancel={handlePointerCancel}
+        onPointerLeave={armPlacement ? () => setArmCursor(null) : handlePointerLeave}
         onClick={handleClickEvent}
         onContextMenu={(e) => {
           e.preventDefault(); // chart owns right-click; no browser menu
+          if (armPlacement) {
+            onCancelArmPlacement?.();
+            return;
+          }
+          const canvas = canvasRef.current;
+          if (!canvas) return;
+          const rect = canvas.getBoundingClientRect();
+          const target = resolveChartContextTarget({
+            x: e.clientX - rect.left,
+            y: e.clientY - rect.top,
+            layout,
+            view,
+            tfCandles,
+            price,
+            strikeStep,
+            hits: currentHitLists()
+          });
+          if (!target || target.kind === 'blocked') return;
           // Two modes, one gesture: ⚡ armed = the instant quick order (unchanged);
           // ⚡ off = the strike menu (buy/sell C/P, alert here). Needs a real
           // price row under the cursor — the axis/time gutters get no menu.
-          if (quickMode && onQuickTrade && hover && hover.future && !markerHover) {
-            onQuickTrade(hover.strike, hover.type, hover.ask ?? null);
+          if (quickMode && onQuickTrade && target.future) {
+            onQuickTrade(
+              target.strike,
+              target.type,
+              liveQuote(greeksMap, target.strike, target.type) ?? null
+            );
             return;
           }
-          if (!quickMode && onMenu && cursor && Number.isFinite(cursor.price)) {
-            const near = alerts.find((a) => Math.abs(priceToY(a.price) - cursor.y) <= 8);
-            const nearArmed = armed.find((a) => Math.abs(priceToY(a.level) - cursor.y) <= 8);
+          if (!quickMode && onMenu) {
+            const near = alerts.find((a) => Math.abs(priceToY(a.price) - target.y) <= 8);
+            const nearArmed = armed.find((a) => Math.abs(priceToY(a.level) - target.y) <= 8);
             onMenu({
-              x: e.clientX, y: e.clientY, price: cursor.price,
+              x: e.clientX, y: e.clientY, price: target.price,
               alertId: near ? near.id : null, alertPrice: near ? near.price : null,
               armedId: nearArmed ? nearArmed.id : null,
               armedLabel: nearArmed ? `${nearArmed.strike}${nearArmed.right} @ ${nearArmed.level}` : null
             });
           }
         }}
-        onTouchStart={handleTouchStart}
-        onTouchMove={handleTouchMove}
-        onTouchEnd={handleTouchEnd}
-        onTouchCancel={handleTouchEnd}
+        onTouchStart={armPlacement ? (e) => e.preventDefault() : handleTouchStart}
+        onTouchMove={armPlacement ? (e) => e.preventDefault() : handleTouchMove}
+        onTouchEnd={armPlacement ? handleArmTouchEnd : handleTouchEnd}
+        onTouchCancel={handleTouchCancel}
       />
       <ChartTooltips
-        markerHover={markerHover}
-        hover={hover}
-        cursor={cursor}
+        markerHover={armPlacement ? null : markerHover}
+        hover={armPlacement ? null : hover}
+        cursor={armPlacement ? null : cursor}
         layout={layout}
         size={size}
         theme={theme}
@@ -529,6 +684,32 @@ export default function Chart({
         timeframe={timeframe}
         tooltipRef={tooltipRef}
       />
+      {armPlacement && (
+        <div className="arm-placement-instruction" role="status">
+          ARMING {armPlacement.strike}{armPlacement.right} · HOVER TRIGGER LEVEL · CLICK TO PLACE · ESC / RIGHT-CLICK CANCEL
+        </div>
+      )}
+      {armPlacement && armCursor && armPreviewLevel != null && layout && (
+        <>
+          <div
+            className={`arm-placement-line${armPreview?.ok ? '' : ' invalid'}`}
+            style={{ top: armCursor.y, width: layout.chartW, borderColor: armPreview?.ok ? theme.accent : theme.loss }}
+          />
+          <div
+            className={`arm-placement-chip${armPreview?.ok ? '' : ' invalid'}`}
+            style={{
+              left: Math.min(Math.max(8, armCursor.x + 12), Math.max(8, layout.chartW - 300)),
+              top: Math.max(layout.priceTop + 5, armCursor.y - 29),
+              borderColor: armPreview?.ok ? theme.accent : theme.loss,
+              color: armPreview?.ok ? theme.accent : theme.loss,
+            }}
+          >
+            {armPreview?.ok
+              ? `CLICK · SPX ${armPreviewLevel.toFixed(2)} ${armPreview.armed.dir === 'up' ? '↑' : '↓'} → BUY ${armPlacement.strike}${armPlacement.right}`
+              : armPreview?.reason}
+          </div>
+        </>
+      )}
       <button
         className="fs-btn"
         onClick={() => setFullscreen((f) => !f)}
@@ -596,13 +777,19 @@ export default function Chart({
       )}
       <button
         className="cw-btn cw-plus"
-        onClick={() => setVisibleCount((v) => Math.max(MIN_VISIBLE, Math.round(v / 1.3)))}
+        onClick={() => {
+          markViewportInteraction();
+          setVisibleCount((v) => Math.max(MIN_VISIBLE, Math.round(v / 1.3)));
+        }}
         aria-label="Fatter candles"
         data-tip="Fatter candles (show fewer)"
       >+</button>
       <button
         className="cw-btn cw-minus"
-        onClick={() => setVisibleCount((v) => Math.min(MAX_VISIBLE, Math.round(v * 1.3)))}
+        onClick={() => {
+          markViewportInteraction();
+          setVisibleCount((v) => Math.min(MAX_VISIBLE, Math.round(v * 1.3)));
+        }}
         aria-label="Skinnier candles"
         data-tip="Skinnier candles (show more)"
       >−</button>

@@ -1,4 +1,5 @@
 import React, { useEffect } from 'react';
+import { armedContractChoices } from './app/armedPlacement.js';
 
 // Right-click strike menu (kisa, 2026-07-09): the ⚡-off half of the chart's
 // right-click gesture. Buy/sell arm the SAME confirm ticket a strike click
@@ -9,7 +10,7 @@ import React, { useEffect } from 'react';
 export default function ChartMenu({
   menu, strike, live, replayActive, executionEnabled,
   onBuy, onSell, onAlert, onRemoveAlert, onClose,
-  canArm = false, armPrice = null, onArm = null, onDisarm = null
+  canArm = false, onArm = null, onDisarm = null
 }) {
   useEffect(() => {
     const onKey = (e) => { if (e.key === 'Escape') onClose(); };
@@ -21,17 +22,19 @@ export default function ChartMenu({
   const canTrade = replayActive || (live && executionEnabled);
   const showSell = live && executionEnabled && !replayActive;
   const showAlert = !replayActive; // an alert armed offline fires once live again
-  // ⚔ arm item points AWAY from the market: above price = call on the up-cross,
-  // below = put on the down-cross (design B, kisa 2026-07-11).
-  const armDir = canArm && onArm && armPrice != null && menu.price !== armPrice
-    ? (menu.price > armPrice ? 'up' : 'down') : null;
+  // The first arm step chooses one exact contract at this snapped strike. The
+  // chart exclusively owns the second step: placing its independent SPX trigger.
+  const showArm = canArm && !!onArm;
+  const armChoices = showArm ? armedContractChoices(strike) : [];
   const rows = (canTrade ? 2 : 0) + (showSell ? 2 : 0) + (showAlert ? 1 : 0) +
-    (menu.alertId != null ? 1 : 0) + (armDir ? 1 : 0) + (menu.armedId != null ? 1 : 0);
+    (menu.alertId != null ? 1 : 0) + armChoices.length + (menu.armedId != null ? 1 : 0);
   if (rows === 0) return null;
-  const W = 200;
+  const W = showArm ? 276 : 200;
   const H = rows * 30 + 10 + (canTrade && showAlert ? 9 : 0);
-  const left = Math.min(menu.x, window.innerWidth - W - 8);
-  const top = Math.min(menu.y, window.innerHeight - H - 8);
+  const viewportW = typeof window === 'undefined' ? 1280 : window.innerWidth;
+  const viewportH = typeof window === 'undefined' ? 800 : window.innerHeight;
+  const left = Math.max(8, Math.min(menu.x, viewportW - W - 8));
+  const top = Math.max(8, Math.min(menu.y, viewportH - H - 8));
 
   return (
     <>
@@ -60,16 +63,14 @@ export default function ChartMenu({
         {menu.alertId != null && (
           <button className="cm-item" onClick={() => onRemoveAlert(menu.alertId)}>Remove alert <b>{menu.alertPrice.toFixed(2)}</b></button>
         )}
-        {armDir === 'up' && (
-          <button className="cm-item cm-arm" onClick={() => onArm('call', 'up', menu.price)} data-tip="Fires a 1-lot marketable limit at the live ask when SPX crosses up through this level. One-shot; dies unfilled after 10s.">
-            ⚔ Buy CALL if ≥ <b>{menu.price.toFixed(2)}</b>
-          </button>
-        )}
-        {armDir === 'down' && (
-          <button className="cm-item cm-arm" onClick={() => onArm('put', 'down', menu.price)} data-tip="Fires a 1-lot marketable limit at the live ask when SPX crosses down through this level. One-shot; dies unfilled after 10s.">
-            ⚔ Buy PUT if ≤ <b>{menu.price.toFixed(2)}</b>
-          </button>
-        )}
+        {armChoices.map((choice) => (
+          <button
+            key={choice.right}
+            className="cm-item cm-arm"
+            onClick={() => onArm({ strike: choice.strike, right: choice.right })}
+            data-tip={`Next, click the SPX trigger level for ${choice.contract}. This only arms a one-shot marketable limit; it sends no order now.`}
+          >⚔ {choice.label}</button>
+        ))}
         {menu.armedId != null && onDisarm && (
           <button className="cm-item" onClick={() => onDisarm(menu.armedId)}>Disarm <b>{menu.armedLabel}</b></button>
         )}

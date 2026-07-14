@@ -19,11 +19,17 @@ export function startReplayRequest(date, { blind = false, requestReplayDay, show
   };
 }
 
+export function replayLoadingError(replay, historyErrors) {
+  if (!replay || replay.candles.length > 0) return null;
+  return historyErrors?.[`replay-day:${replay.date}`] ?? null;
+}
+
 // Owns replay tape selection, playback, ghost reveal, and the isolated practice
 // position list. It receives bridge operations rather than importing the live
 // feed, so replay still has no hidden route to real order submission.
 export default function useReplayController({
   replayDays,
+  historyErrors = {},
   journal,
   requestReplayDay,
   requestJournal,
@@ -71,6 +77,20 @@ export default function useReplayController({
     showToast(`No session data for ${replay.date} (holiday?)`, 'err');
     setReplay(null);
   }, [replayDays, replay, requestReplayDay, showToast]);
+
+  // A request can race an IB disconnect after the client has sent it. The bridge
+  // returns a keyed historyError; leave only the still-empty loading shell. A
+  // replay whose candles already arrived remains fully usable while IB is down.
+  const loadingError = replayLoadingError(replay, historyErrors);
+  useEffect(() => {
+    if (!loadingError) return;
+    showToast(`Replay history unavailable: ${loadingError.reason || 'try again after reconnecting'}`, 'err');
+    setReplay((current) => (
+      current && current.candles.length === 0 && current.date === loadingError.date
+        ? null
+        : current
+    ));
+  }, [loadingError, showToast]);
 
   // Playback advances in bars/second. Starting at the first bar keeps the
   // existing five-second orientation pause; resuming mid-tape is immediate.

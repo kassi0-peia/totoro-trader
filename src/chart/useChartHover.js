@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { greeks, snapStrike } from '../options.js';
 import { liveQuote } from '../feed.js';
+import { markerHitContains } from './markerGeometry.js';
 
 export function useChartHover({
   canvasRef,
@@ -28,6 +29,8 @@ export function useChartHover({
   const lastQuoteReqRef = useRef({ key: null, t: 0 }); // snapshot-quote throttle
   const hoverPosIdRef = useRef(null); // last position id emitted to onHoverPosition (de-dupe)
   const hoverHideTimerRef = useRef(null); // pending 0.5s grace-period dismiss of the hover card
+  const onHoverPositionRef = useRef(onHoverPosition);
+  onHoverPositionRef.current = onHoverPosition;
 
   // clear any pending hover-card dismiss timer on unmount
   useEffect(() => () => { if (hoverHideTimerRef.current) clearTimeout(hoverHideTimerRef.current); }, []);
@@ -44,13 +47,13 @@ export function useChartHover({
           if (hoverHideTimerRef.current) { clearTimeout(hoverHideTimerRef.current); hoverHideTimerRef.current = null; }
           if (id !== hoverPosIdRef.current) {
             hoverPosIdRef.current = id;
-            onHoverPosition?.(pos, clientX, clientY);
+            onHoverPositionRef.current?.(pos, clientX, clientY);
           }
         } else if (hoverPosIdRef.current !== null && !hoverHideTimerRef.current) {
           hoverHideTimerRef.current = setTimeout(() => {
             hoverHideTimerRef.current = null;
             hoverPosIdRef.current = null;
-            onHoverPosition?.(null);
+            onHoverPositionRef.current?.(null);
           }, 500);
         }
       };
@@ -79,8 +82,16 @@ export function useChartHover({
       const hits = markerHitsRef.current;
       for (let i = hits.length - 1; i >= 0; i--) {
         const m = hits[i];
-        if (Math.abs(x - m.x) <= m.half && Math.abs(y - m.y) <= m.half) {
-          setMarkerHover({ x: m.x, y: m.y, position: m.position, kind: m.kind });
+        if (markerHitContains(m, x, y)) {
+          // Connector records describe a segment rather than a point, so anchor
+          // its tooltip at the cursor. Entry/exit chevrons stay anchored to their
+          // exact centers as before.
+          setMarkerHover({
+            x: m.kind === 'connector' ? x : m.x,
+            y: m.kind === 'connector' ? y : m.y,
+            position: m.position,
+            kind: m.kind
+          });
           setHover(null);
           return;
         }
@@ -137,10 +148,29 @@ export function useChartHover({
           requestQuote({ strike, right: type === 'call' ? 'C' : 'P' });
         }
       }
-      setHover({ x, y, strike, type, future, greeks: g, ask: q?.ask, bid: q?.bid });
+      setHover({ x, y, strike, type, future, greeks: g, ask: q?.ask, bid: q?.bid, quote: q ?? null });
     },
-    [layout, view, tfCandles, yToPrice, price, ivol, timeToExpiryYears, greeksMap, requestQuote, timeframe, onHoverPosition, strikeStep]
+    [layout, view, tfCandles, yToPrice, price, ivol, timeToExpiryYears, greeksMap, requestQuote, timeframe, strikeStep]
   );
+
+  // A symbol/timeframe change or an empty tape invalidates every cached chart
+  // coordinate and quote. Clear immediately so an old hover cannot remain an
+  // order target while the new surface is being drawn.
+  const resetHover = useCallback(() => {
+    if (hoverHideTimerRef.current) {
+      clearTimeout(hoverHideTimerRef.current);
+      hoverHideTimerRef.current = null;
+    }
+    if (hoverPosIdRef.current !== null) {
+      hoverPosIdRef.current = null;
+      onHoverPositionRef.current?.(null);
+    }
+    lastQuoteReqRef.current = { key: null, t: 0 };
+    setHover(null);
+    setMarkerHover(null);
+    setHoverIdx(null);
+    setCursor(null);
+  }, []);
 
   // Dragging only dismisses the strike quote. Marker/cursor state is deliberately
   // left alone, matching the original pointer handler.
@@ -155,10 +185,19 @@ export function useChartHover({
       hoverHideTimerRef.current = setTimeout(() => {
         hoverHideTimerRef.current = null;
         hoverPosIdRef.current = null;
-        onHoverPosition?.(null);
+        onHoverPositionRef.current?.(null);
       }, 500);
     }
   };
 
-  return { hover, markerHover, hoverIdx, cursor, updateHover, clearStrikeHover, handlePointerLeave };
+  return {
+    hover,
+    markerHover,
+    hoverIdx,
+    cursor,
+    updateHover,
+    clearStrikeHover,
+    handlePointerLeave,
+    resetHover
+  };
 }

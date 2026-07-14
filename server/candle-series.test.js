@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   CANDLE_MS,
   feedCandleSeries,
+  finishHistoricalSeed,
   newCandleSeries,
   nextCandleEdge,
   parseHistTime,
@@ -53,6 +54,20 @@ test('feedCandleSeries trims only after opening a new bar', () => {
     feedCandleSeries(series, 100 + i, { now: i * CANDLE_MS, maxCandles: 2 });
   }
   assert.deepEqual(series.candles.map((c) => c.t), [120_000, 180_000]);
+});
+
+test('historical seed completion preserves interleaved live current candle', () => {
+  const live = { candles: [], edge: 0 };
+  feedCandleSeries(live, 105, { now: 181_000 });
+  const historical = [
+    { t: 60_000, open: 99, high: 101, low: 98, close: 100, volume: 1 },
+    { t: 120_000, open: 100, high: 104, low: 100, close: 103, volume: 2 },
+    { t: 180_000, open: 103, high: 104, low: 102, close: 104, volume: 3 },
+  ];
+  finishHistoricalSeed(live, historical, { now: 181_500, maxCandles: 3 });
+  assert.deepEqual(live.candles.map((c) => c.t), [60_000, 120_000, 180_000]);
+  assert.equal(live.candles[2].open, 105, 'live partial bucket wins over history');
+  assert.equal(live.edge, 240_000);
 });
 
 test('parseHistTime handles epoch seconds, daily bars, timestamps and junk', () => {

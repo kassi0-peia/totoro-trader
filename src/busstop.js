@@ -4,17 +4,17 @@
 // so it stays testable in plain node. Spec: spec-bus-stop.md.
 
 import { greeks } from './options.js';
+import { optionExpiryCutoffMs } from './market-time.js';
 
 const YEAR_MS = 365 * 24 * 60 * 60 * 1000;
 const MIN_MS = 60 * 1000;
 export const LATE_GRACE_MS = 20 * MIN_MS; // the "20 min late" scenario
 
-// SPXW settles at the 16:00 ET cash close of its expiry date. Local time == ET
-// by codebase convention (same assumption as timeToExpiryYearsAt in App.jsx).
+// SPXW settles on the exchange clock: 16:00 ET on a full day, 13:00 ET on an
+// early-close day. The helper is host-timezone independent.
 export function expiryCutoffMs(expiry, now = Date.now()) {
-  if (typeof expiry === 'string' && /^\d{8}$/.test(expiry)) {
-    return new Date(+expiry.slice(0, 4), +expiry.slice(4, 6) - 1, +expiry.slice(6, 8), 16, 0, 0, 0).getTime();
-  }
+  const exact = optionExpiryCutoffMs(expiry);
+  if (exact != null) return exact;
   const d = new Date(now);
   d.setHours(16, 0, 0, 0);
   if (d.getTime() <= now) d.setDate(d.getDate() + 1);
@@ -100,7 +100,11 @@ export function displayRows({ rows, sturdy, tenX, best }) {
 // Judged on bar highs/lows — never the future, so retroactive scans after a
 // reload are safe. `est` flags a touch judged on the overnight ES-basis proxy.
 export function scanTouch(stop, candles) {
-  const startBucket = Math.floor(stop.createdAt / MIN_MS) * MIN_MS;
+  // A stored minute candle cannot tell whether its high/low happened before or
+  // after a stop dropped midway through that minute. Start with the next full
+  // bucket rather than award a look-behind hit. An exact minute-boundary drop
+  // still includes that new bucket.
+  const startBucket = Math.ceil(stop.createdAt / MIN_MS) * MIN_MS;
   for (const c of candles) {
     if (c.t < startBucket) continue;
     const touched = stop.side === 'call' ? c.high >= stop.targetPrice : c.low <= stop.targetPrice;
