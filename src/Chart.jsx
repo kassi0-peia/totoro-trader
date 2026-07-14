@@ -817,7 +817,23 @@ export default function Chart({
   if (apiRef) {
     apiRef.current = {
       snapToNow,
-      hover: hover && hover.future ? { strike: hover.strike, type: hover.type } : null
+      hover: hover && hover.future ? { strike: hover.strike, type: hover.type } : null,
+      // 📸 one still frame of the tape, downscaled for the journal (fill
+      // snapshots). webp where the browser can encode it; toDataURL silently
+      // falls back to png elsewhere — the bridge accepts both.
+      frame: () => {
+        const canvas = canvasRef.current;
+        if (!canvas || !canvas.width || !canvas.height) return null;
+        try {
+          const scale = Math.min(1, 1200 / canvas.width);
+          if (scale >= 1) return canvas.toDataURL('image/webp', 0.8);
+          const off = document.createElement('canvas');
+          off.width = Math.round(canvas.width * scale);
+          off.height = Math.round(canvas.height * scale);
+          off.getContext('2d').drawImage(canvas, 0, 0, off.width, off.height);
+          return off.toDataURL('image/webp', 0.8);
+        } catch { return null; }
+      }
     };
   }
 

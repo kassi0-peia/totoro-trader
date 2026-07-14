@@ -44,6 +44,7 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent } = {}) {
       account: null,
       accountType: null,     // 'paper' | 'live' | null
       executionEnabled: false,
+      caps: {},              // bridge capability flags (e.g. trail) — empty until the snapshot says
       trades: [],            // today's fills (blotter)
       positions: [],         // IBKR-authoritative open option positions
       orders: [],            // working (unfilled) orders, visible on every device
@@ -202,6 +203,15 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent } = {}) {
     return true;
   }, []);
 
+  // 📸 fill snapshot: one still frame of the chart at fill time, persisted
+  // bridge-side next to the journal (dataUrl = the canvas as webp/png).
+  const sendFillShot = useCallback((id, dataUrl) => {
+    const ws = socketRef.current;
+    if (!ws || ws.readyState !== 1) return false;
+    ws.send(JSON.stringify({ type: 'fillShot', id, dataUrl }));
+    return true;
+  }, []);
+
   // ── Guest-symbol senders (multi-symbol Phase A) ──
   const searchSymbols = useCallback((q) => {
     const ws = socketRef.current;
@@ -234,7 +244,7 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent } = {}) {
     return true;
   }, []);
 
-  return { ...snapshot, sendOrder, sendCancel, requestQuote, requestHistory, requestOptHistory, requestReplayDay, requestJournal, sendFillNote, sendArmed, searchSymbols, activateSymbol, deactivateSymbol, setWatchlist };
+  return { ...snapshot, sendOrder, sendCancel, requestQuote, requestHistory, requestOptHistory, requestReplayDay, requestJournal, sendFillNote, sendFillShot, sendArmed, searchSymbols, activateSymbol, deactivateSymbol, setWatchlist };
 }
 
 // Exported for unit testing the reducer (guest merges must not disturb SPX
@@ -265,6 +275,10 @@ export function applyMessage(s, msg) {
       account: msg.account ?? null,
       accountType: msg.accountType ?? null,
       executionEnabled: !!msg.executionEnabled,
+      // Bridge capability flags (absent on an old bridge = all false) — see
+      // the snapshot builder's caps note. Gates order fields the bridge must
+      // understand to route safely.
+      caps: msg.caps && typeof msg.caps === 'object' ? msg.caps : {},
       trades: Array.isArray(msg.trades) ? msg.trades : s.trades,
       positions: Array.isArray(msg.positions) ? msg.positions : s.positions,
       orders: Array.isArray(msg.orders) ? msg.orders : s.orders,
@@ -299,6 +313,17 @@ export function applyMessage(s, msg) {
       const { note, ...rest } = r;
       return rest;
     });
+    const trades = s.trades.some((r) => r.id === msg.id) ? patch(s.trades) : s.trades;
+    let journal = s.journal;
+    if (journal && msg.day && (journal[msg.day] || []).some((r) => r.id === msg.id)) {
+      journal = { ...journal, [msg.day]: patch(journal[msg.day]) };
+    }
+    return { ...s, trades, journal };
+  }
+
+  // 📸 a fill snapshot landed on a row — patch the filename in, same shape as notes.
+  if (msg.type === 'shotResult') {
+    const patch = (rows) => rows.map((r) => (r.id === msg.id ? { ...r, shot: msg.shot } : r));
     const trades = s.trades.some((r) => r.id === msg.id) ? patch(s.trades) : s.trades;
     let journal = s.journal;
     if (journal && msg.day && (journal[msg.day] || []).some((r) => r.id === msg.id)) {
