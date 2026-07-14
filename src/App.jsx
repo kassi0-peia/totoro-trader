@@ -1200,9 +1200,11 @@ export default function App() {
     }];
   };
 
-  // Marketable limit prices: cross the spread by one SPXW tick. The app never
-  // sends a naked MKT — IBKR simulates MKT-outside-RTH and holds it until the
-  // ~00:10 reset, and in thin books MKT slippage is uncapped.
+  // Marketable limit prices: cross the spread by one SPXW tick. These paths
+  // (CLOSE / REVERSE / add / kill-switch / amber ⚡) never send a naked MKT —
+  // IBKR simulates MKT-outside-RTH and holds it until the ~00:10 reset, and in
+  // thin books MKT slippage is uncapped. (The two deliberate MKT paths are the
+  // EXECUTE ticket's default for an SPX BUY-to-open and the red ⚡ arm.)
   const tickFor = (px) => (px < 3 ? 0.05 : 0.10);
   // Quote lookups read the active cockpit's chain (guest map in guest mode).
   const sellLimitFor = (strike, type) => {
@@ -1276,7 +1278,7 @@ export default function App() {
     if (!feed.executionEnabled) { showToast('Execution disabled', 'err'); return; }
     const open = positionsLive.filter((p) => p.status === 'open');
     if (!open.length) { showToast('No open positions', 'err'); return; }
-    if (!window.confirm(`Close all ${open.length} open position${open.length > 1 ? 's' : ''} at market?`)) return;
+    if (!window.confirm(`Close all ${open.length} open position${open.length > 1 ? 's' : ''}? (marketable limits, one per leg)`)) return;
     open.forEach((p) => closePosition(p));
     showToast(`Closing ${open.length} position${open.length > 1 ? 's' : ''}`, 'ok');
   };

@@ -118,10 +118,14 @@ printing, so the chart shows front-month ES shifted to an SPX-equivalent scale
 
 ## Orders & account safety
 
-- EXECUTE / CLOSE / REVERSE and amber ⚡ send **marketable limits** (cross ~1
-  tick), never naked MKT, and refuse without a live quote. The red ⚡ arm is
-  the *one* deliberate MKT path. **Sell-to-open is limit-only** (a market sell
-  into a thin book is a blank check), as are all guest-symbol orders.
+- The **EXECUTE ticket** for an SPX **BUY-to-open** opens with **MKT** selected
+  (kisa's confirmed choice, 2026-07-13 — instant fill, uncapped slippage, IBKR-
+  simulated/held until ~00:10 outside RTH); a marketable limit prefilled at the
+  ask is one toggle away. **Sell-to-open and guest-symbol tickets are limit-only**
+  (a market sell into a thin book is a blank check; the bridge rejects a guest
+  MKT). **CLOSE / REVERSE / attached exits / kill-switch / amber ⚡** send
+  **marketable limits** (cross ~1 tick), never naked MKT, and refuse without a
+  live quote. The red ⚡ arm is the *other* deliberate MKT path (SPX-only).
 - Positions and fills are **IBKR-authoritative**: real `avgFillPrice`, dedupe
   by `execId`, and a reconnect backfills anything missed via `reqExecutions`.
 - Orders use `outsideRth: true` so they work the SPXW overnight (GTH) session;
