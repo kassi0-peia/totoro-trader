@@ -4,7 +4,32 @@ import { fmtPrice } from '../format.js';
 // Pure paint; leaves ctx clean (both dashed blocks balance save/restore; the
 // chip's font/align/baseline are the last state set and are re-established by
 // later painters — kept verbatim from the original inline block).
-export function drawPriceLine(ctx, { layout, theme, priceToY, price, expectedMove, alerts, armed, rightAxis }) {
+export function drawPriceLine(ctx, { layout, theme, priceToY, price, expectedMove, alerts, armed, rightAxis, dayLevels, beLine }) {
+  // Day levels (kisa 2026-07-13, opt-in toggle): PDH/PDL/PDC + today's open
+  // as the faintest lines here — context, not signals — drawn FIRST so every
+  // other mark sits above them. Labels at the left edge, EM-style.
+  if (dayLevels && dayLevels.length) {
+    ctx.save();
+    ctx.strokeStyle = theme.muted;
+    ctx.lineWidth = 1;
+    ctx.font = '9px "JetBrains Mono", monospace';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'bottom';
+    for (const l of dayLevels) {
+      const y = priceToY(l.price);
+      if (!(y > 4 && y < layout.priceBot - 2)) continue;
+      ctx.globalAlpha = 0.22;
+      ctx.beginPath();
+      ctx.moveTo(0, y + 0.5);
+      ctx.lineTo(layout.chartW, y + 0.5);
+      ctx.stroke();
+      ctx.globalAlpha = 0.6;
+      ctx.fillStyle = theme.muted;
+      ctx.fillText(`${l.label} ${fmtPrice(l.price)}`, 6, y - 2);
+    }
+    ctx.restore();
+  }
+
   // current price dashed line
   const yPrice = priceToY(price);
   ctx.save();
@@ -117,6 +142,43 @@ export function drawPriceLine(ctx, { layout, theme, priceToY, price, expectedMov
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillText(`⚔ ${a.strike}${a.right}`, layout.chartW + 4, ya);
+      ctx.restore();
+    }
+  }
+
+  // Breakeven, hover-only (kisa 2026-07-13: "breakeven only showing on
+  // hover"): while a position is hovered, its at-expiry breakeven — strike ±
+  // the real entry premium — as a dashed line in the leg's own color, with an
+  // axis tag. Drawn last: a hover is a question being asked right now, it
+  // outranks everything resting. Unhover → gone; zero resting chrome.
+  if (beLine && Number.isFinite(beLine.price)) {
+    const yb = priceToY(beLine.price);
+    if (yb > 4 && yb < layout.priceBot - 2) {
+      const color = beLine.type === 'call' ? theme.callLine : theme.putLine;
+      ctx.save();
+      ctx.setLineDash([6, 3]);
+      ctx.strokeStyle = color;
+      ctx.globalAlpha = 0.8;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, yb + 0.5);
+      ctx.lineTo(layout.chartW, yb + 0.5);
+      ctx.stroke();
+      ctx.restore();
+      ctx.save();
+      ctx.globalAlpha = 0.95;
+      ctx.fillStyle = theme.surface;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.rect(layout.chartW + 0.5, yb - 8.5, rightAxis - 1, 17);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = color;
+      ctx.font = '9px "JetBrains Mono", monospace';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(`BE ${fmtPrice(beLine.price)}`, layout.chartW + 4, yb);
       ctx.restore();
     }
   }
