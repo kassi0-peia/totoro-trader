@@ -360,7 +360,7 @@ export default function TradeModal({ pending, theme, series, onRefresh, onCancel
         {!executionEnabled && (
           <div className="modal-note" style={{ color: theme.loss }}>
             {accountType === 'live'
-              ? 'Execution disabled — live account (set ALLOW_LIVE=true to enable)'
+              ? 'Execution disabled — live account not connected'
               : 'Execution disabled — no executable IBKR account connected'}
           </div>
         )}
