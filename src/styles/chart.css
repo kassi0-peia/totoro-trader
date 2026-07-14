@@ -1,0 +1,412 @@
+/* ============ MAIN / CHART ============ */
+
+.main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-height: 0;
+  width: 100%;
+}
+
+.main-inner {
+  width: 100%;
+  max-width: none; /* fill the monitor; the chart's resize observer follows */
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  position: relative; /* the bottom drawer anchors to this */
+}
+
+/* ── Bottom drawer (kisa 2026-07-10): chart runs edge-to-edge; tf-bar +
+   positions live in a panel that slides up OVER the chart's bottom. The grab
+   band is invisible chrome — hover peeks, click pins, a fill auto-peeks. ── */
+.bottom-zone {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+}
+.bottom-grab {
+  display: block;
+  width: 100%;
+  height: 14px;      /* the invisible hover band along the bottom edge */
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+}
+.bottom-grab[data-tip]::after { left: 50%; }
+.bottom-panel {
+  max-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  background: var(--c-bg);
+  border-top: none; /* border only while open — a resting 1px edge is chrome */
+  /* Materialize: the height snaps under cover of the fade (kisa: "for drama").
+     Closing snaps away — click-off should feel instant. */
+  transition: opacity 320ms ease;
+}
+.bottom-zone.open .bottom-panel {
+  max-height: 46vh;
+  overflow-y: auto;
+  opacity: 1;
+  border-top: 1px solid var(--c-border);
+}
+@media (max-width: 720px) {
+  /* Touch has no hover, and positions must never hide behind a gesture on
+     the phone — the drawer is statically open, exactly the old layout. */
+  .bottom-zone { position: static; }
+  .bottom-grab { display: none; }
+  .bottom-panel { max-height: none; overflow: visible; opacity: 1; }
+
+}
+
+.tf-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 14px;
+  background: var(--c-surface);
+  border-bottom: 1px solid var(--c-border);
+}
+
+.tf-label {
+  font-size: 9px;
+  letter-spacing: 0.22em;
+  color: var(--c-muted);
+}
+
+.tf-group {
+  display: flex;
+  gap: 4px;
+}
+
+.tf-btn {
+  background: transparent;
+  border: 1px solid var(--c-border);
+  color: var(--c-muted);
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  font-family: inherit;
+  transition: color 140ms, border-color 140ms, background 140ms;
+}
+
+.tf-btn:hover:not(.active) {
+  color: var(--c-text);
+  border-color: var(--c-text);
+}
+
+.tf-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 22px; /* keep panic + close-all apart so they're not misclick-adjacent */
+}
+
+.tf-panic,
+.tf-closeall {
+  background: transparent;
+  border: 1px solid var(--c-border);
+  height: 28px;
+  padding: 0 14px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  font-family: inherit;
+  cursor: pointer;
+  transition: filter 140ms, opacity 140ms;
+}
+
+.tf-panic:hover,
+.tf-closeall:hover:not(:disabled) { filter: brightness(1.25); }
+.tf-closeall:disabled { opacity: 0.4; cursor: default; }
+
+.chart-wrap {
+  position: relative;
+  width: 100%;
+  height: 79vh;
+  min-height: 484px;
+  background: var(--c-bg);
+}
+/* Desktop: the cockpit fits the viewport — no page scroll to reach the time
+   axis (kisa 2026-07-10, unlocked by the bottom drawer freeing the space
+   below the chart). The chart absorbs whatever the header/strips leave.
+   Mobile keeps natural page flow — it stacks and must scroll. */
+@media (min-width: 721px) {
+  .app { height: 100vh; height: 100dvh; overflow: hidden; }
+  .chart-area { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .chart-wrap { height: auto; flex: 1; min-height: 0; }
+  .footer { cursor: pointer; } /* the footer is the drawer's big trigger */
+}
+
+.snap-now-btn,
+.fs-btn,
+.axis-prem-btn,
+.vol-btn,
+.rec-btn,
+.quick-btn,
+.cw-btn,
+.rung-btn,
+.daylevels-btn {
+  position: absolute;
+  bottom: 30px;
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  color: var(--c-muted);
+  border-radius: 50%;
+  cursor: pointer;
+  z-index: 8;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28);
+  transition: color 160ms, border-color 160ms;
+}
+.fs-btn { right: 12px; }            /* far bottom-right corner */
+.axis-prem-btn { right: 54px; }
+.vol-btn { right: 96px; }
+.rec-btn { right: 138px; }
+.quick-btn { right: 180px; }
+.snap-now-btn { right: 222px; }     /* leftmost — only when off-centre */
+.cw-plus { left: 12px; font-size: 17px; }   /* bottom-left: candle width */
+.cw-minus { left: 54px; font-size: 17px; }
+.cw-btn:hover { color: var(--c-accent); border-color: var(--c-accent); }
+.rung-btn { right: 264px; }                 /* one-click ladder rung (toggle in gear panel) */
+.rung-btn:hover { color: var(--c-accent); border-color: var(--c-accent); }
+.daylevels-btn { right: 306px; }            /* day-levels overlay (SPX-only, opt-in) */
+.snap-now-btn:hover,
+.fs-btn:hover,
+.axis-prem-btn:hover,
+.axis-prem-btn.active,
+.vol-btn:hover,
+.vol-btn.active,
+.daylevels-btn:hover,
+.daylevels-btn.active,
+.rec-btn:hover {
+  color: var(--c-accent);
+  border-color: var(--c-accent);
+}
+
+.rec-btn.recording {
+  color: #e05555;
+  border-color: #e05555;
+  animation: rec-pulse 1.2s ease-in-out infinite;
+}
+
+/* Quick mode armed: red — right-click fires a real (marketable-limit) order. */
+.quick-btn.active {
+  color: #e05555;
+  border-color: #e05555;
+}
+
+@keyframes rec-pulse {
+  0%, 100% { box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28); }
+  50% { box-shadow: 0 0 10px rgba(224, 85, 85, 0.7); }
+}
+
+/* Fullscreen chart: cover the viewport (works on mobile + desktop without the
+   Fullscreen API, which iOS blocks for non-video elements). */
+.chart-wrap.fullscreen {
+  position: fixed;
+  inset: 0;
+  width: auto;
+  height: auto;
+  min-height: 0;
+  z-index: 60;
+}
+
+.chart-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.ohlc-legend {
+  position: absolute;
+  top: 8px;
+  left: 12px;
+  z-index: 6;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+.ohlc-pair i {
+  font-style: normal;
+  color: var(--c-muted);
+  margin-right: 3px;
+}
+.ohlc-pair i + i,
+.ohlc-pair { margin-right: 0; }
+.ohlc-chg { font-weight: 600; }
+
+.tt-ask b { font-size: 13px; }
+
+.quote-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.quote-cell {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  background: var(--c-surfaceAlt);
+}
+.quote-cell span {
+  font-size: 9px;
+  letter-spacing: 0.16em;
+  color: var(--c-muted);
+}
+.quote-cell b {
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+}
+.ohlc-vol { color: var(--c-text); }
+.ohlc-vol i {
+  font-style: normal;
+  color: var(--c-muted);
+  margin-right: 3px;
+}
+
+.crosshair-v {
+  position: absolute;
+  width: 0;
+  border-left: 1px dashed;
+  opacity: 0.45;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.crosshair-h {
+  position: absolute;
+  height: 0;
+  left: 0;
+  border-top: 1px dashed;
+  opacity: 0.45;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.crosshair-price {
+  position: absolute;
+  right: 0;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.crosshair-time {
+  position: absolute;
+  transform: translateX(-50%);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.chart-tooltip {
+  position: absolute;
+  background: rgba(13, 16, 24, 0.96);
+  border: 1px solid;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 11px;
+  color: var(--c-text);
+  pointer-events: none;
+  min-width: 170px;
+  backdrop-filter: blur(6px);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
+  z-index: 5;
+}
+
+.tt-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 6px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid var(--c-border);
+}
+
+.tt-type {
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+
+.tt-strike {
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.tt-kind {
+  font-size: 9px;
+  letter-spacing: 0.2em;
+  color: var(--c-muted);
+  border: 1px solid var(--c-border);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.marker-tooltip {
+  min-width: 200px;
+}
+
+.tt-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 2px 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.tt-row span {
+  color: var(--c-muted);
+}
+
+.tt-row b {
+  font-weight: 500;
+  color: var(--c-text);
+}
+
+/* Discoverability whisper at the foot of the marker tooltip — the chevron
+   itself is clickable (pins the position card). */
+.tt-hint {
+  margin-top: 4px;
+  padding-top: 3px;
+  border-top: 1px solid var(--c-border);
+  color: var(--c-muted);
+  font-size: 10px;
+  text-align: center;
+  letter-spacing: 0.04em;
+}
+

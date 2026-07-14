@@ -1,0 +1,706 @@
+/* ============ DECISION-REPLAY GHOST LOG ============ */
+
+/* Floating tape log of her real fills revealed so far during replay. */
+.ghost-log {
+  position: fixed;
+  right: 14px;
+  bottom: 96px;
+  z-index: 60;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  max-width: 240px;
+  opacity: 0.94;
+}
+
+.ghost-log-head {
+  color: var(--c-muted);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  margin-bottom: 4px;
+}
+
+.ghost-log-row {
+  display: flex;
+  gap: 8px;
+  padding: 1px 0;
+  color: var(--c-text);
+}
+
+.gl-time { color: var(--c-muted); }
+
+.ghost-log-foot {
+  color: var(--c-muted);
+  font-size: 10px;
+  margin-top: 4px;
+}
+
+/* ============ BUS STOP 🚏 (spec-bus-stop.md) ============ */
+
+/* Floating timetable card: the called coordinate, countdown/result, and the
+   contract picks. Fixed on the right like the ghost log, above the fold. */
+.busstop-panel {
+  position: fixed;
+  right: 14px;
+  top: 110px;
+  z-index: 62;
+  width: 308px;
+  background: var(--c-surface);
+  border: 1px solid;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+}
+
+.bs-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 6px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid var(--c-border);
+}
+.bs-title {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  color: var(--c-muted);
+}
+.bs-coord {
+  font-size: 12.5px;
+  font-weight: 600;
+  margin-left: auto;
+}
+.bs-x {
+  background: none;
+  border: none;
+  color: var(--c-muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 4px;
+}
+.bs-x:hover { color: var(--c-text); }
+
+.bs-status {
+  font-size: 11px;
+  margin-bottom: 8px;
+  letter-spacing: 0.03em;
+}
+
+.bs-grid {
+  display: grid;
+  grid-template-columns: 1fr 48px 44px 44px 44px 40px;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 0;
+}
+.bs-grid-head {
+  color: var(--c-muted);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  border-bottom: 1px solid var(--c-border);
+  padding-bottom: 3px;
+  margin-bottom: 2px;
+}
+.bs-row { color: var(--c-text); }
+.bs-row.bs-tenx {
+  background: color-mix(in srgb, var(--c-accent) 10%, transparent);
+  border-radius: 4px;
+}
+.bs-strike { font-weight: 600; }
+.bs-buy {
+  background: none;
+  border: 1px solid;
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 2px 0;
+  cursor: pointer;
+  transition: background 140ms;
+}
+.bs-buy:hover { background: rgba(255, 255, 255, 0.08); }
+
+.bs-note {
+  color: var(--c-muted);
+  font-size: 9.5px;
+  margin-top: 6px;
+  line-height: 1.5;
+}
+
+.bs-foot {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+.bs-cancel {
+  background: none;
+  border: 1px solid var(--c-border);
+  border-radius: 4px;
+  color: var(--c-muted);
+  font-size: 9.5px;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+.bs-cancel:hover { color: var(--c-loss, #e07d8a); border-color: var(--c-loss, #e07d8a); }
+
+/* ============ JOURNAL ============ */
+
+.journal-panel {
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: 10px;
+  width: min(560px, 94vw);
+  max-height: 82vh;
+  display: flex;
+  flex-direction: column;
+  padding: 14px 16px;
+  gap: 10px;
+}
+
+.journal-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.journal-title {
+  font-size: 12px;
+  letter-spacing: 0.15em;
+  color: var(--c-text);
+}
+
+.journal-total {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.journal-close {
+  margin-left: auto;
+}
+
+.journal-curve {
+  width: 100%;
+  height: 120px;
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  background: var(--c-bg);
+}
+
+.journal-table {
+  overflow-y: auto;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.journal-row {
+  display: grid;
+  grid-template-columns: 1.5fr 0.7fr 0.7fr 0.8fr 1.2fr 1.2fr;
+  gap: 6px;
+  padding: 4px 2px;
+  border-bottom: 1px solid var(--c-border);
+  color: var(--c-text);
+}
+
+.journal-row span:nth-child(n+2) { text-align: right; }
+
+.journal-row-head {
+  color: var(--c-muted);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  position: sticky;
+  top: 0;
+  background: var(--c-surface);
+}
+
+.journal-empty {
+  color: var(--c-muted);
+  font-size: 12px;
+  padding: 18px 4px;
+}
+
+.journal-note {
+  color: var(--c-muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.th-journal-btn {
+  margin-left: auto;
+  padding: 1px 7px;
+}
+
+/* ============ MODAL ============ */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  backdrop-filter: blur(4px);
+}
+
+.modal {
+  background: var(--c-surface);
+  border: 1px solid;
+  border-radius: 14px;
+  padding: 20px 22px;
+  width: min(420px, 100%);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.7);
+  animation: modalIn 220ms cubic-bezier(0.2, 0.9, 0.3, 1.1);
+}
+
+@keyframes modalIn {
+  from { opacity: 0; transform: scale(0.92) translateY(8px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+.modal-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding-bottom: 14px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--c-border);
+}
+
+.modal-type {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+}
+
+.modal-strike {
+  font-size: 26px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--c-text);
+}
+
+.modal-exp {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--c-muted);
+  letter-spacing: 0.2em;
+  border: 1px solid var(--c-border);
+  padding: 3px 6px;
+  border-radius: 4px;
+}
+
+.greek-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px 18px;
+  margin-bottom: 18px;
+}
+
+.greek-grid > div {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-variant-numeric: tabular-nums;
+}
+
+.greek-grid span {
+  color: var(--c-muted);
+  font-size: 11px;
+}
+
+.greek-grid b {
+  color: var(--c-text);
+  font-weight: 500;
+}
+
+.qty-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 0;
+  border-top: 1px solid var(--c-border);
+  border-bottom: 1px solid var(--c-border);
+  margin-bottom: 14px;
+}
+
+.qty-label {
+  color: var(--c-muted);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+}
+
+.qty-controls {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.qty-chips {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.qty-chip {
+  height: 26px;
+  min-width: 26px;
+  padding: 0 7px;
+  border-radius: 7px;
+  background: var(--c-surfaceAlt);
+  border: 1px solid var(--c-border);
+  color: var(--c-muted);
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.qty-chip:hover {
+  border-color: var(--c-accent);
+  color: var(--c-accent);
+}
+
+.qty-chip.active {
+  color: var(--c-accent);
+  border-color: var(--c-accent);
+}
+
+.qty-stepper {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.qty-stepper button {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  background: var(--c-surfaceAlt);
+  border: 1px solid var(--c-border);
+  color: var(--c-text);
+  font-size: 18px;
+  line-height: 1;
+}
+
+.qty-stepper button:hover {
+  border-color: var(--c-accent);
+  color: var(--c-accent);
+}
+
+.qty-value {
+  font-size: 18px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  min-width: 32px;
+  text-align: center;
+}
+
+.order-kind {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.kind-btn {
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 8px;
+  background: var(--c-surfaceAlt);
+  border: 1px solid var(--c-border);
+  color: var(--c-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.kind-btn.active {
+  color: var(--c-accent);
+  border-color: var(--c-accent);
+}
+
+.limit-input {
+  width: 84px;
+  height: 32px;
+  padding: 0 8px;
+  border-radius: 8px;
+  background: var(--c-surfaceAlt);
+  border: 1px solid var(--c-border);
+  color: var(--c-text);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.limit-input:disabled {
+  opacity: 0.4;
+}
+
+.pos-row-click {
+  cursor: pointer;
+}
+
+.pos-inspect {
+  width: min(440px, 94vw);
+}
+
+/* Replay mode (desktop-only practice controls) */
+.replay-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: 8px;
+  margin-bottom: 6px;
+  font-size: 12px;
+}
+
+.replay-label {
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+
+.replay-hint {
+  color: var(--c-muted);
+  font-size: 11px;
+}
+
+.replay-speed {
+  height: 30px;
+  padding: 0 8px;
+  border-radius: 8px;
+  background: var(--c-surfaceAlt);
+  border: 1px solid var(--c-border);
+  color: var(--c-text);
+  font-size: 12px;
+}
+
+/* Replay day picker — calendar popover */
+.replay-cal {
+  position: relative;
+}
+.replay-cal-field {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 8px;
+  background: var(--c-surfaceAlt);
+  border: 1px solid var(--c-border);
+  color: var(--c-text);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 140ms;
+}
+.replay-cal-icon { font-size: 12px; }
+.replay-cal-text { font-variant-numeric: tabular-nums; }
+
+.replay-cal-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 40;
+  width: 232px;
+  padding: 10px;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+.replay-cal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.replay-cal-title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+.replay-cal-nav {
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  background: transparent;
+  border: 1px solid var(--c-border);
+  color: var(--c-text);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+.replay-cal-nav:hover:not(:disabled) { background: var(--c-surfaceAlt); }
+.replay-cal-nav:disabled { opacity: 0.3; cursor: default; }
+
+.replay-cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 3px;
+}
+.replay-cal-wd {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 22px;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--c-muted);
+}
+.replay-cal-empty { height: 28px; }
+.replay-cal-day {
+  height: 28px;
+  border-radius: 6px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--c-text);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: background 120ms;
+}
+.replay-cal-day:hover:not(:disabled):not(.sel) { background: var(--c-surfaceAlt); }
+.replay-cal-day:disabled { opacity: 0.22; cursor: default; }
+
+.replay-scrub {
+  flex: 1;
+  accent-color: var(--c-accent);
+}
+
+/* Play button breathes during the 5s lead-in before the tape rolls. */
+.replay-leadin {
+  color: var(--c-accent);
+  border-color: var(--c-accent);
+  animation: replay-leadin-pulse 1s ease-in-out infinite;
+}
+@keyframes replay-leadin-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 transparent; }
+  50% { opacity: 0.55; box-shadow: 0 0 0 3px color-mix(in srgb, var(--c-accent) 30%, transparent); }
+}
+
+.replay-time {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.replay-exit {
+  margin-left: auto;
+}
+
+.replay-active .replay-exit {
+  margin-left: 0;
+}
+
+@media (max-width: 720px) {
+  .replay-bar, .tf-replay, .qs-replay, .ghost-log, .busstop-panel { display: none; } /* desktop-only by design */
+}
+
+/* The mascot doubles as the totoro-detector toggle. */
+.mascot-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  transition: filter 200ms, opacity 200ms;
+}
+
+.mascot-btn.off {
+  filter: grayscale(0.85);
+  opacity: 0.55;
+}
+
+/* Hover variant: floats near the cursor, never traps the mouse. */
+.pos-hover-card {
+  width: 340px;
+  pointer-events: auto; /* clickable: mouse onto it to open the order window */
+  cursor: pointer;
+  z-index: 60;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+  transform: scale(0.7); /* 30% smaller — uniform shrink keeps graph/text proportions */
+  transform-origin: top right; /* stay tucked near the cursor (card opens leftward) */
+  /* Override .modal's modalIn — it animated transform to scale(1), flashing the
+     card full-size for 220ms before snapping back to 0.7. End the pop-in at 0.7. */
+  animation: hoverCardIn 180ms cubic-bezier(0.2, 0.9, 0.3, 1.1);
+}
+
+@keyframes hoverCardIn {
+  from { opacity: 0; transform: scale(0.64) translateY(6px); }
+  to   { opacity: 1; transform: scale(0.7) translateY(0); }
+}
+
+.pos-inspect-graph {
+  width: 100%;
+  height: 150px;
+  display: block;
+  margin: 10px 0 6px;
+}
+
+.risk-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 18px;
+}
+
+.risk-row span {
+  color: var(--c-muted);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.risk-row b {
+  font-size: 22px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.btn-ghost {
+  flex: 1;
+  height: 44px;
+  border-radius: 8px;
+  border: 1px solid var(--c-border);
+  background: transparent;
+  color: var(--c-muted);
+  font-weight: 600;
+  letter-spacing: 0.14em;
+}
+
+.btn-ghost:hover {
+  color: var(--c-text);
+  border-color: var(--c-text);
+}
+
+.btn-execute {
+  flex: 2;
+  height: 44px;
+  border-radius: 8px;
+  border: 0;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  font-size: 13px;
+  transition: filter 120ms, transform 120ms;
+}
+
+.btn-execute:hover {
+  filter: brightness(1.08);
+  transform: translateY(-1px);
+}
+
+.btn-execute:active {
+  transform: translateY(0);
+}
+
