@@ -2495,6 +2495,26 @@ button {
 }
 .th-rowwrap:hover .th-note-btn { opacity: 1; }
 .th-note-btn.has { opacity: 0.75; color: var(--c-accent); }
+/* 📸 fill snapshots: the camera earns pixels only when a shot exists; the
+   still unfolds under its fill, full row width, folded again on click. */
+.th-shot-btn {
+  opacity: 0.55;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0 2px;
+  filter: grayscale(1);
+  transition: opacity 140ms, filter 140ms;
+}
+.th-rowwrap:hover .th-shot-btn, .th-shot-btn.on { opacity: 1; filter: none; }
+.th-shot {
+  display: block;
+  width: calc(100% - 28px);
+  margin: 0 14px 8px;
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+}
 .th-note {
   padding: 0 14px 7px 108px;
   font-size: 11px;
@@ -2532,8 +2552,12 @@ button {
   /* Declutter the header on mobile: drop branding/labels, keep the live data. */
   .title-block { display: none; }          /* drop "TotoroTrader" + "0DTE EXECUTION" subtitle */
   .expiry-word { display: none; }          /* drop "EXPIRY ·", keep the date */
-  .acct-feed { display: flex; }            /* show ● LIVE/SIM under PAPER */
-  .acct-id { display: none; }              /* keep the PAPER/LIVE badge; id is in the tooltip */
+  .acct-feed { display: flex; }            /* the feed dot survives; color = state */
+  .acct-feed .feed-word { display: none; } /* kisa 2026-07-13: the LIVE/OFFLINE word
+                                              eats header space a phone doesn't have —
+                                              the dot carries the state, the tooltip
+                                              carries the account */
+  .acct-id { display: none; }              /* id is in the tooltip */
   .totoro-wrap { width: 34px; height: 34px; }
 
   /* Flatten the two header groups into one row so PAPER/LIVE sits next to the

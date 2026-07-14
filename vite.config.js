@@ -7,8 +7,12 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Proxy the data WebSocket to the Node bridge so the frontend can always talk
-// to a same-origin /ws regardless of which server is serving the page.
-const wsProxy = { '/ws': { target: 'ws://localhost:8787', ws: true } };
+// to a same-origin /ws regardless of which server is serving the page —
+// likewise /shots (📸 journal fill snapshots live bridge-side).
+const wsProxy = {
+  '/ws': { target: 'ws://localhost:8787', ws: true },
+  '/shots': { target: 'http://localhost:8787' }
+};
 
 // Serve the dev/preview server over HTTPS using the mkcert cert (SANs: localhost,
 // 127.0.0.1, and the LAN IP) so the phone PWA works against the DEV server too —

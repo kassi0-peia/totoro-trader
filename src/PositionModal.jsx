@@ -5,10 +5,11 @@ import { plDollars } from './pl.js';
 // intraday premium graph (quote-mid line, including the overnight session).
 // With `anchor` it renders as a floating hover card (no backdrop, no buttons);
 // without, it's the pinned modal (click / touch path).
-export default function PositionModal({ pos, series, theme, quote, onClose, onRefresh, anchor = null, onAttachExit = null, executionEnabled = false, onActivate = null, onHoverChange = null, fills = null }) {
+export default function PositionModal({ pos, series, theme, quote, onClose, onRefresh, anchor = null, onAttachExit = null, executionEnabled = false, trailOk = false, onActivate = null, onHoverChange = null, fills = null }) {
   const canvasRef = useRef(null);
   const [tpStr, setTpStr] = useState('');
   const [slStr, setSlStr] = useState('');
+  const [trailStr, setTrailStr] = useState('');
   const [cursor, setCursor] = useState(null); // {x,y} over the premium graph
   const [view, setView] = useState(null);     // {lo,hi} times for the scroll-zoom window; null = full
 
@@ -299,22 +300,28 @@ export default function PositionModal({ pos, series, theme, quote, onClose, onRe
         {!anchor && onAttachExit && pos.status === 'open' && (() => {
           const tp = tpStr.trim() === '' ? null : parseFloat(tpStr);
           const sl = slStr.trim() === '' ? null : parseFloat(slStr);
-          const valid = (tp != null || sl != null) &&
+          const trail = trailStr.trim() === '' ? null : parseFloat(trailStr);
+          const valid = (tp != null || sl != null || trail != null) &&
             (tp == null || (Number.isFinite(tp) && tp > 0)) &&
-            (sl == null || (Number.isFinite(sl) && sl > 0));
+            (sl == null || (Number.isFinite(sl) && sl > 0)) &&
+            (trail == null || (Number.isFinite(trail) && trail > 0));
           return (
             <div className="qty-row">
-              <span className="qty-label" data-tip="Resting exits for this position — TP is a native limit (works overnight); SL is an IBKR-simulated stop. Both legs OCA: one fills, the other cancels.">Exit</span>
+              <span className="qty-label" data-tip="Resting exits — TP is a native limit (works overnight); SL is an IBKR-simulated stop; TRAIL is a stop that rides $X behind the premium's best price, moved at IBKR's servers. Sent legs OCA: one fills, the rest cancel.">Exit</span>
               <div className="order-kind">
                 <input className="limit-input" type="number" step="0.05" min="0.05" inputMode="decimal"
                   value={tpStr} placeholder="TP" onChange={(e) => setTpStr(e.target.value)} aria-label="take profit" />
                 <input className="limit-input" type="number" step="0.05" min="0.05" inputMode="decimal"
                   value={slStr} placeholder="SL" onChange={(e) => setSlStr(e.target.value)} aria-label="stop loss" />
+                {trailOk && (
+                  <input className="limit-input" type="number" step="0.05" min="0.05" inputMode="decimal"
+                    value={trailStr} placeholder="TRL" onChange={(e) => setTrailStr(e.target.value)} aria-label="trailing stop amount" />
+                )}
                 <button
                   className="kind-btn"
                   disabled={!executionEnabled || !valid}
                   style={valid && executionEnabled ? { color: color, borderColor: color } : undefined}
-                  onClick={() => valid && onAttachExit(pos, tp, sl)}
+                  onClick={() => valid && onAttachExit(pos, tp, sl, trail)}
                 >ATTACH</button>
               </div>
             </div>

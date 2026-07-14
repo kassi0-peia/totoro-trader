@@ -1296,31 +1296,38 @@ export default function App() {
     if (!sent) showToast('Cancel not sent — not connected', 'err');
   };
 
-  // Attach resting exits (TP limit and/or SL stop) to an EXISTING open
-  // position. Both legs share an OCA group, so one filling cancels the other.
-  // The TP is a native limit (works overnight); the SL is IBKR-simulated.
-  const attachExit = (pos, tp, sl) => {
+  // Attach resting exits (TP limit, SL stop, and/or a TRAIL trailing stop) to
+  // an EXISTING open position. Sent legs share an OCA group, so one filling
+  // cancels the rest. The TP is a native limit (works overnight); SL and TRAIL
+  // are IBKR-simulated stops for options. The trailing itself runs at IBKR's
+  // servers — their machinery, not code in this app, so it stays off our
+  // robot line.
+  const attachExit = (pos, tp, sl, trail = null) => {
     if (replayActive) { showToast('Exits aren\'t simulated in replay — close manually', 'err'); return; }
     if (!feed.executionEnabled) { showToast('Execution disabled', 'err'); return; }
+    // Capability gate, not just UI polish: a bridge that predates `trail`
+    // would ignore the field and route this leg as a naked MKT close.
+    if (trail != null && !feed.caps?.trail) { showToast('TRAIL needs the updated bridge — restart totoro-bridge first', 'err'); return; }
     if (!pos || pos.status !== 'open') return;
     const action = pos.side === 'long' ? 'SELL' : 'BUY';
     const base = { intent: 'close', action, strike: pos.strike, right: rightOf(pos.type), qty: pos.qty, expiry: pos.expiry, ...symbolFieldFor(pos) };
-    const oca = tp != null && sl != null ? `exit-${pos.strike}${rightOf(pos.type)}-${Date.now().toString(36)}` : null;
+    const wanted = [tp, sl, trail].filter((v) => v != null).length;
+    const oca = wanted >= 2 ? `exit-${pos.strike}${rightOf(pos.type)}-${Date.now().toString(36)}` : null;
     // Send each leg separately and track each ref. A truthy ref from ONE leg must
-    // not be read as "both attached" — if the socket drops between sends, the TP
+    // not be read as "all attached" — if the socket drops between sends, the TP
     // can fire while the SL silently fails, leaving you thinking you have a stop
     // you don't. Report exactly what reached the bridge.
     const tpRef = tp != null ? feed.sendOrder({ ...base, limit: tp, ...(oca ? { ocaGroup: oca } : {}) }) : null;
     const slRef = sl != null ? feed.sendOrder({ ...base, stop: sl, ...(oca ? { ocaGroup: oca } : {}) }) : null;
-    const ref = tpRef ?? slRef;
+    const trRef = trail != null ? feed.sendOrder({ ...base, trail, ...(oca ? { ocaGroup: oca } : {}) }) : null;
+    const ref = tpRef ?? slRef ?? trRef;
     if (!ref) { showToast('Exit not sent — not connected', 'err'); return; }
-    // Partial attach: one leg wanted-and-sent, the other wanted-but-failed.
-    const tpMissed = tp != null && !tpRef;
-    const slMissed = sl != null && !slRef;
-    if (tpMissed || slMissed) {
-      showToast(`Exit half-attached — ${slMissed ? 'STOP did not send' : 'TP did not send'}, connection dropped`, 'err');
+    // Partial attach: some legs wanted-and-sent, others wanted-but-failed.
+    const missed = [tp != null && !tpRef && 'TP', sl != null && !slRef && 'STOP', trail != null && !trRef && 'TRAIL'].filter(Boolean);
+    if (missed.length) {
+      showToast(`Exit part-attached — ${missed.join(' + ')} did not send, connection dropped`, 'err');
     } else {
-      showToast(`Exit attached ${tp != null ? `TP $${tp.toFixed(2)} ` : ''}${sl != null ? `SL $${sl.toFixed(2)}` : ''}`, 'ok');
+      showToast(`Exit attached ${tp != null ? `TP $${tp.toFixed(2)} ` : ''}${sl != null ? `SL $${sl.toFixed(2)} ` : ''}${trail != null ? `TRAIL $${trail.toFixed(2)}` : ''}`, 'ok');
     }
     setPositions((prev) => prev.map((p) => (p.id === pos.id ? { ...p, closeRef: ref } : p)));
     setInspectId(null);
@@ -1491,6 +1498,32 @@ export default function App() {
       return true;
     }
   });
+
+  // 📸 Fill snapshots: when a fresh blotter row lands — a fill witnessed live,
+  // just now — save one downscaled still of the chart canvas into the journal,
+  // bridge-side: the tape as it looked when the trigger was pulled. What does
+  // NOT get a shot: the first trades broadcast of a session and reconnect
+  // backfills (history — a frame of NOW against an old fill would lie), replay
+  // (the canvas shows a replayed day), and rows already carrying one.
+  const shotSeenRef = useRef(null);
+  useEffect(() => {
+    const rows = feed.trades;
+    if (!Array.isArray(rows)) return;
+    if (shotSeenRef.current == null) {
+      shotSeenRef.current = new Set(rows.map((r) => r.id));
+      return;
+    }
+    const seen = shotSeenRef.current;
+    const fresh = rows.filter((r) => !seen.has(r.id));
+    if (!fresh.length) return;
+    fresh.forEach((r) => seen.add(r.id));
+    if (replayActive) return;
+    const witnessed = fresh.filter((r) => !r.shot && Date.now() - (r.ts ?? 0) < 60_000);
+    if (!witnessed.length) return;
+    const frame = chartApiRef.current?.frame?.();
+    if (!frame) return;
+    witnessed.forEach((r) => feed.sendFillShot(r.id, frame));
+  }, [feed.trades, replayActive]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fill flash, fresh-gated: the `now` tick (800ms) clears the prop shortly
   // after the ~400ms CSS animation ends; the ts retriggers it on a same-leg
@@ -1875,6 +1908,7 @@ export default function App() {
             onRefresh={(p) => feed.requestOptHistory({ ...((shown.symbol ?? 'SPX') !== 'SPX' ? { symbol: shown.symbol } : {}), strike: p.strike, right: rightOf(p.type), expiry: p.expiry })}
             onAttachExit={attachExit}
             executionEnabled={feed.executionEnabled}
+            trailOk={!!feed.caps?.trail}
             onActivate={() => {
               if (cardHideRef.current) { clearTimeout(cardHideRef.current); cardHideRef.current = null; }
               cardHoveredRef.current = false;

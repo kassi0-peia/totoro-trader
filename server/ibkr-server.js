@@ -40,6 +40,7 @@ const DIST_DIR = path.resolve(__dirname, '..', 'dist');
 const BASIS_FILE = path.join(__dirname, '.basis-cache.json');
 const TRADES_FILE = path.join(__dirname, '.trades.json');
 const JOURNAL_FILE = path.join(__dirname, '.journal.json');
+const SHOTS_DIR = path.join(__dirname, '.journal-shots'); // 📸 fill snapshots (client-rendered chart stills)
 
 // HTTPS is opt-in (TLS=1 or explicit TLS_CERT/TLS_KEY) so the default HTTP mode
 // keeps the dev /ws proxy and the Chrome-flag install path working unchanged.
@@ -272,6 +273,7 @@ wss.on('connection', (ws) => {
     else if (msg.type === 'deactivateSymbol') handleDeactivateSymbol(ws, msg);
     else if (msg.type === 'watchlist') handleWatchlist(ws, msg);
     else if (msg.type === 'fillNote') handleFillNote(ws, msg);
+    else if (msg.type === 'fillShot') handleFillShot(ws, msg);
     else if (msg.type === 'armed') handleArmed(ws, msg);
   });
 });
@@ -323,6 +325,28 @@ function serveStatic(req, res) {
       fs.createReadStream(caPath).pipe(res);
       return;
     }
+  }
+
+  // 📸 journal fill snapshots — their own dir, strict filename shape (row id +
+  // known image ext), so this route can never reach outside SHOTS_DIR.
+  if (reqPathRaw.startsWith('/shots/')) {
+    const name = reqPathRaw.slice('/shots/'.length);
+    if (!/^\d+\.(webp|png|jpg)$/.test(name)) {
+      res.writeHead(404, { 'content-type': 'text/plain' });
+      res.end('Not found');
+      return;
+    }
+    fs.readFile(path.join(SHOTS_DIR, name), (err, data) => {
+      if (err) {
+        res.writeHead(404, { 'content-type': 'text/plain' });
+        res.end('Not found');
+        return;
+      }
+      const type = name.endsWith('.webp') ? 'image/webp' : name.endsWith('.png') ? 'image/png' : 'image/jpeg';
+      res.writeHead(200, { 'content-type': type, 'cache-control': 'public, max-age=3600' });
+      res.end(data);
+    });
+    return;
   }
 
   if (!fs.existsSync(DIST_DIR)) {
@@ -2329,6 +2353,12 @@ function handleOrderRequest(ws, msg) {
   // the TP limit leg is native and works all night.
   const stop = Number(msg.stop);
   const isStop = !isLimit && Number.isFinite(stop) && stop > 0;
+  // Standalone trailing stop (TRAIL, auxPrice = trail amount in premium $):
+  // the stop rides that far behind the option's best price and is MOVED AT
+  // IBKR'S SERVERS — no repricing logic lives in this bridge. Simulated for
+  // options like STP, so it inherits the same overnight caveats.
+  const trail = Number(msg.trail);
+  const isTrail = !isLimit && !isStop && Number.isFinite(trail) && trail > 0;
   // OCA group: paired exits cancel each other when one fills.
   const ocaGroup = typeof msg.ocaGroup === 'string' && msg.ocaGroup ? msg.ocaGroup : null;
   // Fill-quality reference (mid/ask seen at send — stamped onto the fill row)
@@ -2341,9 +2371,10 @@ function handleOrderRequest(ws, msg) {
   const orderId = reqSeq++;
   const order = {
     action,
-    orderType: isLimit ? 'LMT' : isStop ? 'STP' : 'MKT',
+    orderType: isLimit ? 'LMT' : isStop ? 'STP' : isTrail ? 'TRAIL' : 'MKT',
     ...(isLimit ? { lmtPrice: limit } : {}),
     ...(isStop ? { auxPrice: stop } : {}),
+    ...(isTrail ? { auxPrice: trail } : {}),
     ...(ocaGroup ? { ocaGroup, ocaType: 1 } : {}),
     totalQuantity: qty,
     tif: 'DAY',
@@ -2355,7 +2386,7 @@ function handleOrderRequest(ws, msg) {
     // order placed outside RTH would be held until the regular open.
     outsideRth: true
   };
-  orders.set(orderId, { clientRef, symbol: orderSymbol, action, strike, right, expiry, qty, orderType: order.orderType, limit: isLimit ? limit : isStop ? stop : null, status: 'submitted', filled: 0, avgFillPrice: 0, ...(hasRef ? { refAtSend } : {}) });
+  orders.set(orderId, { clientRef, symbol: orderSymbol, action, strike, right, expiry, qty, orderType: order.orderType, limit: isLimit ? limit : isStop ? stop : isTrail ? trail : null, status: 'submitted', filled: 0, avgFillPrice: 0, ...(hasRef ? { refAtSend } : {}) });
   // Track every id we hand to IBKR so a mid-bracket throw can unwind cleanly.
   // The parent goes out transmit:false when children exist; if a child placeOrder
   // throws, the parent is sitting HELD in TWS and must be cancelled, not just
@@ -2406,7 +2437,7 @@ function handleOrderRequest(ws, msg) {
       }
     }
     const label = orderSymbol === 'SPX' ? 'SPXW' : orderSymbol;
-    console.log(`[ibkr] placed ${action} ${isLimit ? `LMT@${limit}` : isStop ? `STP@${stop}` : 'MKT'}${ocaGroup ? ' [oca]' : ''} ${qty} ${label} ${strike}${right} ${expiry} (order ${orderId})`);
+    console.log(`[ibkr] placed ${action} ${isLimit ? `LMT@${limit}` : isStop ? `STP@${stop}` : isTrail ? `TRAIL@${trail}` : 'MKT'}${ocaGroup ? ' [oca]' : ''} ${qty} ${label} ${strike}${right} ${expiry} (order ${orderId})`);
     broadcastOrders();
     send({ type: 'orderAck', clientRef, orderId, accepted: true });
   } catch (e) {
@@ -2707,6 +2738,11 @@ function snapshotMsg() {
     account,
     accountType,
     executionEnabled,
+    // Capability handshake: the client must never send an order field this
+    // bridge won't understand — an old bridge ignoring `trail` would route
+    // the leg as naked MKT. New order-shaping fields get a flag here, and
+    // the client hides the control until its bridge advertises it.
+    caps: { trail: true },
     trades,
     positions: positionsList(),
     orders: workingOrdersList(),
@@ -2948,6 +2984,40 @@ function handleFillNote(_ws, msg) {
       broadcast({ type: 'noteResult', id, note: text || null, day });
       return;
     }
+  }
+}
+
+// 📸 fill snapshot: one client-rendered still of the chart at fill time —
+// the bridge only persists what the client saw (it renders nothing itself).
+// The image lands in SHOTS_DIR, the row gains `shot: <filename>` (notes
+// pattern), and /shots/<file> serves it back. Size-capped: a downscaled
+// frame runs ~100KB; anything near the cap is not a chart frame.
+const SHOT_MAX_CHARS = 2_500_000;
+function handleFillShot(_ws, msg) {
+  const id = Number(msg.id);
+  if (!Number.isFinite(id)) return;
+  const s = String(msg.dataUrl ?? '');
+  if (s.length > SHOT_MAX_CHARS) return;
+  const m = /^data:image\/(webp|png|jpeg);base64,([A-Za-z0-9+/=]+)$/.exec(s);
+  if (!m) return;
+  const file = `${id}.${m[1] === 'jpeg' ? 'jpg' : m[1]}`;
+  const apply = (row, save, day) => {
+    try {
+      fs.mkdirSync(SHOTS_DIR, { recursive: true });
+      fs.writeFileSync(path.join(SHOTS_DIR, file), Buffer.from(m[2], 'base64'));
+    } catch (err) {
+      console.error('[ibkr] fill-shot write failed:', err);
+      return;
+    }
+    row.shot = file;
+    save();
+    broadcast({ type: 'shotResult', id, shot: file, day });
+  };
+  const t = trades.find((r) => r.id === id);
+  if (t) return apply(t, saveTrades, tradesDate);
+  for (const [day, rows] of Object.entries(journal)) {
+    const r = (rows || []).find((x) => x.id === id);
+    if (r) return apply(r, saveJournal, day);
   }
 }
 

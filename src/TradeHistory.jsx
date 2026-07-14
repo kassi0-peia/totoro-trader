@@ -38,6 +38,9 @@ function etToday() {
 function TradeRow({ t, theme, editing = false, onEdit = null, onSave = null }) {
   const buy = t.action === 'BUY';
   const c = t.right === 'C' ? theme.callLine : theme.putLine;
+  // 📸 fill snapshot: rows that carry one grow a camera; click unfolds the
+  // still of the tape as it looked at fill time, click again folds it away.
+  const [showShot, setShowShot] = useState(false);
   return (
     <div className="th-rowwrap">
       <div className="th-row">
@@ -51,6 +54,16 @@ function TradeRow({ t, theme, editing = false, onEdit = null, onSave = null }) {
         >
           @ ${Number(t.price).toFixed(2)}
         </span>
+        {t.shot && (
+          <button
+            className={`th-shot-btn${showShot ? ' on' : ''}`}
+            onClick={(e) => { e.stopPropagation(); setShowShot((v) => !v); }}
+            data-tip={showShot ? 'Hide the tape' : 'The tape at fill time'}
+            aria-label="Fill snapshot"
+          >
+            📷
+          </button>
+        )}
         {onEdit && (
           <button
             className={`th-note-btn${t.note ? ' has' : ''}`}
@@ -62,6 +75,9 @@ function TradeRow({ t, theme, editing = false, onEdit = null, onSave = null }) {
           </button>
         )}
       </div>
+      {t.shot && showShot && (
+        <img className="th-shot" src={`/shots/${t.shot}`} alt={`Chart at ${fmtTime(t.ts)} fill`} loading="lazy" />
+      )}
       {editing ? (
         <input
           className="th-note-input"
