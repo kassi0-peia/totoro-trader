@@ -1073,20 +1073,21 @@ function wireHandlers(api) {
       if (typeof time === 'string' && time.startsWith('finished')) {
         subs.delete(reqId);
         resource.historyReqId = null;
-        s.series.edge = nextCandleEdge(Date.now());
-        if (resource.price == null && s.series.candles.length) resource.price = s.series.candles[s.series.candles.length - 1].close;
+        finishHistoricalSeed(resource.series, s.bars, { maxCandles: GUEST_HISTORY_CANDLES });
+        const candles = resource.series.candles;
+        if (resource.price == null && candles.length) resource.price = candles[candles.length - 1].close;
         if (resource.expiry != null && resource.price != null && resource.chain.size === 0) {
           resource.strikeStep = deriveStrikeStep(resource.strikes, resource.price);
           setGuestChain(resource);
         }
         publishGuestResource(resource, guestMsg(resource));
-        console.log(`[ibkr] guest ${resource.symbol} history seed complete (${s.series.candles.length} bars)`);
+        console.log(`[ibkr] guest ${resource.symbol} history seed complete (${candles.length} bars)`);
         return;
       }
       const t = parseHistTime(time);
       if (t != null) {
-        s.series.candles.push({ t, open, high, low, close, volume: Math.max(volume, 0) });
-        if (s.series.candles.length > GUEST_HISTORY_CANDLES) s.series.candles = s.series.candles.slice(-GUEST_HISTORY_CANDLES);
+        s.bars.push({ t, open, high, low, close, volume: Math.max(volume, 0) });
+        if (s.bars.length > GUEST_HISTORY_CANDLES) s.bars = s.bars.slice(-GUEST_HISTORY_CANDLES);
       }
       return;
     }
@@ -1119,6 +1120,7 @@ function wireHandlers(api) {
     const series = s.kind === 'spx-hist' ? spx : s.kind === 'es-hist' ? es : null;
     if (!series) return;
     if (typeof time === 'string' && time.startsWith('finished')) {
+      subs.delete(reqId); // release the completed hist sub (guest/basis/spy all do)
       finishHistoricalSeed(series, s.bars, { maxCandles: HISTORY_CANDLES });
       const lastClose = series.candles.length ? series.candles[series.candles.length - 1].close : null;
       if (s.kind === 'spx-hist' && spxPrice == null) spxPrice = lastClose;
@@ -2058,7 +2060,12 @@ function requestGuestHistory(resource) {
   try {
     const reqId = nextRequestId();
     resource.historyReqId = reqId;
-    subs.set(reqId, guestSub(resource, 'guest-hist', { series: resource.series }));
+    // Stage history rows in `bars` and merge at completion (like the home
+    // spx/es-hist path). The live series keeps receiving first-tick ticks while
+    // this request is in flight; pushing history straight into it left the
+    // authoritative array non-monotonic with a duplicated current-minute bucket.
+    // `series` stays the resource-generation guard reference.
+    subs.set(reqId, guestSub(resource, 'guest-hist', { series: resource.series, bars: [] }));
     resource.api.reqHistoricalData(reqId, resource.contract, '', '2 D', '1 min', 'TRADES', 1, 2, false);
   } catch (error) {
     if (resource.historyReqId != null) subs.delete(resource.historyReqId);
