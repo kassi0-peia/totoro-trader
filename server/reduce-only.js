@@ -63,8 +63,20 @@ function orderRows(orders) {
   return [];
 }
 
+function normalizeStatus(value) {
+  return String(value ?? '').replaceAll(/[_\s-]/g, '').toLowerCase();
+}
+
 function orderStatus(order) {
-  return String(order?.status ?? '').replaceAll(/[_\s-]/g, '').toLowerCase();
+  return normalizeStatus(order?.status);
+}
+
+// True for any IBKR order status the exposure model treats as terminal. The
+// bridge uses this to stamp a witness on a foreign/recovered order at the
+// exact moment it goes terminal with fills, so the same-revision reservation
+// below survives the orderStatus -> position callback window.
+export function isTerminalOrderStatus(status) {
+  return TERMINAL_ORDER_STATUSES.has(normalizeStatus(status));
 }
 
 function sameAuthorityRevision(order, authority) {

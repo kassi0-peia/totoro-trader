@@ -56,7 +56,7 @@ import {
 import { createPortfolioController } from './portfolio.js';
 import { isPortfolioReady, portfolioMessage } from './portfolio-sync.js';
 import { createQuoteService } from './quote-service.js';
-import { assessReduceOnlyOrder, optionRouteKey } from './reduce-only.js';
+import { assessReduceOnlyOrder, isTerminalOrderStatus, optionRouteKey } from './reduce-only.js';
 import { createReverseCoordinator } from './reverse.js';
 import { waitForPositionAuthority } from './position-authority-fence.js';
 import { createRoutingLockStore } from './routing-lock-store.js';
@@ -709,6 +709,24 @@ function wireHandlers(api) {
     o.remaining = remaining;
     o.avgFillPrice = avgFillPrice;
     if (identity.permId != null) o.permId = identity.permId;
+    // A foreign/recovered order carries no local revision witness, so once it
+    // goes terminal with fills the reduce-only guard would count it as 0 and a
+    // second close could over-flatten before the position callback lands. Stamp
+    // the current exact-contract authority revision now; the guard then reserves
+    // this fill until a later position revision reflects it — exactly like an
+    // own order. Insufficient contract identity stays conservative (unstamped):
+    // the guard's coarse-match path already fails such a close closed.
+    if (!o.reduceOnly && isTerminalOrderStatus(status) && (filled ?? 0) > 0) {
+      const witnessAuthority = portfolio.positionAuthorityForContract(o.account, o.contract);
+      const witnessRouteKey = optionRouteKey(o.contract);
+      if (witnessRouteKey && o.account) {
+        o.reduceOnly = {
+          account: String(o.account).trim(),
+          routeKey: witnessRouteKey,
+          contractRevision: witnessAuthority.contractRevision,
+        };
+      }
+    }
     broadcastOrders();
     if (!own) return;
     broadcast({
