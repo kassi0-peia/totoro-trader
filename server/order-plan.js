@@ -290,6 +290,16 @@ export function bracketOcaGroup(parentId) {
   return `bracket:${parentId}`;
 }
 
+// openOrder merge for a record's guard-facing ocaGroup. The @stoqey/ib decoder
+// reads an UNSET broker group as the EMPTY STRING, and IBKR echoes openOrder
+// right at placement — a bare `broker ?? existing` would let that '' survive
+// and silently wipe the synthetic bracket group off a child record, reverting
+// the OCA-max exposure fix to double-counting. Treat '' as absent; a REAL
+// broker group (attached-exit OCA legs carry one) still wins over the record.
+export function mergeBrokerOcaGroup(brokerValue, existingValue) {
+  return (brokerValue || existingValue) || null;
+}
+
 export function bracketChild(plan, kind, parentId, account) {
   const takeProfit = kind === 'tp';
   const price = takeProfit ? plan.takeProfit : plan.stopLoss;
