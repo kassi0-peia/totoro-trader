@@ -41,7 +41,9 @@ test('SPX BUY without a limit remains the deliberate EXECUTE MKT route', () => {
 });
 
 test('limit, stop and trail precedence produces the matching IBKR shape', () => {
-  const limit = planOrderRequest({ ...base, limit: 2.5, stop: 2, trail: 0.5 }, context);
+  // Precedence is a close-side concern: stop/trail are close-only (see below), so
+  // exercise limit-wins-over-stop/trail on a close order.
+  const limit = planOrderRequest({ ...base, intent: 'close', action: 'SELL', limit: 2.5, stop: 2, trail: 0.5 }, context);
   assert.equal(limit.orderType, 'LMT');
   assert.equal(limit.order.lmtPrice, 2.5);
   assert.equal('auxPrice' in limit.order, false);
@@ -53,6 +55,25 @@ test('limit, stop and trail precedence produces the matching IBKR shape', () => 
   const trail = planOrderRequest({ ...base, intent: 'close', action: 'SELL', trail: 0.5 }, context);
   assert.equal(trail.orderType, 'TRAIL');
   assert.equal(trail.order.auxPrice, 0.5);
+});
+
+test('stop and trail entries are refused as close-only exits', () => {
+  // A BUY/SELL-to-open STP or TRAIL is a deferred market order; no sender emits
+  // one, so a request carrying stop/trail on open is malformed and fails closed —
+  // even when a limit is also present.
+  for (const open of [
+    { ...base, intent: 'open', action: 'BUY', stop: 5 },
+    { ...base, intent: 'open', action: 'BUY', trail: 0.5 },
+    { ...base, intent: 'open', action: 'BUY', limit: 2.5, stop: 5 },
+    { ...base, intent: 'open', action: 'SELL', limit: 2, trail: 0.5 },
+  ]) {
+    const rejected = planOrderRequest(open, context);
+    assert.equal(rejected.ok, false);
+    assert.match(rejected.reason, /close-only/);
+  }
+  // The legitimate close-side attaches are unaffected.
+  assert.equal(planOrderRequest({ ...base, intent: 'close', action: 'SELL', stop: 2 }, context).ok, true);
+  assert.equal(planOrderRequest({ ...base, intent: 'close', action: 'SELL', trail: 0.5 }, context).ok, true);
 });
 
 test('bracket planning holds the parent and transmits the final child', () => {
