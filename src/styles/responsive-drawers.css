@@ -1,0 +1,564 @@
+@media (max-width: 720px) {
+  .help-cols { grid-template-columns: 1fr; }
+}
+.cm-div { border-top: 1px solid var(--c-border); margin: 4px 0; }
+
+.modal-side-sell {
+  color: var(--c-loss, #e07d8a);
+  font-weight: 800;
+  letter-spacing: 0.12em;
+}
+.modal-short-warn {
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--c-loss, #e07d8a);
+  background: color-mix(in srgb, var(--c-loss, #e07d8a) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--c-loss, #e07d8a) 40%, transparent);
+  border-radius: 5px;
+  padding: 7px 9px;
+  margin-bottom: 12px;
+}
+
+.modal-settle-warn {
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: #e0a23a;
+  background: color-mix(in srgb, #e0a23a 12%, transparent);
+  border: 1px solid color-mix(in srgb, #e0a23a 40%, transparent);
+  border-radius: 5px;
+  padding: 7px 9px;
+  margin-bottom: 12px;
+}
+
+/* Feed status (● LIVE/SIM) stacked under the account badge — mobile only. */
+.acct-feed {
+  display: none;
+  align-items: center;
+  gap: 4px;
+  font-size: 9px;
+  letter-spacing: 0.16em;
+}
+
+.chart-area { position: relative; }
+
+/* Today's-trades slide-in drawer (peek over the chart from the right edge) */
+.trades-pull {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 22;
+  width: 15px;
+  height: 54px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-left: none;
+  border-radius: 0 7px 7px 0;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  box-shadow: 2px 2px 10px rgba(0, 0, 0, 0.3);
+  opacity: 0.85;
+  transition: left 280ms cubic-bezier(0.4, 0, 0.2, 1), opacity 140ms;
+}
+.trades-pull:hover { opacity: 1; }
+
+/* Invisible left-edge strip — hover 2s (or click) to peek the drawer open. */
+.trades-hotzone {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 22px;
+  z-index: 21;
+  cursor: pointer;
+}
+
+/* Clipping layer so the sliding drawer never spills past the chart bounds. */
+.trades-peek-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 15;
+  overflow: hidden;
+}
+.trades-scrim {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.18);
+  animation: trades-scrim-in 200ms ease both;
+}
+.trades-scrim.closing { animation: trades-scrim-out 220ms ease both; }
+@keyframes trades-scrim-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes trades-scrim-out { from { opacity: 1; } to { opacity: 0; } }
+
+.trades-drawer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: min(340px, 86%);
+  background: var(--c-surface);
+  border-right: 1px solid var(--c-border);
+  box-shadow: 10px 0 28px rgba(0, 0, 0, 0.38);
+  display: flex;
+  flex-direction: column;
+  padding: 10px 12px;
+  animation: trades-drawer-in 280ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+.trades-drawer.closing { animation: trades-drawer-out 260ms cubic-bezier(0.4, 0, 0.2, 1) both; }
+@keyframes trades-drawer-in {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(0); }
+}
+@keyframes trades-drawer-out {
+  from { transform: translateX(0); }
+  to { transform: translateX(-100%); }
+}
+.trades-drawer .trade-history {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+}
+.trades-drawer .th-list { max-height: none; flex: 1; }
+
+/* Account badge + id overlaid on the chart's top-right corner */
+/* In-flow since 2026-07-09 (kisa): lives in the symbol-search-row beside the 🔍
+   instead of floating over the chart's top-right corner. */
+.chart-acct {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* End the cluster left of the chart's ~64px price-label gutter (the old
+     float cleared it with right:72px; the row merge lost that — kisa
+     2026-07-10). The 🔍 alone stays at the edge, her 07-07 placement. */
+  margin-right: 28px;
+  transition: margin-right 160ms;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
+/* Axis premiums add a second number column to the right gutter — slide the
+   cluster further left so PAPER/🚏/⚡ never sit over it (the old float's
+   right:110px, in row terms). */
+.chart-acct--axis { margin-right: 64px; }
+.chart-acct-id {
+  color: var(--c-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.quote-strip {
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 18px;
+  padding: 8px 14px;
+  margin-bottom: 6px;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  flex-wrap: wrap;
+}
+.qs-replay {
+  margin-right: auto;        /* pin to the left; quotes stay right */
+  align-self: center;
+  height: 26px;
+  padding: 0 12px;
+  border-radius: 6px;
+  background: transparent;
+  border: 1px solid var(--c-border);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  font-family: inherit;
+  cursor: pointer;
+  transition: filter 140ms;
+}
+.qs-replay:hover { filter: brightness(1.25); }
+
+.quote-strip .qs-atm { color: var(--c-muted); font-size: 12px; letter-spacing: 0.14em; }
+.qs-leg, .qs-vix { display: inline-flex; align-items: baseline; gap: 6px; }
+.qs-regime { font-size: 12px; font-weight: 600; letter-spacing: 0.08em; white-space: nowrap; }
+.qs-tag { font-size: 12px; }
+.qs-iv { font-size: 11px; font-weight: 500; color: var(--c-muted); }
+@media (max-width: 720px) {
+  /* Keep ATM / C / P / VIX on a single line, spread across the width. */
+  .quote-strip {
+    font-size: 11px;
+    gap: 6px;
+    padding: 7px 10px;
+    flex-wrap: nowrap;
+    justify-content: space-between;
+    white-space: nowrap;
+  }
+  .quote-strip .qs-atm, .qs-tag { font-size: 11px; }
+  .qs-leg, .qs-vix { gap: 4px; }
+  .qs-iv { display: none; }
+  .qs-regime { display: none; } /* keep ATM/C/P/VIX on one line on narrow screens */
+}
+
+.fill-toast {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: #0a0c12;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
+  z-index: 15;
+  animation: fill-pop 180ms ease;
+}
+.fill-ok { background: var(--c-profit); }
+.fill-err { background: var(--c-loss); }
+.fill-warn { background: var(--c-warn); }
+@keyframes fill-pop {
+  from { opacity: 0; transform: translate(-50%, -6px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+
+.modal-note {
+  font-size: 11px;
+  text-align: center;
+  margin: 4px 0 -4px;
+}
+
+.btn-rev:disabled, .btn-close:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* ============ TRADE HISTORY (day blotter) ============ */
+
+.trade-history {
+  margin-top: 14px;
+  border: 1px solid var(--c-border);
+  border-radius: 8px;
+  background: var(--c-surface);
+  overflow: hidden;
+}
+.th-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  color: var(--c-muted);
+  border-bottom: 1px solid var(--c-border);
+}
+.th-list { max-height: 180px; overflow-y: auto; }
+.th-empty { padding: 14px; font-size: 12px; color: var(--c-muted); }
+.th-row {
+  display: grid;
+  grid-template-columns: 84px 48px 1fr 48px auto 18px;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 14px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.th-rowwrap { border-bottom: 1px solid var(--c-grid); }
+.th-rowwrap:last-child { border-bottom: none; }
+/* Fill notes: the ✎ earns pixels only on hover (accent when a note exists);
+   the note is a quiet italic line under its fill. */
+.th-note-btn {
+  opacity: 0;
+  border: none;
+  background: none;
+  color: var(--c-muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 2px;
+  transition: opacity 140ms;
+}
+.th-rowwrap:hover .th-note-btn { opacity: 1; }
+.th-note-btn.has { opacity: 0.75; color: var(--c-accent); }
+/* 📸 fill snapshots: the camera earns pixels only when a shot exists; the
+   still unfolds under its fill, full row width, folded again on click. */
+.th-shot-btn {
+  opacity: 0.55;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0 2px;
+  filter: grayscale(1);
+  transition: opacity 140ms, filter 140ms;
+}
+.th-rowwrap:hover .th-shot-btn, .th-shot-btn.on { opacity: 1; filter: none; }
+.th-shot {
+  display: block;
+  width: calc(100% - 28px);
+  margin: 0 14px 8px;
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+}
+.th-note {
+  padding: 0 14px 7px 108px;
+  font-size: 11px;
+  font-style: italic;
+  color: var(--c-muted);
+  cursor: text;
+  overflow-wrap: anywhere;
+}
+.th-note-input {
+  display: block;
+  width: calc(100% - 122px);
+  margin: 0 14px 7px 108px;
+  font: inherit;
+  font-size: 11px;
+  padding: 3px 8px;
+  background: var(--c-surfaceAlt);
+  border: 1px solid var(--c-border);
+  border-radius: 4px;
+  color: var(--c-text);
+  outline: none;
+}
+.th-note-input:focus { border-color: var(--c-accent); }
+.th-time { color: var(--c-muted); }
+.th-side { font-weight: 700; letter-spacing: 0.06em; }
+.th-contract { font-weight: 600; }
+.th-qty { color: var(--c-muted); text-align: right; }
+.th-price { text-align: right; color: var(--c-text); }
+
+/* ============ MOBILE ============ */
+
+@media (max-width: 720px) {
+  .header {
+    padding: 10px 12px;
+  }
+  /* Declutter the header on mobile: drop branding/labels, keep the live data. */
+  .title-block { display: none; }          /* drop "TotoroTrader" + "0DTE EXECUTION" subtitle */
+  .expiry-word { display: none; }          /* drop "EXPIRY ·", keep the date */
+  .acct-feed { display: flex; }            /* the feed dot survives; color = state */
+  .acct-feed .feed-word { display: none; } /* kisa 2026-07-13: the LIVE/OFFLINE word
+                                              eats header space a phone doesn't have —
+                                              the dot carries the state, the tooltip
+                                              carries the account */
+  .acct-id { display: none; }              /* id is in the tooltip */
+  .totoro-wrap { width: 34px; height: 34px; }
+
+  /* Flatten the two header groups into one row so PAPER/LIVE sits next to the
+     mascot and the expiry/price/gear cluster floats to the right, opening up
+     breathing space in the centre. */
+  .header { justify-content: flex-start; gap: 10px; }
+  .header-left, .header-right { display: contents; }
+  .acct-block { display: flex; align-items: flex-start; }   /* mobile: ● LIVE/SIM next to the mascot */
+  .expiry-block { margin-left: auto; }     /* push the right cluster to the edge */
+  .price { font-size: 22px; }
+  .expiry-time { font-size: 13px; }
+  .expiry-label { font-size: 8px; }
+  .symbol { font-size: 9px; }
+
+  /* Near-fullscreen chart: fill the viewport below the header + quote strip,
+     leaving the timeframe bar just in view; positions/history scroll below. */
+  .chart-wrap {
+    height: calc((100vh - 150px) * 0.9);
+    height: calc((100dvh - 150px) * 0.9);
+    min-height: 300px;
+  }
+
+  .acct-quick-btn { display: none; }   /* quick mode is right-click → desktop only */
+  .acct-bus-btn { display: none; }     /* bus stop is desktop-only (spec-bus-stop.md) */
+  /* Mobile de-busying (kisa 2026-07-10, "very busy"): pinch already zooms so
+     the ± buttons go; screen recording and axis premiums are desktop tools;
+     the TIMEFRAME word is self-evident from its buttons; the header dot
+     already tells the connection story, so of the action row only the panic
+     button survives — full width, phone-thumb sized. The chart keeps just
+     volume + fullscreen. */
+  .cw-btn, .rec-btn, .axis-prem-btn { display: none; }
+  .tf-label { display: none; }
+  .tf-panic:not(.tf-replay) { display: none; }
+  .symbol-search-row { padding: 0 10px; }
+  /* The control line slims to just the acct badge on mobile: multi-symbol
+     search is desktop-first (Phase A), quick/bus hidden above. */
+  .symbol-search-row .symbol-search { display: none; }
+
+  /* Move Close-all / IBKR to a full-width row under the timeframe buttons. */
+  .tf-bar { flex-wrap: wrap; }
+  .tf-actions { margin-left: 0; flex-basis: 100%; gap: 10px; }
+  .tf-panic, .tf-closeall { flex: 1; }
+  .pl-summary { gap: 10px; padding: 8px 12px 4px; }
+  .pl-summary .pl-block b { font-size: 12px; }
+
+  .pos-row {
+    grid-template-columns: 28px 56px 1fr 1fr auto;
+    gap: 10px;
+    padding: 10px 12px;
+    font-size: 11px;
+  }
+  .pos-row .pos-cell:nth-child(4),
+  .pos-row .pos-cell:nth-child(5) {
+    display: none;
+  }
+  .pos-drift { display: none; }  /* drift is desktop detail; the phone row stays lean */
+  .pos-actions { flex-direction: column; gap: 4px; }
+  .btn-rev, .btn-close { height: 28px; font-size: 10px; padding: 0 8px; }
+
+  .modal { padding: 16px; }
+  .modal-strike { font-size: 22px; }
+  .greek-grid { gap: 6px 12px; }
+
+  .settings-backdrop { padding: 70px 12px; align-items: center; justify-content: center; }
+  .theme-panel { width: 100%; max-width: 360px; }
+
+  .chart-tooltip { display: none; }
+}
+
+/* ============ TRADES DRAWER — HISTORY VIEW (multi-day journal) ============ */
+
+/* One history glyph flips today ↔ journal (kisa 2026-07-10: the two-word
+   toggle was chrome; the header text already names the view). `.solo` = no
+   net-cash chip to its left, so it pushes itself to the right edge. */
+.th-hist {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-left: auto;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--c-border);
+  background: none;
+  color: var(--c-muted);
+  cursor: pointer;
+  flex: none;
+  transition: color 160ms, border-color 160ms;
+}
+.th-hist:hover, .th-hist.on { color: var(--c-accent); border-color: var(--c-accent); }
+
+.jh-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.jh-curve {
+  width: 100%;
+  height: 78px;
+  flex: none;
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  background: var(--c-bg);
+}
+
+.jh-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+.jh-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 5px 7px;
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  background: var(--c-surfaceAlt);
+}
+.jh-stat span {
+  font-size: 8px;
+  letter-spacing: 0.12em;
+  color: var(--c-muted);
+}
+.jh-stat b {
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.jh-sub {
+  font-style: normal;
+  font-weight: 500;
+  font-size: 9px;
+  color: var(--c-muted);
+  margin-left: 4px;
+}
+
+.jh-days { display: flex; flex-direction: column; }
+.jh-day {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--c-grid);
+  color: var(--c-text);
+  font-family: inherit;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  padding: 7px 2px;
+  cursor: pointer;
+  text-align: left;
+}
+.jh-day:hover, .jh-day.expanded { background: var(--c-surfaceAlt); }
+.jh-date { flex: 1; }
+.jh-count { color: var(--c-muted); font-size: 11px; }
+.jh-openleg {
+  color: var(--c-muted);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  border: 1px solid var(--c-border);
+  border-radius: 8px;
+  padding: 0 6px;
+}
+.jh-pl { font-weight: 700; }
+.jh-fills {
+  border-bottom: 1px solid var(--c-grid);
+  background: var(--c-bg);
+}
+.jh-fills .th-row { padding: 5px 10px; font-size: 11px; }
+.jh-note {
+  color: var(--c-muted);
+  font-size: 9px;
+  line-height: 1.5;
+  flex: none;
+}
+
+/* ============ MICRO FILL ANIMATION (sounds.js's visual twin) ============ */
+
+/* Position row glow: one soft ~400ms wash + a colored edge bar when that
+   leg's fill lands. BUY = theme up color, SELL = down. No layout shift —
+   background + inset shadow only. */
+@keyframes pos-fill-flash {
+  from { background-color: color-mix(in srgb, var(--flash-c) 20%, transparent); box-shadow: inset 3px 0 0 var(--flash-c); }
+  to   { background-color: transparent; box-shadow: inset 3px 0 0 transparent; }
+}
+.pos-flash-buy  { --flash-c: var(--c-up);   animation: pos-fill-flash 420ms ease-out; }
+.pos-flash-sell { --flash-c: var(--c-down); animation: pos-fill-flash 420ms ease-out; }
+
+/* Chart pulse: the filled strike's line flashes once and fades. Overlay div
+   (no canvas churn), clipped to the plot area (right price gutter excluded). */
+.fill-pulse-line {
+  position: absolute;
+  left: 0;
+  right: 64px;             /* RIGHT_AXIS gutter */
+  height: 0;
+  border-top: 2px solid var(--flash-c);
+  pointer-events: none;
+  z-index: 6;
+  animation: fill-pulse-line 480ms ease-out forwards;
+}
+.fill-pulse-line.up   { --flash-c: var(--c-up); }
+.fill-pulse-line.down { --flash-c: var(--c-down); }
+@keyframes fill-pulse-line {
+  from { opacity: 0.9; box-shadow: 0 0 12px 2px var(--flash-c); }
+  to   { opacity: 0;   box-shadow: 0 0 0 0 transparent; }
+}
