@@ -122,12 +122,19 @@ export function planOrderRequest(msg, { currentExpiry, guest, account, routingLo
   if (msg.stop != null && !positiveFiniteNumber(stop)) {
     return { ok: false, reason: 'invalid stop price' };
   }
-  const isStop = !isLimit && positiveFiniteNumber(stop);
   const trail = msg.trail;
   if (msg.trail != null && !positiveFiniteNumber(trail)) {
     return { ok: false, reason: 'invalid trail amount' };
   }
-  const isTrail = !isLimit && !isStop && positiveFiniteNumber(trail);
+  // A stop or trailing ENTRY (BUY/SELL-to-open STP/TRAIL) is a deferred market
+  // order — nothing in the UI ever sends one; STP/SL and TRAIL are attached only
+  // as close-side exits (intent: 'close'). Refuse them on open so a forged/replayed
+  // open cannot smuggle a deferred market order onto the route.
+  if (intent !== 'close' && (msg.stop != null || msg.trail != null)) {
+    return { ok: false, reason: 'stop and trail orders are close-only' };
+  }
+  const isStop = intent === 'close' && !isLimit && positiveFiniteNumber(stop);
+  const isTrail = intent === 'close' && !isLimit && !isStop && positiveFiniteNumber(trail);
   if (intent === 'open' && action === 'SELL' && !isLimit) {
     return { ok: false, reason: 'SELL-to-open requires a positive limit' };
   }
