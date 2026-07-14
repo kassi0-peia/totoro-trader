@@ -3285,6 +3285,8 @@ function broadcastAccount(state = portfolio.publicSnapshot()) {
     type: 'account',
     account: state.account,
     accountType: state.accountType,
+    accountCount: state.accountCount,
+    accountAmbiguous: state.accountAmbiguous,
     executionEnabled: executionReady(),
   });
 }
