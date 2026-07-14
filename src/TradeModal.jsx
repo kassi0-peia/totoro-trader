@@ -33,8 +33,9 @@ export default function TradeModal({ pending, theme, series, onRefresh, onCancel
   // no limit the bridge routes a real MKT, and a market sell into the thin
   // overnight book is a blank check in the worst direction.
   const sell = pending?.side === 'sell';
-  // Guest orders are marketable limits only (the bridge rejects a guest MKT), so
-  // the ticket opens on LMT and the MKT arm is disabled. SPX defaults to MKT.
+  // Guest tickets are positive-limit-only (the bridge rejects a guest MKT), so
+  // the ticket opens on LMT and the MKT arm is disabled. The chosen limit may
+  // rest; only amber lightning deliberately crosses the ask. SPX defaults to MKT.
   const [orderKind, setOrderKind] = useState(guest || sell ? 'LMT' : 'MKT');
   const [limitStr, setLimitStr] = useState('');
   const [tpStr, setTpStr] = useState('');  // optional bracket take-profit (SELL LMT, native — works overnight)
@@ -82,7 +83,7 @@ export default function TradeModal({ pending, theme, series, onRefresh, onCancel
     onRefresh(pending);
     const id = setInterval(() => onRefresh(pending), 60_000);
     return () => clearInterval(id);
-  }, [pending?.strike, pending?.type]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [pending?.id, pending?.symbol, pending?.underlyingConId, pending?.strike, pending?.type, pending?.expiry, pending?.resourceGeneration]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Draw the premium line, with the live ask as a dashed reference (what a market buy pays).
   useEffect(() => {
@@ -229,8 +230,8 @@ export default function TradeModal({ pending, theme, series, onRefresh, onCancel
             {type === 'call' ? 'CALL' : 'PUT'}
           </span>
           <span className="modal-strike">{strike}</span>
-          {/* SPX 0DTE shows "0DTE"; a guest shows its real nearest-weekly date. */}
-          <span className="modal-exp">{guest ? (expLabel ? `W ${expLabel}` : 'weekly') : '0DTE'}</span>
+          {/* SPX 0DTE shows "0DTE"; a guest shows its exact nearest listed expiry. */}
+          <span className="modal-exp">{guest ? (expLabel || 'listed expiry') : '0DTE'}</span>
         </div>
 
         {sell && (
@@ -299,7 +300,7 @@ export default function TradeModal({ pending, theme, series, onRefresh, onCancel
               className={`kind-btn${orderKind === 'MKT' ? ' active' : ''}`}
               onClick={() => !guest && !sell && setOrderKind('MKT')}
               disabled={guest || sell}
-              data-tip={sell ? 'Sells are limit-only — a market sell into a thin book is a blank check' : guest ? 'Guest orders are marketable limits only — MKT is SPX-only in Phase A' : undefined}
+              data-tip={sell ? 'Sells are limit-only — a market sell into a thin book is a blank check' : guest ? 'Guest orders require a positive limit and may rest — MKT is SPX-only' : undefined}
             >MKT</button>
             <button
               className={`kind-btn${orderKind === 'LMT' ? ' active' : ''}`}
@@ -360,7 +361,7 @@ export default function TradeModal({ pending, theme, series, onRefresh, onCancel
         {!executionEnabled && (
           <div className="modal-note" style={{ color: theme.loss }}>
             {accountType === 'live'
-              ? 'Execution disabled — live account (set ALLOW_LIVE=true to enable)'
+              ? 'Execution disabled — live account not connected'
               : 'Execution disabled — no executable IBKR account connected'}
           </div>
         )}

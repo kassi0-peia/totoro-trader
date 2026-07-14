@@ -5,12 +5,13 @@ import React from 'react';
 // it exists only while open; ? toggles, Esc or click-away closes. Curated,
 // not exhaustive: the things worth re-finding, not a manual.
 const KEYS = [
-  ['1–9', 'timeframes, in bar order'],
+  ['1–6', 'timeframes, in bar order'],
   ['Space', 'snap the chart back to now'],
   ['C / P', 'arm a call/put ticket at the hovered strike'],
   ['N', 'note the latest fill (the why)'],
   ['Enter', 'execute the open ticket'],
   ['Esc', 'close the top-most thing, one per press'],
+  ['Shift+Esc ×2', 'KILL — cancel all orders, close all positions'],
   ['?', 'this panel'],
 ];
 

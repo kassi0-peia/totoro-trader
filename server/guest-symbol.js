@@ -1,5 +1,5 @@
 // Pure guest-symbol logic for multi-symbol Phase A: the math the bridge needs to
-// pick a guest equity's nearest weekly expiry, size its strike grid, choose the
+// pick a guest equity's nearest listed expiry, size its strike grid, choose the
 // narrow near-ATM subscription window, and validate an incoming guest order
 // against the discovered contract params. No IB import — unit-testable offline,
 // same as options-forward.js. Every helper rejects toward a safe/empty result so

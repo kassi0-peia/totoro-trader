@@ -1,7 +1,25 @@
 import { plDollars } from '../../pl.js';
+import { fmtDelta, liveDeltaOf } from '../../drift.js';
 
-// Position dashed lines + [+ add][label chip][✕ close] chips, colored by live
-// P/L. Pure paint that RETURNS its hit-lists ({ close, add, label }); Chart
+export function positionChartLabelParts(pos, pl) {
+  const plKnown = Number.isFinite(pl);
+  const sign = plKnown && pl >= 0 ? '+' : '−';
+  const liveDelta = liveDeltaOf(pos.greeksLive);
+  const delta = liveDelta == null ? '—' : fmtDelta(liveDelta);
+  return {
+    contract: `${pos.strike}${pos.type === 'call' ? 'C' : 'P'} ×${pos.qty}  Δ${delta}`,
+    pl: plKnown ? `${sign}$${Math.abs(pl).toFixed(0)}` : '—'
+  };
+}
+
+export function formatPositionChartLabel(pos, pl) {
+  const parts = positionChartLabelParts(pos, pl);
+  return `${parts.contract}  ${parts.pl}`;
+}
+
+// Position dashed lines + [+ add][label chip][✕ close] chips. Contract identity
+// always keeps its call/put color; only the P/L suffix uses profit/loss color.
+// Pure paint that RETURNS its hit-lists ({ close, add, label }); Chart
 // assigns them to the refs. Balances save/restore per line.
 export function drawPositions(ctx, { layout, theme, priceToY, positions, showPositions }) {
   // position dashed lines + labels
@@ -12,10 +30,15 @@ export function drawPositions(ctx, { layout, theme, priceToY, positions, showPos
   for (const pos of showPositions ? positions : []) {
     if (pos.status !== 'open') continue;
     const y = priceToY(pos.strike);
-    // Line + label colored by the position's live P/L, not call/put.
-    const live = pos.greeksLive?.premium ?? pos.entryPremium;
-    const pl = pos.entryPremium != null ? plDollars(pos, live) : 0;
-    const color = pl >= 0 ? theme.profit : theme.loss;
+    // Never let a losing call look like a put (or a winning put look like a
+    // call). The contract line, main chip, and action frames keep type color;
+    // the P/L extension is the only profit/loss-colored element.
+    const live = pos.greeksLive?.premium;
+    const pl = Number.isFinite(pos.entryPremium) && Number.isFinite(live)
+      ? plDollars(pos, live)
+      : null;
+    const color = pos.type === 'call' ? theme.callLine : theme.putLine;
+    const plColor = pl == null ? theme.muted : pl >= 0 ? theme.profit : theme.loss;
     ctx.save();
     ctx.setLineDash([6, 5]);
     ctx.strokeStyle = color;
@@ -26,9 +49,10 @@ export function drawPositions(ctx, { layout, theme, priceToY, positions, showPos
     ctx.stroke();
     ctx.restore();
 
-    const sign = pl >= 0 ? '+' : '−';
-    const label = `${pos.strike}${pos.type === 'call' ? 'C' : 'P'} ×${pos.qty}  ${sign}$${Math.abs(pl).toFixed(0)}`;
-    const lw = ctx.measureText(label).width + 12;
+    const label = positionChartLabelParts(pos, pl);
+    const contractW = ctx.measureText(label.contract).width + 12;
+    const plW = ctx.measureText(label.pl).width + 12;
+    const lw = contractW + plW;
     const xw = 18; // action-box width (✕ / +)
     // Left-aligned (keep the right edge for prices), but start past the trades
     // drawer's left-edge controls (.trades-hotzone is 22px wide, the ›pull 15px,
@@ -40,13 +64,21 @@ export function drawPositions(ctx, { layout, theme, priceToY, positions, showPos
     const adBox = lx;            // + box left edge (leftmost)
     const labelX = lx + xw;      // label chip left edge
     const cxBox = labelX + lw;   // ✕ box left edge (right of the label)
-    // label chip
+    // Stable call/put chip, followed by a dark P/L extension. This preserves
+    // both signals instead of overloading one color with two meanings.
     ctx.fillStyle = color;
-    ctx.fillRect(labelX, y - 9, lw, 18);
+    ctx.fillRect(labelX, y - 9, contractW, 18);
     ctx.fillStyle = '#0a0c12';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
-    ctx.fillText(label, labelX + 6, y);
+    ctx.fillText(label.contract, labelX + 6, y);
+    ctx.fillStyle = '#0a0c12';
+    ctx.fillRect(labelX + contractW, y - 9, plW, 18);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(labelX + contractW - 0.5, y - 8.5, plW + 0.5, 17);
+    ctx.fillStyle = plColor;
+    ctx.fillText(label.pl, labelX + contractW + 6, y);
     // + box (left of label): adds one contract to the same leg (marketable limit)
     ctx.fillStyle = '#0a0c12';
     ctx.fillRect(adBox, y - 9, xw, 18);

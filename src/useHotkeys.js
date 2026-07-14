@@ -9,10 +9,14 @@
 //   C / P  → arm a CALL / PUT confirm ticket at the hovered strike, else the
 //            nearest OTM strike — the same setPending path a chart click uses;
 //            NEVER sends an order directly
+//   Shift+Esc ×2 → the KILL SWITCH (App owns the two-press arm window):
+//            disarm all ⚔, cancel all working orders, close all positions
 //
-// Guards: nothing fires from inputs/textareas/selects/contentEditable, nothing
-// fires with ctrl/meta/alt held, and key repeat is ignored (a held Esc must
-// not cascade-close every layer).
+// Guards: nothing fires from inputs/textareas/selects/contentEditable —
+// EXCEPT the kill switch, which must work even mid-typing (Shift+Esc is
+// never prose) — nothing fires with ctrl/meta/alt held, and key repeat is
+// ignored (a held Esc must not cascade-close every layer, and a held
+// Shift+Esc must not arm-and-fire the kill switch in one hold).
 
 import { useEffect, useRef } from 'react';
 
@@ -27,7 +31,7 @@ export function isEditableTarget(t) {
 export function keyIntent(e) {
   if (e.ctrlKey || e.metaKey || e.altKey) return null;
   if (e.repeat) return null;
-  if (e.key === 'Escape') return { kind: 'escape' };
+  if (e.key === 'Escape') return e.shiftKey ? { kind: 'kill' } : { kind: 'escape' };
   if (/^[1-9]$/.test(e.key)) return { kind: 'digit', n: +e.key };
   if (e.key === ' ') return { kind: 'space' };
   const k = String(e.key).toLowerCase();
@@ -38,19 +42,22 @@ export function keyIntent(e) {
   return null;
 }
 
-// handlers: { onEscape, onDigit(n), onSpace(), onTicket('call'|'put'), onNote() }.
-// onDigit/onSpace/onTicket/onNote return true when they acted → preventDefault
-// (stops Space from scrolling the page). Handlers are read through a ref so the
-// listener binds once and never goes stale.
+// handlers: { onEscape, onDigit(n), onSpace(), onTicket('call'|'put'), onNote(),
+// onKill() }. onDigit/onSpace/onTicket/onNote/onKill return true when they
+// acted → preventDefault (stops Space from scrolling the page). Handlers are
+// read through a ref so the listener binds once and never goes stale.
 export default function useHotkeys(handlers) {
   const ref = useRef(handlers);
   ref.current = handlers;
   useEffect(() => {
     const onKey = (e) => {
-      if (isEditableTarget(e.target)) return;
       const intent = keyIntent(e);
       if (!intent) return;
+      // The kill switch alone pierces the text-entry guard: a shaking hand
+      // with the cursor in a note field still needs the exit.
+      if (intent.kind !== 'kill' && isEditableTarget(e.target)) return;
       const h = ref.current;
+      if (intent.kind === 'kill') { if (h.onKill?.()) e.preventDefault(); return; }
       if (intent.kind === 'escape') { h.onEscape?.(); return; }
       if (intent.kind === 'digit') { if (h.onDigit?.(intent.n)) e.preventDefault(); return; }
       if (intent.kind === 'space') { if (h.onSpace?.()) e.preventDefault(); return; }
