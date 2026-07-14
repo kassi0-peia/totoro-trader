@@ -1,5 +1,6 @@
 import React from 'react';
 import { plDollars, plSign } from './pl.js';
+import { unrepresentedWorkingOrders } from './app/positionModel.js';
 
 function plOf(pos) {
   // No live feed for this symbol right now (inactive guest) → no honest mark.
@@ -31,12 +32,9 @@ export default function Positions({ positions, theme, onClose, onReverse, onCanc
     ? { cls: fillFlash.action === 'BUY' ? ' pos-flash-buy' : ' pos-flash-sell', k: `:${fillFlash.ts}` }
     : { cls: '', k: '' });
 
-  // Server-truth working orders, minus ones already represented by a local
-  // in-flight row (the device that placed an order shows it as FILLING/CLOSING).
-  const localKeys = new Set(positions
-    .filter((p) => p.status === 'pending' || p.status === 'closing')
-    .map((p) => `${p.strike}|${p.type === 'call' ? 'C' : 'P'}|${p.expiry}|${p.status === 'closing' ? 'SELL' : 'BUY'}`));
-  const serverOrders = workingOrders.filter((o) => !localKeys.has(`${o.strike}|${o.right}|${o.expiry}|${o.action}`));
+  // Server-truth working orders, minus the one exact row already represented by
+  // each local in-flight position. Distinct same-contract orders remain visible.
+  const serverOrders = unrepresentedWorkingOrders(workingOrders, positions);
 
   const openPL = positions
     .filter((p) => p.status === 'open' && p.entryPremium != null)
@@ -101,11 +99,11 @@ export default function Positions({ positions, theme, onClose, onReverse, onCanc
 
       <div className="positions-list">
         {serverOrders.map((o) => (
-          <div className="pos-row pos-row-order" key={`ord:${o.orderId}`}>
+          <div className="pos-row pos-row-order" key={`ord:${o.orderKey ?? `${o.clientId ?? 'own'}:${o.orderId}`}`}>
             <span className="pos-type" style={{ background: theme.surfaceAlt, color: theme.muted }}>
               {o.right}
             </span>
-            <span className="pos-strike">{o.strike}</span>
+            <span className="pos-strike">{(o.symbol ?? 'SPX') !== 'SPX' ? `${o.symbol} ` : ''}{o.strike}</span>
             <span className="pos-cell"><span className="cell-label">QTY</span>×{o.qty}</span>
             <span className="pos-cell">
               <span className="cell-label">{o.action}</span>
@@ -115,7 +113,14 @@ export default function Positions({ positions, theme, onClose, onReverse, onCanc
               <span className="cell-label">ORDER</span>{o.status}
             </span>
             <div className="pos-actions">
-              <button className="btn-close" onClick={() => onCancelWorkingOrder?.(o)} disabled={!executionEnabled} data-tip="Cancel working order">CANCEL</button>
+              <button
+                className="btn-close"
+                onClick={() => onCancelWorkingOrder?.(o)}
+                disabled={!executionEnabled || o.cancellable === false}
+                data-tip={o.cancellable === false
+                  ? 'Placed by another IBKR client — cancel it from that client or TWS'
+                  : 'Cancel working order'}
+              >{o.cancellable === false ? 'READ ONLY' : 'CANCEL'}</button>
             </div>
           </div>
         ))}

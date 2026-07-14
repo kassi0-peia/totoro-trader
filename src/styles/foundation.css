@@ -1,0 +1,463 @@
+:root {
+  --c-bg: #131722;
+  --c-surface: #171b27;
+  --c-surfaceAlt: #1b2030;
+  --c-border: #252a3a;
+  --c-text: #d1d5e0;
+  --c-muted: #565a6e;
+  --c-accent: #9b7dd4;
+  --c-profit: #7dd4a0;
+  --c-loss: #e07d8a;
+  --c-warn: #e8b46a;                              /* amber — caution toasts (e.g. overnight MKT hold) */
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  /* Clip the stray 1–2px horizontal spill (chart canvas / DPR rounding) that
+     otherwise paints a page-level bottom scrollbar. Inner scroll regions keep
+     their own overflow. */
+  overflow-x: hidden;
+}
+
+/* Dark scrollbars everywhere — the OS default is a bright light bar that fights
+   the dark UI (same reason we override native tooltips + selection). */
+* {
+  scrollbar-width: thin;                        /* Firefox */
+  scrollbar-color: var(--c-border) transparent;
+}
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: var(--c-bg); }
+::-webkit-scrollbar-thumb {
+  background: var(--c-border);
+  border-radius: 6px;
+  border: 2px solid var(--c-bg);                /* inset so the thumb reads slimmer */
+}
+::-webkit-scrollbar-thumb:hover { background: var(--c-muted); }
+::-webkit-scrollbar-corner { background: var(--c-bg); }
+
+body {
+  background: var(--c-bg);
+  color: var(--c-text);
+  font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, Menlo, Consolas, monospace;
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overscroll-behavior: none;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+  user-select: none;                          /* no blue text-highlight on click/hover */
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Text selection blends with the chart background instead of browser blue. */
+::selection { background: var(--c-bg); color: var(--c-text); }
+::-moz-selection { background: var(--c-bg); color: var(--c-text); }
+
+/* Custom dark tooltips — replace native title= (the OS paints those bright blue). */
+[data-tip] { position: relative; }
+[data-tip]:not([data-tip=""])::after {
+  content: attr(data-tip);
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 7px);
+  transform: translateX(-50%) translateY(3px);
+  z-index: 80;
+  width: max-content;
+  max-width: 230px;
+  padding: 5px 9px;
+  border-radius: 6px;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  color: var(--c-text);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  line-height: 1.25;
+  white-space: normal;
+  text-align: center;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 110ms ease, transform 110ms ease;
+  transition-delay: 220ms;
+}
+[data-tip]:hover::after,
+[data-tip]:focus-visible::after {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+/* The relative above must not reflow hosts that are intentionally absolute. */
+.snap-now-btn, .fs-btn, .axis-prem-btn, .vol-btn, .rec-btn, .quick-btn, .cw-btn, .rung-btn,
+.daylevels-btn, .trades-pull { position: absolute; }
+
+/* Edge-anchor tooltips on screen-edge controls so they never clip the viewport.
+   The [data-tip] keeps specificity at/above the base rule so these win. */
+.fs-btn[data-tip]::after, .axis-prem-btn[data-tip]::after, .vol-btn[data-tip]::after,
+.rec-btn[data-tip]::after, .quick-btn[data-tip]::after, .snap-now-btn[data-tip]::after,
+.rung-btn[data-tip]::after, .daylevels-btn[data-tip]::after, .acct-badge[data-tip]::after, .chart-acct-id[data-tip]::after,
+.acct-bus-btn[data-tip]::after, .acct-quick-btn[data-tip]::after {
+  left: auto; right: -1px; transform: translateX(0) translateY(3px);
+}
+.fs-btn[data-tip]:hover::after, .axis-prem-btn[data-tip]:hover::after, .vol-btn[data-tip]:hover::after,
+.rec-btn[data-tip]:hover::after, .quick-btn[data-tip]:hover::after, .snap-now-btn[data-tip]:hover::after,
+.rung-btn[data-tip]:hover::after, .daylevels-btn[data-tip]:hover::after, .acct-badge[data-tip]:hover::after, .chart-acct-id[data-tip]:hover::after,
+.acct-bus-btn[data-tip]:hover::after, .acct-quick-btn[data-tip]:hover::after {
+  transform: translateX(0) translateY(0);
+}
+.cw-btn[data-tip]::after, .trades-pull[data-tip]::after, .qs-replay[data-tip]::after {
+  left: -1px; right: auto; transform: translateX(0) translateY(3px);
+}
+.cw-btn[data-tip]:hover::after, .trades-pull[data-tip]:hover::after, .qs-replay[data-tip]:hover::after {
+  transform: translateX(0) translateY(0);
+}
+
+.app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  /* footer height + iOS home-indicator inset when installed standalone */
+  padding-bottom: calc(32px + env(safe-area-inset-bottom));
+}
+
+/* ============ HEADER ============ */
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  /* extra top/side padding clears the notch + status bar in standalone mode */
+  padding: max(12px, env(safe-area-inset-top)) max(18px, env(safe-area-inset-right)) 12px
+    max(18px, env(safe-area-inset-left));
+  border-bottom: 1px solid var(--c-border);
+  background: var(--c-surface);
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;        /* allow the title to shrink/truncate instead of overflowing */
+  flex: 1 1 auto;
+}
+
+.totoro-wrap {
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  animation: breathe 3s ease-in-out infinite;
+  transform-origin: center 88%;
+  will-change: transform;
+}
+
+.totoro-img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  -webkit-user-drag: none;
+  user-select: none;
+}
+
+
+.totoro-wrap.pulse {
+  animation: breathe 3s ease-in-out infinite, fillPulse 420ms ease-out;
+}
+
+@keyframes breathe {
+  0%, 100% { transform: scaleY(0.96) scaleX(1.02); }
+  50%      { transform: scaleY(1.10) scaleX(0.97); }
+}
+
+@keyframes fillPulse {
+  0% { filter: drop-shadow(0 0 0 var(--c-accent)); transform: scale(1); }
+  40% { filter: drop-shadow(0 0 10px var(--c-accent)); transform: scale(1.12); }
+  100% { filter: drop-shadow(0 0 0 var(--c-accent)); transform: scale(1); }
+}
+
+.title-block {
+  line-height: 1.1;
+  min-width: 0;
+}
+
+.title {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--c-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.feed-status {
+  font-size: 10px;
+  color: var(--c-muted);
+  letter-spacing: 0.18em;
+  margin-bottom: 2px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.subtitle-text {
+  display: block;
+  font-size: 10px;
+  color: var(--c-muted);
+  letter-spacing: 0.18em;
+  margin-top: 2px;
+}
+
+.feed-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.subtitle-sep {
+  opacity: 0.5;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  flex-shrink: 0;      /* keep price + controls fully visible */
+}
+
+.expiry-block {
+  text-align: right;
+  line-height: 1.1;
+}
+
+.expiry-label {
+  font-size: 9px;
+  color: var(--c-muted);
+  letter-spacing: 0.18em;
+  margin-bottom: 4px;
+}
+
+.expiry-date {
+  color: var(--c-accent);
+}
+
+.expiry-time {
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--c-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.ec-sep {
+  color: var(--c-muted);
+  margin: 0 2px;
+  font-size: 11px;
+}
+
+.price-block {
+  text-align: right;
+  line-height: 1;
+}
+
+.symbol {
+  font-size: 10px;
+  color: var(--c-muted);
+  letter-spacing: 0.2em;
+}
+
+/* Overnight basis honesty light next to the ES/SPX label: which witness sets
+   the SPX-equiv level right now. Green = live options parity, amber = frozen
+   4 PM capture, red = cold-start estimate. */
+.basis-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  margin-left: 6px;
+  vertical-align: 1px;
+  cursor: help;
+}
+.basis-options   { background: #4caf7d; box-shadow: 0 0 5px #4caf7d88; }
+.basis-frozen    { background: #e8b46a; }
+.basis-estimated { background: #e06c6c; box-shadow: 0 0 5px #e06c6c88; }
+
+.price {
+  font-size: 28px;
+  font-weight: 600;
+  color: var(--c-text);
+  font-variant-numeric: tabular-nums;
+  margin: 2px 0;
+}
+
+/* Staleness heartbeat: the header says LIVE but no tick has landed for a few
+   seconds — dim the big price so a frozen feed never looks live. */
+.price.price-stale {
+  opacity: 0.38;
+  transition: opacity 300ms ease;
+}
+
+.change {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.gear-btn {
+  background: transparent;
+  border: 1px solid var(--c-border);
+  color: var(--c-muted);
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 160ms, border-color 160ms, transform 160ms;
+}
+
+.gear-btn:hover {
+  color: var(--c-accent);
+  border-color: var(--c-accent);
+  transform: rotate(45deg);
+}
+
+/* ============ THEME PANEL ============ */
+
+.settings-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  padding: 80px 22px;
+}
+
+.theme-panel {
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: 12px;
+  padding: 14px 16px;
+  width: 320px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+
+.theme-panel-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 10px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--c-border);
+  color: var(--c-muted);
+  font-size: 10px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+}
+
+.x-btn {
+  background: transparent;
+  border: 0;
+  color: var(--c-muted);
+  font-size: 18px;
+  line-height: 1;
+}
+
+.theme-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.theme-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--c-border);
+  font-size: 12px;
+  color: var(--c-muted);
+  letter-spacing: 0.04em;
+}
+.toggle-switch {
+  width: 38px;
+  height: 20px;
+  border-radius: 10px;
+  background: var(--c-surfaceAlt);
+  border: 1px solid var(--c-border);
+  position: relative;
+  cursor: pointer;
+  padding: 0;
+  transition: background 160ms, border-color 160ms;
+}
+.toggle-switch.on {
+  background: var(--c-accent);
+  border-color: var(--c-accent);
+}
+.toggle-knob {
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--c-text);
+  transition: transform 160ms, background 160ms;
+}
+.toggle-switch.on .toggle-knob {
+  transform: translateX(18px);
+  background: #0a0c12;
+}
+
+.theme-card {
+  border: 1px solid var(--c-border);
+  border-radius: 8px;
+  padding: 10px;
+  background: var(--c-surfaceAlt);
+  text-align: left;
+  color: var(--c-text);
+  transition: transform 140ms, border-color 140ms;
+}
+
+.theme-card:hover {
+  transform: translateY(-1px);
+}
+
+.theme-card.active {
+  box-shadow: 0 0 0 1px var(--c-accent) inset;
+}
+
+.swatch-row {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.swatch {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+}
+
+.theme-name {
+  font-size: 12px;
+  font-weight: 500;
+}
+

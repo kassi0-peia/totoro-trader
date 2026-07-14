@@ -58,7 +58,7 @@ export default function TimeframeBar({ value, onChange, theme, onCloseAll, canCl
             className="tf-closeall"
             onClick={onCloseAll}
             disabled={!canCloseAll}
-            data-tip="Close all open positions at market"
+            data-tip="Close all open positions with marketable limits"
             style={{ borderColor: theme.loss, color: theme.loss }}
           >
             ✕ CLOSE ALL

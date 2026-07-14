@@ -71,7 +71,7 @@ export default function Header({ price, prevClose, theme, mood, earsUp, pulse, o
               style={{ background: feedColor, boxShadow: live ? `0 0 6px ${feedColor}` : 'none' }}
               aria-hidden="true"
             />
-            <span style={{ color: feedColor }}>{feedLabel}</span>
+            <span className="feed-word" style={{ color: feedColor }}>{feedLabel}</span>
           </span>
         </div>
         <div className="expiry-block">

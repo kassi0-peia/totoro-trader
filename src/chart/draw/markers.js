@@ -4,7 +4,9 @@
 // save/restore per shape (drawChevron and the hollow ghost stroke each
 // save/restore). `tToIdx` is passed in (built once per frame in Chart via
 // makeTToIdx) so the still-inline bus-stop block shares the same instance.
-export function drawMarkers(ctx, { view, layout, theme, priceToY, indexToX, positions, showMarkers, ghostFills, tToIdx }) {
+import { selectEarliestVisibleEntry } from '../markerGeometry.js';
+
+export function drawMarkers(ctx, { view, layout, theme, priceToY, indexToX, positions, showMarkers, ghostFills, tToIdx, highlightPositionId = null }) {
   const markerHits = [];
 
   // Tapered chevron (ʌ / v): a filled shape — full thickness at the apex,
@@ -38,24 +40,8 @@ export function drawMarkers(ctx, { view, layout, theme, priceToY, indexToX, posi
   // See that module's header to improve + re-add.
 
   for (const pos of (showMarkers ? positions : [])) {
-    const color = pos.type === 'call' ? theme.up : theme.down;
-    const entryIdx = tToIdx(pos.openedAt);
+    const color = pos.type === 'call' ? (theme.callLine ?? theme.up) : (theme.putLine ?? theme.down);
     const exitIdx = pos.status === 'closed' ? tToIdx(pos.closedAt) : -1;
-    const entryXY = entryIdx >= 0 ? { x: indexToX(entryIdx), y: priceToY(pos.entryPrice ?? pos.strike) } : null;
-    const exitXY = exitIdx >= 0 ? { x: indexToX(exitIdx), y: priceToY(pos.exitPrice ?? pos.strike) } : null;
-
-    if (entryXY && exitXY) {
-      ctx.save();
-      ctx.setLineDash([2, 3]);
-      ctx.globalAlpha = 0.7;
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(entryXY.x, entryXY.y);
-      ctx.lineTo(exitXY.x, exitXY.y);
-      ctx.stroke();
-      ctx.restore();
-    }
 
     // A small chevron hugging EACH fill's candle (every added lot, not just the
     // first) — under the low for calls (ʌ, bullish), over the high for puts (v).
@@ -69,6 +55,7 @@ export function drawMarkers(ctx, { view, layout, theme, priceToY, indexToX, posi
     const fillTimes = (pos.fills && pos.fills.length)
       ? pos.fills.map((f) => f.ts)
       : (pos.openedAt != null ? [pos.openedAt] : []);
+    const entryMarkers = [];
     for (const ts of fillTimes) {
       const fi = tToIdx(ts);
       if (fi < 0) continue;
@@ -77,13 +64,72 @@ export function drawMarkers(ctx, { view, layout, theme, priceToY, indexToX, posi
       const ay = ec
         ? (isCall ? priceToY(ec.low) + half + 5 : priceToY(ec.high) - half - 5)
         : priceToY(pos.entryPrice ?? pos.strike) + (isCall ? half + 12 : -half - 12);
+      entryMarkers.push({ x: fx, y: ay, ts });
+    }
+
+    const exitCandle = exitIdx >= 0 ? view.slots[exitIdx] : null;
+    // Execution history has the exact option fill/time but not the underlying
+    // tick. On a refreshed recovered close, anchor the v to that candle's close
+    // instead of pretending the strike was the exit price.
+    const exitUnderlying = pos.exitPrice ?? exitCandle?.close ?? pos.strike;
+    const exitMarker = exitIdx >= 0
+      ? {
+          x: indexToX(exitIdx),
+          y: priceToY(exitUnderlying) - half - 16
+        }
+      : null;
+    const connectorEntry = selectEarliestVisibleEntry(entryMarkers);
+
+    // A row/card hover points back to every fill in the leg without adding a
+    // DOM overlay that could intercept the chart. A scaled-in position (like
+    // the three-fill put) therefore lights all of its visible entry chevrons.
+    if (pos.id === highlightPositionId) {
+      for (const entry of entryMarkers) {
+        ctx.save();
+        ctx.globalAlpha = 0.9;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.5;
+        ctx.shadowColor = color;
+        ctx.shadowBlur = 9;
+        ctx.beginPath();
+        ctx.arc(entry.x, entry.y, half + 5, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    // Draw the connector underneath the chevrons, with endpoints at their
+    // actual painted centers. Added lots still get their own entry markers, but
+    // the closed trade gets one readable ray: earliest visible entry → exit.
+    if (connectorEntry && exitMarker) {
+      ctx.save();
+      ctx.setLineDash([2, 3]);
+      ctx.globalAlpha = 0.7;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(connectorEntry.x, connectorEntry.y);
+      ctx.lineTo(exitMarker.x, exitMarker.y);
+      ctx.stroke();
+      ctx.restore();
+      markerHits.push({
+        x1: connectorEntry.x,
+        y1: connectorEntry.y,
+        x2: exitMarker.x,
+        y2: exitMarker.y,
+        half: 6,
+        position: pos,
+        kind: 'connector'
+      });
+    }
+
+    for (const { x: fx, y: ay } of entryMarkers) {
       drawChevron(fx, ay, half, isCall ? 'up' : 'down', '#fff');
       markerHits.push({ x: fx, y: ay, half: half + 5, position: pos, kind: 'entry' });
     }
-    if (exitXY) {
-      const ay = exitXY.y - half - 16;
-      drawChevron(exitXY.x, ay, half, 'down', color); // exit: colored v above, same size as entries
-      markerHits.push({ x: exitXY.x, y: ay, half: half + 3, position: pos, kind: 'exit' });
+    if (exitMarker) {
+      drawChevron(exitMarker.x, exitMarker.y, half, 'down', color); // exit: colored v above, same size as entries
+      markerHits.push({ x: exitMarker.x, y: exitMarker.y, half: half + 3, position: pos, kind: 'exit' });
     }
   }
 

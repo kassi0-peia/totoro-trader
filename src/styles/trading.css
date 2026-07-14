@@ -1,0 +1,654 @@
+/* ============ POSITIONS ============ */
+
+.positions {
+  flex: 1;
+  border-top: 1px solid var(--c-border);
+  background: var(--c-surface);
+  display: flex;
+  flex-direction: column;
+  min-height: 180px;
+}
+
+.pl-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 24px;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--c-border);
+  background: var(--c-surfaceAlt);
+}
+
+/* P/L pushed to the right of the funds on the summary line */
+.pl-push { margin-left: auto; }
+
+.funds-block b {
+  font-size: 14px;
+  color: var(--c-muted);
+}
+
+.pl-block {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pl-block span {
+  font-size: 9px;
+  color: var(--c-muted);
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+}
+
+.pl-block b {
+  font-size: 16px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+
+
+.positions-list {
+  overflow-y: auto;
+  flex: 1;
+  padding: 6px 0;
+}
+
+.empty {
+  padding: 28px;
+  text-align: center;
+  color: var(--c-muted);
+  font-size: 12px;
+  letter-spacing: 0.05em;
+}
+
+.pos-row {
+  display: grid;
+  /* 8 columns (incl. day H/L) — tightened so the action buttons stay on one line */
+  grid-template-columns: 28px 52px 0.6fr 1fr 1fr 1fr 1.3fr auto;
+  gap: 8px;
+  align-items: center;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--c-border);
+  font-variant-numeric: tabular-nums;
+}
+
+.pos-row-closed {
+  opacity: 0.7;
+}
+
+.pos-type {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.pos-strike {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--c-text);
+}
+
+.pos-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+}
+
+.cell-label {
+  font-size: 9px;
+  color: var(--c-muted);
+  letter-spacing: 0.16em;
+}
+
+.pos-pl {
+  font-weight: 600;
+}
+
+.pl-pct {
+  font-weight: 400;
+  font-size: 10px;
+  color: var(--c-muted);
+  margin-left: 4px;
+}
+
+.pos-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.btn-rev,
+.btn-close {
+  background: transparent;
+  border: 1px solid var(--c-border);
+  color: var(--c-muted);
+  height: 30px;
+  border-radius: 6px;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  font-weight: 600;
+  padding: 0 10px;
+  transition: color 140ms, border-color 140ms;
+}
+
+.btn-rev {
+  width: 30px;
+  padding: 0;
+  font-size: 14px;
+}
+
+.btn-rev:hover {
+  color: var(--c-accent);
+  border-color: var(--c-accent);
+}
+
+.btn-close:hover {
+  color: var(--c-loss);
+  border-color: var(--c-loss);
+}
+
+.closed-tag {
+  font-size: 10px;
+  color: var(--c-muted);
+  letter-spacing: 0.18em;
+  border: 1px solid var(--c-border);
+  border-radius: 4px;
+  padding: 4px 8px;
+}
+
+/* ============ FOOTER ============ */
+
+.footer {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 28px;
+  background: var(--c-surface);
+  border-top: 1px solid var(--c-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  /* keep text above the iOS home indicator */
+  padding: 0 max(16px, env(safe-area-inset-right)) env(safe-area-inset-bottom)
+    max(16px, env(safe-area-inset-left));
+  font-size: 10px;
+  color: var(--c-muted);
+  letter-spacing: 0.18em;
+  z-index: 10;
+}
+
+/* ============ EXECUTION / ACCOUNT SAFETY ============ */
+
+.safety-banner {
+  text-align: center;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  padding: 7px 12px;
+  z-index: 30;
+}
+.safety-live { background: var(--c-profit, #5cb85c); color: #0a0c12; }
+/* Kill-switch arm window (Shift+Esc pressed once): loud, brief, breathing.
+   Deliberately NOT the theme's soft loss tint — this one must be unmistakable
+   on every theme, so it gets a hard alarm red of its own. */
+.safety-kill {
+  background: #d92b39;
+  color: #fff;
+  animation: kill-pulse 0.6s ease-in-out infinite;
+}
+@keyframes kill-pulse { 50% { opacity: 0.75; } }
+
+.safety-kill-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: #fff;
+}
+.safety-kill-active { background: #b51f2c; }
+.safety-kill-error { background: #8f1521; }
+.safety-kill-ok { background: var(--c-profit, #5cb85c); color: #0a0c12; }
+.safety-kill-dismiss {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.acct-block {
+  display: none;            /* desktop: feed status lives in the title block */
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  line-height: 1;
+}
+.acct-badge {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.acct-id {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+}
+/* ⚡ quick-mode toggle, tucked after the account number on the chart. */
+.acct-quick-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: 50%;
+  color: var(--c-muted);
+  cursor: pointer;
+  transition: color 160ms, border-color 160ms, background 160ms;
+}
+.acct-quick-btn:hover { color: var(--c-accent); border-color: var(--c-accent); }
+.acct-quick-btn.active {
+  color: #0a0c12;
+  background: var(--c-accent);
+  border-color: var(--c-accent);
+}
+/* MARKET mode — red, so a naked-MKT arm can never be mistaken for the safer
+   marketable-limit arm. Pulses to stay conspicuous while live. */
+.acct-quick-btn.market,
+.acct-quick-btn.market:hover {
+  color: #fff;
+  background: #e0473a;
+  border-color: #e0473a;
+  box-shadow: 0 0 0 2px rgba(224, 71, 58, 0.35);
+  animation: quick-market-pulse 1.4s ease-in-out infinite;
+}
+@keyframes quick-market-pulse {
+  0%, 100% { box-shadow: 0 0 0 2px rgba(224, 71, 58, 0.35); }
+  50% { box-shadow: 0 0 0 4px rgba(224, 71, 58, 0.15); }
+}
+/* 🚏 bus-stop arm toggle, next to ⚡. Emoji renders greyscale via filter until
+   armed — armed uses the accent ring like the ⚡ limit arm (it places no order
+   by itself, so it never needs the red treatment). */
+.acct-bus-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  font-size: 13px;
+  line-height: 1;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: 50%;
+  color: var(--c-muted);
+  cursor: pointer;
+  filter: grayscale(1) opacity(0.75);
+  transition: color 160ms, border-color 160ms, background 160ms, filter 160ms;
+}
+.acct-bus-btn:hover { border-color: var(--c-accent); filter: grayscale(0.4); }
+.acct-bus-btn.active {
+  background: var(--c-accent);
+  border-color: var(--c-accent);
+  filter: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--c-accent) 35%, transparent);
+}
+
+/* ── Multi-symbol Phase A: symbol search under the ATM quote strip ──
+   A thin right-aligned row (kisa's placement, 2026-07-07): collapsed to a bare
+   🔍 that expands to the input on click. Guest/SPX chips appear only when a
+   guest is active. Desktop-first — hidden on mobile. */
+.symbol-search-row {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 12px;
+  padding: 3px 10px 0;
+  min-height: 0;
+}
+.symbol-search {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.sym-glass {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--c-border);
+  background: var(--c-surface);
+  color: var(--c-muted);
+  cursor: pointer;
+  transition: color 160ms, border-color 160ms;
+}
+.sym-glass:hover { color: var(--c-accent); border-color: var(--c-accent); }
+/* Edge-anchor the 🔍 tooltip so it can't clip the right viewport edge. */
+.sym-glass[data-tip]::after { left: auto; right: -1px; transform: translateX(0) translateY(3px); }
+.sym-glass[data-tip]:hover::after { transform: translateX(0) translateY(0); }
+.sym-chip {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  padding: 3px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--c-border);
+  background: var(--c-surface);
+  color: var(--c-muted);
+  cursor: pointer;
+  transition: color 160ms, border-color 160ms, background 160ms;
+}
+.sym-chip:hover { border-color: var(--c-accent); color: var(--c-accent); }
+/* A symbol holding an open position keeps a tab; the dot says "money here". */
+.sym-chip-pos::before { content: '•'; margin-right: 4px; color: var(--c-accent); }
+.pos-sym {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--c-muted);
+  font-family: 'JetBrains Mono', monospace;
+}
+.sym-chip.active {
+  color: #0a0c12;
+  background: var(--c-accent);
+  border-color: var(--c-accent);
+}
+.sym-active {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--c-text);
+}
+.sym-active.pending { color: var(--c-muted); font-style: italic; }
+.sym-input {
+  width: 92px;
+  font-size: 11px;
+  font-family: 'JetBrains Mono', monospace;
+  letter-spacing: 0.06em;
+  padding: 3px 7px;
+  border-radius: 4px;
+  border: 1px solid var(--c-border);
+  background: var(--c-surface);
+  color: var(--c-text);
+  outline: none;
+  transition: border-color 160ms;
+}
+.sym-input:focus { border-color: var(--c-accent); }
+.sym-input:disabled { opacity: 0.5; cursor: not-allowed; }
+.sym-input {
+  animation: sym-grow 160ms ease-out;
+}
+@keyframes sym-grow {
+  from { width: 24px; opacity: 0.4; }
+  to { width: 92px; opacity: 1; }
+}
+.sym-dropdown {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+  min-width: 220px;
+  max-height: 300px;
+  overflow-y: auto;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+  z-index: 40;
+}
+.sym-empty {
+  padding: 8px 10px;
+  font-size: 11px;
+  color: var(--c-muted);
+}
+.sym-opt {
+  display: flex;
+  align-items: stretch;
+  width: 100%;
+  border-bottom: 1px solid var(--c-border);
+}
+.sym-opt:last-child { border-bottom: none; }
+.sym-opt-main {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 6px 10px;
+  border: none;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+.sym-opt-main:hover { background: var(--c-surfaceAlt); }
+.sym-opt-star {
+  flex: 0 0 auto;
+  padding: 0 9px;
+  border: none;
+  background: none;
+  color: var(--c-muted);
+  cursor: pointer;
+  font-size: 13px;
+}
+.sym-opt-star:hover { color: var(--c-accent); }
+.sym-opt-star.on { color: var(--c-accent); }
+.sym-opt-tkr {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--c-text);
+  font-family: 'JetBrains Mono', monospace;
+}
+.sym-opt-name {
+  flex: 1 1 auto;
+  font-size: 10px;
+  color: var(--c-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sym-opt-exch {
+  font-size: 9px;
+  color: var(--c-muted);
+  letter-spacing: 0.08em;
+}
+
+/* ── Watchlist (multi-symbol Phase B) ── the starred-symbols panel, rendered
+   inside the 🔍 popover (.sym-dropdown) while the query is empty — no chrome
+   of its own on the cockpit (kisa, 2026-07-09). */
+.watch-add {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  border-bottom: 1px solid var(--c-border);
+  background: none;
+  color: var(--c-muted);
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+.watch-add:hover { color: var(--c-accent); background: var(--c-surfaceAlt); }
+.watch-add b { color: var(--c-text); font-weight: 700; }
+.watch-empty { padding: 8px 10px; font-size: 11px; color: var(--c-muted); }
+.watch-row {
+  display: flex;
+  align-items: stretch;
+  border-bottom: 1px solid var(--c-border);
+}
+.watch-row:last-child { border-bottom: none; }
+.watch-row.active { background: var(--c-surfaceAlt); }
+.watch-row.stale { opacity: 0.45; }
+.watch-row-main {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 6px 10px;
+  border: none;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+.watch-row-main:hover { background: var(--c-surfaceAlt); }
+.watch-tkr {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--c-text);
+  font-family: 'JetBrains Mono', monospace;
+  min-width: 44px;
+}
+.watch-last {
+  flex: 1 1 auto;
+  text-align: right;
+  font-size: 11px;
+  color: var(--c-text);
+  font-family: 'JetBrains Mono', monospace;
+}
+.watch-pct {
+  min-width: 52px;
+  text-align: right;
+  font-size: 11px;
+  font-family: 'JetBrains Mono', monospace;
+}
+.watch-x {
+  flex: 0 0 auto;
+  padding: 0 8px;
+  border: none;
+  background: none;
+  color: var(--c-muted);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+}
+.watch-x:hover { color: var(--c-down); }
+.guest-weekly {
+  font-size: 11px;
+  color: var(--c-muted);
+  letter-spacing: 0.04em;
+}
+/* Guest ticket: symbol tag + physical-settlement warning line. */
+.modal-sym {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+/* ── Right-click strike menu (⚡-off half of the chart's right-click) ── */
+.chart-menu-veil { position: fixed; inset: 0; z-index: 59; }
+.chart-menu {
+  position: fixed;
+  z-index: 60;
+  padding: 5px 0;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+.cm-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 14px;
+  width: 100%;
+  padding: 7px 12px;
+  border: none;
+  background: none;
+  color: var(--c-text);
+  font-size: 11px;
+  font-family: inherit;
+  letter-spacing: 0.04em;
+  text-align: left;
+  cursor: pointer;
+}
+.cm-item b { font-family: 'JetBrains Mono', monospace; font-weight: 700; }
+.cm-item:hover { background: var(--c-surfaceAlt); }
+.cm-sell { color: var(--c-loss, #e07d8a); }
+.cm-arm { color: var(--c-accent); }
+
+/* ── ? overlay — keys/gestures/marks reference ── */
+.help-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  background: rgba(4, 5, 14, 0.62);
+  display: grid;
+  place-items: center;
+}
+.help-panel {
+  width: min(92vw, 880px);
+  max-height: 84vh;
+  overflow-y: auto;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: 10px;
+  box-shadow: 0 14px 44px rgba(0, 0, 0, 0.5);
+  padding: 14px 18px 18px;
+}
+.help-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  color: var(--c-muted);
+  margin-bottom: 12px;
+}
+.help-close {
+  border: none;
+  background: none;
+  color: var(--c-muted);
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.help-close:hover { color: var(--c-text); }
+.help-cols {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 20px;
+}
+.help-col h3 {
+  margin: 0 0 8px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--c-accent);
+  text-transform: uppercase;
+}
+.help-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 4px 0;
+  font-size: 11.5px;
+  color: var(--c-muted);
+}
+.help-row kbd {
+  flex: 0 0 auto;
+  min-width: 86px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px;
+  color: var(--c-text);
+  background: var(--c-surfaceAlt);
+  border: 1px solid var(--c-border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  text-align: center;
+}

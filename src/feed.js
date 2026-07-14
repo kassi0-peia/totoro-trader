@@ -5,6 +5,16 @@
 // onOrderEvent callback.
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { applyMessage, createInitialSnapshot, positionsAuthorityAfterMessage } from './feed-model.js';
+
+export {
+  applyMessage,
+  createInitialSnapshot,
+  liveGreeks,
+  liveQuote,
+  optionKey,
+  positionsAuthorityAfterMessage,
+} from './feed-model.js';
 
 function defaultWsUrl() {
   // No app-layer auth on the socket: the bridge serves this very bundle to anyone
@@ -15,102 +25,233 @@ function defaultWsUrl() {
   return `${proto}://${window.location.host}/ws`;
 }
 
-function key(strike, type) {
-  return `${strike}${type[0].toUpperCase()}`;
+const TAB_CLIENT_ID_KEY = 'tt.guestClientId.v1';
+
+function validTabClientId(value) {
+  return typeof value === 'string'
+    && value.length >= 8
+    && value.length <= 128
+    && value.trim() === value
+    && /^[A-Za-z0-9._:-]+$/.test(value);
 }
 
-let refSeq = 1;
-function nextClientRef() {
-  return `c${Date.now().toString(36)}${(refSeq++).toString(36)}`;
+function runtimeEntropy() {
+  try {
+    const uuid = globalThis.crypto?.randomUUID?.();
+    if (uuid) return uuid;
+  } catch { /* fall through to best-effort browser entropy */ }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
 }
 
-export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent } = {}) {
-  const [snapshot, setSnapshot] = useState(() => {
-    return {
-      live: false,
-      delayed: false,        // bridge connected but IBKR served delayed data (code 10197)
-      socketOpen: false,
-      price: null,           // no price until the bridge delivers live data
-      tickTs: null,          // when the displayed price last ticked (staleness heartbeat)
-      candles: [],           // empty chart until the bridge delivers candles
-      greeksMap: new Map(),
-      source: 'SPX',
-      expiry: null,
-      basis: null,
-      basisFrozen: false,
-      basisEstimated: false,
-      vix: { last: null, close: null },
-      // account safety gate
-      account: null,
-      accountType: null,     // 'paper' | 'live' | null
-      executionEnabled: false,
-      trades: [],            // today's fills (blotter)
-      positions: [],         // IBKR-authoritative open option positions
-      orders: [],            // working (unfilled) orders, visible on every device
-      histSeries: {},        // per-timeframe historical candles (5m → 1W … 1D → 1Y)
-      optHist: {},           // per-contract intraday premium series ("7500C" -> candles)
-      replayDays: {},        // replay mode: "YYYYMMDD" -> full 1-min RTH session
-      journal: null,         // multi-day fill archive: "YYYYMMDD" -> [fill, ...] (null until requested)
-      funds: null,           // { availableFunds, buyingPower, netLiquidation }
-      spxClose: null,        // previous trading day's 4:00 PM SPX cash close
-      // ── Guest-symbol layer (multi-symbol Phase A) ──
-      // null when no guest is active; otherwise the guest instrument's cockpit
-      // data, same field shapes as the SPX equivalents so parsing is reusable.
-      // guestGreeksMap is SEPARATE from greeksMap — guest greeks never merge in.
-      guest: null,           // { symbol, price, candles, expiry, strikeStep, expirations, settlement, live }
-      guestGreeksMap: new Map(),
-      searchResults: null,   // { q, matches:[{symbol,name,conId,secType,exchange,currency}] } | null
-      // ── Watchlist layer (multi-symbol Phase B) ──
-      // Quotes-only: the bridge polls a client-owned stock list with one-shot
-      // snapshots. Keyed by symbol for O(1) row lookup; SPX is never here (the
-      // client pins it from the live feed).
-      watchlistQuotes: {},   // symbol -> { symbol, last, bid, ask, changePct, ts }
-      posQuotes: {}          // inactive-guest position quotes: 'SYM|strike|right|expiry' -> { bid, ask, last, ts }
-    };
-  });
+function hashNamespace(value) {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < value.length; i += 1) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+// Every browser realm gets a namespace made from its stable tab identity plus
+// fresh runtime entropy. The latter also distinguishes duplicated tabs before
+// the guest hello handshake has time to rotate a copied sessionStorage id.
+export function createClientRefGenerator({ namespace, now = Date.now } = {}) {
+  if (typeof namespace !== 'string' || !namespace || !/^[A-Za-z0-9._:-]+$/.test(namespace)) {
+    throw new TypeError('client-ref namespace must be a non-empty safe string');
+  }
+  if (typeof now !== 'function') throw new TypeError('client-ref clock must be a function');
+  const boundedNamespace = namespace.length <= 96
+    ? namespace
+    : `${namespace.slice(0, 86)}.${hashNamespace(namespace)}`;
+  let sequence = 1;
+  return () => {
+    const timestamp = Number(now());
+    if (!Number.isSafeInteger(timestamp) || timestamp < 0) throw new Error('client-ref clock returned an invalid timestamp');
+    const ref = `c:${boundedNamespace}:${timestamp.toString(36)}:${(sequence++).toString(36)}`;
+    if (ref.length > 128) throw new Error('generated clientRef exceeds the bridge limit');
+    return ref;
+  };
+}
+
+export function getOrCreateTabClientId({
+  storage,
+  randomUUID = globalThis.crypto?.randomUUID?.bind(globalThis.crypto),
+  replace = false,
+} = {}) {
+  if (storage === undefined) {
+    try { storage = globalThis.sessionStorage; } catch { storage = null; }
+  }
+  if (!replace) {
+    try {
+      const saved = storage?.getItem?.(TAB_CLIENT_ID_KEY);
+      if (validTabClientId(saved)) return saved;
+    } catch { /* storage is best-effort; the in-memory id still works */ }
+  }
+  let entropy;
+  try { entropy = typeof randomUUID === 'function' ? randomUUID() : null; } catch { entropy = null; }
+  const id = `tab-${entropy || runtimeEntropy()}`.slice(0, 128);
+  try { storage?.setItem?.(TAB_CLIENT_ID_KEY, id); } catch {}
+  return id;
+}
+
+export function canSendReplayRequest(ws, live) {
+  return !!live && !!ws && ws.readyState === 1;
+}
+
+// WebSocket.readyState can change between the check and send(), and JSON
+// serialization can fail too. Treat both as an unsent command so callers never
+// create an optimistic order/position for bytes that did not leave the tab.
+export function sendWsJson(ws, message) {
+  if (!ws || ws.readyState !== 1) return false;
+  try {
+    ws.send(JSON.stringify(message));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent, onGuestEvent } = {}) {
+  const [snapshot, setSnapshot] = useState(createInitialSnapshot);
 
   const socketRef = useRef(null);
+  // Kept synchronously alongside reducer state so a fill callback is stamped
+  // against the exact authority packet ordering seen on the socket, even when
+  // React batches both messages into one render.
+  const positionsAuthorityRef = useRef({
+    positionsRevision: snapshot.positionsRevision,
+    positionAuthoritySourceRevision: snapshot.positionAuthoritySourceRevision,
+  });
+  const liveRef = useRef(snapshot.live);
+  liveRef.current = snapshot.live;
+  const guestClientReadyRef = useRef(snapshot.guestClientReady);
+  guestClientReadyRef.current = snapshot.guestClientReady;
+  const guestClientIdRef = useRef(null);
+  if (!guestClientIdRef.current) guestClientIdRef.current = getOrCreateTabClientId();
+  const clientRefGeneratorRef = useRef(null);
+  if (!clientRefGeneratorRef.current) {
+    clientRefGeneratorRef.current = createClientRefGenerator({
+      namespace: `${guestClientIdRef.current}.${runtimeEntropy()}`,
+    });
+  }
   const onOrderEventRef = useRef(onOrderEvent);
   onOrderEventRef.current = onOrderEvent;
+  const onGuestEventRef = useRef(onGuestEvent);
+  onGuestEventRef.current = onGuestEvent;
 
   // WebSocket lifecycle with auto-reconnect.
   useEffect(() => {
     let cancelled = false;
     let ws = null;
     let retry = null;
+    let helloRetry = null;
 
     const open = () => {
       if (cancelled) return;
+      let socket;
       try {
-        ws = new WebSocket(url);
+        socket = new WebSocket(url);
       } catch {
         scheduleRetry();
         return;
       }
-      socketRef.current = ws;
+      ws = socket;
+      socketRef.current = socket;
+      let helloAttempts = 0;
 
-      ws.onopen = () => setSnapshot((s) => ({ ...s, socketOpen: true }));
-
-      ws.onmessage = (ev) => {
-        let msg;
-        try { msg = JSON.parse(ev.data); } catch { return; }
-        // Order lifecycle events are transient — hand them to the callback.
-        if (msg.type === 'orderAck' || msg.type === 'fill' || msg.type === 'orderError' || msg.type === 'orderWarning' || msg.type === 'orderAutoCancel' || msg.type === 'cancelAck' ||
-            msg.type === 'armedFired' || msg.type === 'armedFailed' || msg.type === 'armedRejected') {
-          onOrderEventRef.current?.(msg);
-          return;
+      const sendHello = ({ rotate = false } = {}) => {
+        if (cancelled || socketRef.current !== socket || socket.readyState !== 1) return;
+        if (!guestClientIdRef.current || rotate) {
+          guestClientIdRef.current = getOrCreateTabClientId({ replace: rotate });
         }
-        setSnapshot((s) => applyMessage(s, msg));
+        if (!sendWsJson(socket, { type: 'clientHello', clientId: guestClientIdRef.current })) {
+          try { socket.close(); } catch {}
+        }
       };
 
-      ws.onclose = () => {
+      socket.onopen = () => {
+        if (socketRef.current !== socket) return;
+        guestClientReadyRef.current = false;
+        setSnapshot((s) => ({ ...s, socketOpen: true, guestClientReady: false }));
+        sendHello();
+      };
+
+      socket.onmessage = (ev) => {
+        if (socketRef.current !== socket) return;
+        let msg;
+        try { msg = JSON.parse(ev.data); } catch { return; }
+        positionsAuthorityRef.current = positionsAuthorityAfterMessage(positionsAuthorityRef.current, msg);
+        if (msg.type === 'clientHelloAck') {
+          if (msg.accepted) {
+            clearTimeout(helloRetry);
+            guestClientReadyRef.current = true;
+            setSnapshot((s) => ({ ...s, guestClientReady: true }));
+          } else if (msg.code === 'IDENTITY_IN_USE') {
+            clearTimeout(helloRetry);
+            if (helloAttempts++ < 2) helloRetry = setTimeout(() => sendHello(), 200);
+            else sendHello({ rotate: true });
+          } else if (msg.code === 'INVALID_CLIENT_ID') {
+            sendHello({ rotate: true });
+          } else {
+            guestClientReadyRef.current = false;
+            onGuestEventRef.current?.(msg);
+          }
+          return;
+        }
+        if (msg.type === 'reverseState') {
+          setSnapshot((s) => applyMessage(s, msg));
+          onOrderEventRef.current?.(msg, {
+            positionsRevision: positionsAuthorityRef.current.positionsRevision,
+          });
+          return;
+        }
+        // Order lifecycle events are transient — hand them to the callback.
+        if (msg.type === 'orderAck' || msg.type === 'fill' || msg.type === 'orderError' || msg.type === 'orderWarning' || msg.type === 'orderAutoCancel' || msg.type === 'cancelAck' ||
+            msg.type === 'armedFired' || msg.type === 'armedFailed' || msg.type === 'armedRejected' || msg.type === 'armedCleared') {
+          onOrderEventRef.current?.(msg, {
+            positionsRevision: positionsAuthorityRef.current.positionsRevision,
+          });
+          return;
+        }
+        if (msg.type === 'guestActivationAck' || msg.type === 'guestDeactivationAck') {
+          onGuestEventRef.current?.(msg);
+          return;
+        }
+        setSnapshot((s) => {
+          const next = applyMessage(s, msg);
+          // Backward compatibility during a rolling bridge update: an older
+          // bridge has no registry capability or hello ack, so its snapshot is
+          // the transport-ready signal for the legacy guest protocol.
+          if (msg.type === 'snapshot' && !msg.caps?.guestRegistry) {
+            guestClientReadyRef.current = true;
+            return { ...next, guestClientReady: true };
+          }
+          return next;
+        });
+      };
+
+      socket.onclose = () => {
+        if (socketRef.current !== socket) return;
+        clearTimeout(helloRetry);
         socketRef.current = null;
+        // The next socket's first authority-bearing snapshot is a fresh
+        // confirmation even if a restarted bridge reused its numeric revision.
+        positionsAuthorityRef.current = {
+          ...positionsAuthorityRef.current,
+          positionAuthoritySourceRevision: null,
+        };
+        guestClientReadyRef.current = false;
         // Connection lost → drop live + the execution gate (fail safe).
-        setSnapshot((s) => ({ ...s, socketOpen: false, live: false, delayed: false, executionEnabled: false }));
+        setSnapshot((s) => ({
+          ...applyMessage(s, { type: 'status', connected: false }),
+          socketOpen: false,
+          guestClientReady: false,
+          positionAuthoritySourceRevision: null,
+        }));
         if (!cancelled) scheduleRetry();
       };
 
-      ws.onerror = () => { try { ws.close(); } catch {} };
+      socket.onerror = () => { if (socketRef.current === socket) { try { socket.close(); } catch {} } };
     };
 
     const scheduleRetry = () => {
@@ -122,6 +263,7 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent } = {}) {
     return () => {
       cancelled = true;
       clearTimeout(retry);
+      clearTimeout(helloRetry);
       if (ws) { try { ws.close(); } catch {} }
     };
   }, [url]);
@@ -130,332 +272,124 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent } = {}) {
   // or null if the socket isn't open. The bridge enforces the safety gate too.
   const sendOrder = useCallback((payload) => {
     const ws = socketRef.current;
-    if (!ws || ws.readyState !== 1) return null;
-    const clientRef = payload.clientRef || nextClientRef();
-    ws.send(JSON.stringify({ type: 'order', clientRef, ...payload }));
+    if (payload?.symbol && payload.symbol !== 'SPX' && !guestClientReadyRef.current) return null;
+    const clientRef = payload.clientRef || clientRefGeneratorRef.current();
+    if (!sendWsJson(ws, { type: 'order', clientRef, ...payload })) return null;
     return clientRef;
   }, []);
 
   // Cancel a working order. Identify it by clientRef when we have one, plus
   // strike/right/expiry as a fallback (refs don't survive a bridge restart).
   const sendCancel = useCallback((payload) => {
+    return sendWsJson(socketRef.current, { type: 'cancel', ...payload });
+  }, []);
+
+  // Start the server-owned staged KILL transaction. This is deliberately one
+  // command: the browser must not race its own cancels/closes against IBKR's
+  // cancellation confirmations and authoritative position refreshes.
+  const sendKill = useCallback((payload = {}) => {
     const ws = socketRef.current;
-    if (!ws || ws.readyState !== 1) return false;
-    ws.send(JSON.stringify({ type: 'cancel', ...payload }));
-    return true;
+    const requestId = payload.requestId || `kill-${clientRefGeneratorRef.current()}`;
+    if (!sendWsJson(ws, { type: 'kill', requestId })) return null;
+    return requestId;
+  }, []);
+
+  // REVERSE is one server-owned transaction, never two browser orders. The
+  // bridge derives close/reopen sides and broker-authoritative quantity.
+  const sendReverse = useCallback((payload = {}) => {
+    const ws = socketRef.current;
+    if (payload?.source?.symbol && payload.source.symbol !== 'SPX' && !guestClientReadyRef.current) return null;
+    const requestId = payload.requestId || clientRefGeneratorRef.current();
+    if (!sendWsJson(ws, { ...payload, type: 'reverse', requestId })) return null;
+    return requestId;
   }, []);
 
   // Ask the bridge for a one-shot snapshot quote (far strikes outside the chain).
   const requestQuote = useCallback((payload) => {
-    const ws = socketRef.current;
-    if (!ws || ws.readyState !== 1) return false;
-    ws.send(JSON.stringify({ type: 'quote', ...payload }));
-    return true;
+    return sendWsJson(socketRef.current, { type: 'quote', ...payload });
   }, []);
 
   // Ask the bridge for historical candles for a timeframe (cached server-side).
   const requestHistory = useCallback((tf) => {
-    const ws = socketRef.current;
-    if (!ws || ws.readyState !== 1) return false;
-    ws.send(JSON.stringify({ type: 'history', tf }));
-    return true;
+    return sendWsJson(socketRef.current, { type: 'history', tf });
   }, []);
 
   // Intraday premium history for one option contract (the position graph).
   const requestOptHistory = useCallback((payload) => {
     const ws = socketRef.current;
-    if (!ws || ws.readyState !== 1) return false;
-    ws.send(JSON.stringify({ type: 'optHistory', ...payload }));
-    return true;
+    if (payload?.symbol && payload.symbol !== 'SPX' && !guestClientReadyRef.current) return false;
+    return sendWsJson(ws, { type: 'optHistory', ...payload });
   }, []);
 
   // Replay mode: ask the bridge for a past day's full 1-min RTH session.
   const requestReplayDay = useCallback((date) => {
     const ws = socketRef.current;
-    if (!ws || ws.readyState !== 1) return false;
-    ws.send(JSON.stringify({ type: 'replayDay', date }));
+    // The bridge process can keep this WebSocket open while its IB connection is
+    // down. Treat that state as offline so Replay never creates an endless
+    // LOADING shell from a request the bridge cannot submit.
+    if (!canSendReplayRequest(ws, liveRef.current)) return false;
+    if (!sendWsJson(ws, { type: 'replayDay', date })) return false;
+    setSnapshot((s) => {
+      const key = `replay-day:${date}`;
+      if (!s.historyErrors?.[key]) return s;
+      const historyErrors = { ...s.historyErrors };
+      delete historyErrors[key];
+      return { ...s, historyErrors };
+    });
     return true;
   }, []);
 
   // Multi-day journal: every recorded fill, keyed by trade date.
   const requestJournal = useCallback(() => {
-    const ws = socketRef.current;
-    if (!ws || ws.readyState !== 1) return false;
-    ws.send(JSON.stringify({ type: 'journal' }));
-    return true;
+    return sendWsJson(socketRef.current, { type: 'journal' });
   }, []);
 
   // ⚔ armed orders: wholesale-set the bridge's list (watchlist pattern — the
   // client owns it and re-sends on reconnect; the bridge re-validates each).
   const sendArmed = useCallback((orders) => {
-    const ws = socketRef.current;
-    if (!ws || ws.readyState !== 1) return false;
-    ws.send(JSON.stringify({ type: 'armed', orders }));
-    return true;
+    return sendWsJson(socketRef.current, { type: 'armed', orders });
   }, []);
 
   // Attach/edit/clear a one-line note on a fill row (today or any journal day).
   const sendFillNote = useCallback((id, text) => {
-    const ws = socketRef.current;
-    if (!ws || ws.readyState !== 1) return false;
-    ws.send(JSON.stringify({ type: 'fillNote', id, text }));
-    return true;
+    return sendWsJson(socketRef.current, { type: 'fillNote', id, text });
+  }, []);
+
+  // 📸 fill snapshot: one still frame of the chart at fill time, persisted
+  // bridge-side next to the journal (dataUrl = the canvas as webp/png).
+  const sendFillShot = useCallback((id, dataUrl) => {
+    return sendWsJson(socketRef.current, { type: 'fillShot', id, dataUrl });
   }, []);
 
   // ── Guest-symbol senders (multi-symbol Phase A) ──
   const searchSymbols = useCallback((q) => {
     const ws = socketRef.current;
-    if (!ws || ws.readyState !== 1) return false;
-    ws.send(JSON.stringify({ type: 'symbolSearch', q }));
-    return true;
+    if (!guestClientReadyRef.current) return false;
+    return sendWsJson(ws, { type: 'symbolSearch', q });
   }, []);
 
   const activateSymbol = useCallback((symbol, conId) => {
     const ws = socketRef.current;
-    if (!ws || ws.readyState !== 1) return false;
-    ws.send(JSON.stringify({ type: 'activateSymbol', symbol, conId }));
-    return true;
+    if (!guestClientReadyRef.current) return null;
+    const requestId = `guest-activate-${clientRefGeneratorRef.current()}`;
+    if (!sendWsJson(ws, { type: 'activateSymbol', requestId, symbol, conId })) return null;
+    return requestId;
   }, []);
 
   const deactivateSymbol = useCallback(() => {
     const ws = socketRef.current;
-    if (!ws || ws.readyState !== 1) return false;
-    ws.send(JSON.stringify({ type: 'deactivateSymbol' }));
-    return true;
+    if (!guestClientReadyRef.current) return null;
+    const requestId = `guest-deactivate-${clientRefGeneratorRef.current()}`;
+    if (!sendWsJson(ws, { type: 'deactivateSymbol', requestId })) return null;
+    return requestId;
   }, []);
 
   // Set the watchlist (multi-symbol Phase B). The client owns the list; the
   // bridge polls it for snapshot quotes. Send it verbatim — the bridge
   // normalizes (uppercase/dedupe/cap/SPX-excluded). App re-sends on reconnect.
   const setWatchlist = useCallback((symbols) => {
-    const ws = socketRef.current;
-    if (!ws || ws.readyState !== 1) return false;
-    ws.send(JSON.stringify({ type: 'watchlist', symbols }));
-    return true;
+    return sendWsJson(socketRef.current, { type: 'watchlist', symbols });
   }, []);
 
-  return { ...snapshot, sendOrder, sendCancel, requestQuote, requestHistory, requestOptHistory, requestReplayDay, requestJournal, sendFillNote, sendArmed, searchSymbols, activateSymbol, deactivateSymbol, setWatchlist };
-}
-
-// Exported for unit testing the reducer (guest merges must not disturb SPX
-// snapshot fields). Not part of the hook's public surface otherwise.
-export function applyMessage(s, msg) {
-  if (msg.type === 'snapshot') {
-    const greeksMap = new Map();
-    for (const g of msg.greeks || []) greeksMap.set(key(g.strike, g.type), g);
-    const goLive = !!msg.connected;
-    return {
-      ...s,
-      live: goLive,
-      delayed: goLive && !!msg.delayed,
-      price: goLive && msg.price != null ? msg.price : s.price,
-      // Staleness heartbeat: the bridge's last-tick time for the displayed price,
-      // used as a seed at connect. Live ticks below re-stamp it to arrival time.
-      tickTs: msg.tickTs ?? s.tickTs,
-      candles: goLive && msg.candles?.length ? msg.candles : s.candles,
-      greeksMap,
-      source: msg.source || s.source,
-      expiry: msg.expiry ?? s.expiry,
-      basis: msg.basis ?? null,
-      basisFrozen: !!msg.basisFrozen,
-      basisEstimated: !!msg.basisEstimated,
-      basisLive: msg.basisLive ?? null,
-      basisSource: msg.basisSource ?? null,
-      vix: msg.vix || s.vix,
-      account: msg.account ?? null,
-      accountType: msg.accountType ?? null,
-      executionEnabled: !!msg.executionEnabled,
-      trades: Array.isArray(msg.trades) ? msg.trades : s.trades,
-      positions: Array.isArray(msg.positions) ? msg.positions : s.positions,
-      orders: Array.isArray(msg.orders) ? msg.orders : s.orders,
-      funds: msg.funds ?? s.funds,
-      spxClose: msg.spxClose ?? s.spxClose
-    };
-  }
-
-  if (msg.type === 'trade') {
-    if (s.trades.some((t) => t.id === msg.trade.id)) return s;
-    return { ...s, trades: [...s.trades, msg.trade] };
-  }
-
-  if (msg.type === 'positions') {
-    return { ...s, positions: Array.isArray(msg.positions) ? msg.positions : [] };
-  }
-
-  if (msg.type === 'orders') {
-    return { ...s, orders: Array.isArray(msg.orders) ? msg.orders : [] };
-  }
-
-  if (msg.type === 'historyResult') {
-    return { ...s, histSeries: { ...s.histSeries, [msg.tf]: msg.candles || [] } };
-  }
-
-  // A note landed on a fill row — patch it wherever that row is visible
-  // (today's blotter and/or the fetched journal day).
-  if (msg.type === 'noteResult') {
-    const patch = (rows) => rows.map((r) => {
-      if (r.id !== msg.id) return r;
-      if (msg.note) return { ...r, note: msg.note };
-      const { note, ...rest } = r;
-      return rest;
-    });
-    const trades = s.trades.some((r) => r.id === msg.id) ? patch(s.trades) : s.trades;
-    let journal = s.journal;
-    if (journal && msg.day && (journal[msg.day] || []).some((r) => r.id === msg.id)) {
-      journal = { ...journal, [msg.day]: patch(journal[msg.day]) };
-    }
-    return { ...s, trades, journal };
-  }
-
-  if (msg.type === 'journalResult') {
-    return { ...s, journal: msg.days || {} };
-  }
-
-  if (msg.type === 'funds') {
-    return { ...s, funds: msg.funds ?? null };
-  }
-
-  if (msg.type === 'vix') {
-    return { ...s, vix: { last: msg.last ?? null, close: msg.close ?? null } };
-  }
-
-  if (msg.type === 'status') {
-    return { ...s, live: !!msg.connected, delayed: msg.connected ? s.delayed : false };
-  }
-
-  if (msg.type === 'dataDelayed') {
-    return { ...s, delayed: !!msg.delayed };
-  }
-
-  if (msg.type === 'account') {
-    return {
-      ...s,
-      account: msg.account ?? null,
-      accountType: msg.accountType ?? null,
-      executionEnabled: !!msg.executionEnabled
-    };
-  }
-
-  if (msg.type === 'tick') {
-    if (!s.live) return s;
-    if (msg.source && msg.source !== s.source) return s;
-    let candles = s.candles;
-    if (msg.candle) {
-      const last = candles[candles.length - 1];
-      if (last && last.t === msg.candle.t) candles = [...candles.slice(0, -1), msg.candle];
-      else candles = [...candles, msg.candle];
-    }
-    // Stamp arrival time: a tick just landed, so the displayed price is fresh now.
-    // (Covers both SPX and ES source ticks — whichever is being shown.)
-    return { ...s, price: msg.price, candles, tickTs: Date.now() };
-  }
-
-  // One-shot snapshot quote for a strike outside the streamed chain — merge it
-  // into the greeks map so tooltips/modals find it via the normal lookup.
-  if (msg.type === 'quoteResult') {
-    // A guest-position snapshot quote lives in its own map, keyed by the full
-    // contract — never merged into the SPX greeks map (a TSLA 315C must not
-    // collide with SPX strikes, and the expiry guard below is SPX-specific).
-    if (msg.symbol && msg.symbol !== 'SPX') {
-      const k = `${msg.symbol}|${msg.strike}|${msg.right}|${msg.expiry}`;
-      return { ...s, posQuotes: { ...s.posQuotes, [k]: { bid: msg.bid ?? null, ask: msg.ask ?? null, last: msg.last ?? null, ts: msg.ts ?? Date.now() } } };
-    }
-    if (msg.expiry && s.expiry && msg.expiry !== s.expiry) return s;
-    const type = msg.right === 'C' ? 'call' : 'put';
-    const k = key(msg.strike, type);
-    const prev = s.greeksMap.get(k);
-    const next = new Map(s.greeksMap);
-    next.set(k, {
-      strike: msg.strike, type,
-      premium: prev?.premium ?? null,
-      delta: prev?.delta, gamma: prev?.gamma, theta: prev?.theta, vega: prev?.vega, iv: prev?.iv,
-      bid: msg.bid, ask: msg.ask, dayHigh: msg.dayHigh ?? prev?.dayHigh, dayLow: msg.dayLow ?? prev?.dayLow, snapshotTs: msg.ts
-    });
-    return { ...s, greeksMap: next };
-  }
-
-  if (msg.type === 'optHistoryResult') {
-    // Key by symbol so a guest's 500C premium graph can't collide with SPXW's.
-    // SPX keys stay bare (symbol absent or 'SPX') for back-compat with old rows.
-    const base = key(msg.strike, msg.right === 'C' ? 'call' : 'put');
-    const k = msg.symbol && msg.symbol !== 'SPX' ? `${msg.symbol}:${base}` : base;
-    return { ...s, optHist: { ...s.optHist, [k]: { candles: msg.candles || [], ts: Date.now() } } };
-  }
-
-  if (msg.type === 'replayDayResult') {
-    return { ...s, replayDays: { ...s.replayDays, [msg.date]: msg.candles || [] } };
-  }
-
-  if (msg.type === 'greeks') {
-    const next = new Map(s.greeksMap);
-    next.set(key(msg.strike, msg.optionType), {
-      strike: msg.strike, type: msg.optionType, premium: msg.premium,
-      delta: msg.delta, gamma: msg.gamma, theta: msg.theta, vega: msg.vega, iv: msg.iv,
-      bid: msg.bid, ask: msg.ask, dayHigh: msg.dayHigh, dayLow: msg.dayLow, tickTs: msg.tickTs
-    });
-    return { ...s, greeksMap: next };
-  }
-
-  // ── Guest-symbol messages (multi-symbol Phase A) ──
-  // A full guest snapshot. Rebuilds the SEPARATE guestGreeksMap from scratch;
-  // guest:null tears the guest cockpit down. SPX snapshot fields are untouched.
-  if (msg.type === 'guest') {
-    if (!msg.guest) return { ...s, guest: null, guestGreeksMap: new Map() };
-    const gm = new Map();
-    for (const g of msg.guest.greeks || []) gm.set(key(g.strike, g.type), g);
-    const { greeks, ...rest } = msg.guest;
-    return { ...s, guest: rest, guestGreeksMap: gm };
-  }
-
-  if (msg.type === 'guestTick') {
-    if (!s.guest || msg.symbol !== s.guest.symbol) return s;
-    let candles = s.guest.candles;
-    if (msg.candle) {
-      const last = candles[candles.length - 1];
-      if (last && last.t === msg.candle.t) candles = [...candles.slice(0, -1), msg.candle];
-      else candles = [...candles, msg.candle];
-    }
-    return { ...s, guest: { ...s.guest, price: msg.price, candles, live: true, lastTickTs: Date.now() } };
-  }
-
-  if (msg.type === 'guestGreeks') {
-    const next = new Map(s.guestGreeksMap);
-    next.set(key(msg.strike, msg.optionType), {
-      strike: msg.strike, type: msg.optionType, premium: msg.premium,
-      delta: msg.delta, gamma: msg.gamma, theta: msg.theta, vega: msg.vega, iv: msg.iv,
-      bid: msg.bid, ask: msg.ask, dayHigh: msg.dayHigh, dayLow: msg.dayLow, tickTs: msg.tickTs
-    });
-    return { ...s, guestGreeksMap: next };
-  }
-
-  if (msg.type === 'symbolSearchResult') {
-    return { ...s, searchResults: { q: msg.q, matches: msg.matches || [] } };
-  }
-
-  // A complete watchlist quote set (the bridge sends every cached quote for the
-  // current list on each update). Rebuild the keyed map wholesale so symbols the
-  // client removed drop out; SPX snapshot fields are untouched.
-  if (msg.type === 'watchlistQuotes') {
-    const next = {};
-    for (const q of msg.quotes || []) if (q && q.symbol) next[q.symbol] = q;
-    return { ...s, watchlistQuotes: next };
-  }
-
-  return s;
-}
-
-// Look up live greeks for a strike/type. Returns null until the backend delivers
-// model values — callers fall back to options.greeks().
-export function liveGreeks(greeksMap, strike, type) {
-  if (!greeksMap) return null;
-  const g = greeksMap.get(key(strike, type));
-  if (!g || g.premium == null) return null;
-  return g;
-}
-
-// Raw chain entry (bid/ask + greeks) regardless of whether the model premium has
-// arrived yet. Used for the live bid/ask display.
-export function liveQuote(greeksMap, strike, type) {
-  if (!greeksMap) return null;
-  return greeksMap.get(key(strike, type)) || null;
+  return { ...snapshot, sendOrder, sendCancel, sendKill, sendReverse, requestQuote, requestHistory, requestOptHistory, requestReplayDay, requestJournal, sendFillNote, sendFillShot, sendArmed, searchSymbols, activateSymbol, deactivateSymbol, setWatchlist };
 }
