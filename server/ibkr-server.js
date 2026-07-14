@@ -30,6 +30,13 @@ import {
 } from './candle-series.js';
 import { parseExecTime } from './execution-time.js';
 import { createStaticServer, defaultCARoot } from './http-server.js';
+import {
+  bracketChild,
+  guestOptionContract,
+  parentOrderRecord,
+  planOrderRequest,
+  spxwContract,
+} from './order-plan.js';
 
 // Last-resort backstop: an unexpected throw in one handler must not kill the whole
 // bridge while working orders/brackets are live at IBKR. Log loudly and stay up —
@@ -1620,7 +1627,7 @@ function setGuestChain() {
       guestChain.set(key, entry);
       subs.set(reqId, { kind: 'guest-opt', strike, right, key });
       try {
-        ib.reqMktData(reqId, guestOptContract(strike, right, guest.expiry), '', false, false, []);
+        ib.reqMktData(reqId, guestOptionContract(guest, strike, right, guest.expiry), '', false, false, []);
       } catch (e) {
         console.log(`[ibkr] guest reqMktData ${strike}${right} failed:`, e.message);
       }
@@ -1685,17 +1692,6 @@ function feedGuestSeries(price) {
     last.close = price;
   }
   return s.candles[s.candles.length - 1];
-}
-
-// The guest OPT contract from discovered params. multiplier from the secdef; the
-// bridge validates strike/expiry against the discovered lists BEFORE this is built.
-function guestOptContract(strike, right, expiry) {
-  return {
-    symbol: guest.symbol, secType: 'OPT', exchange: 'SMART', currency: 'USD',
-    lastTradeDateOrContractMonth: expiry, strike, right,
-    multiplier: guest.multiplier || '100',
-    ...(guest.tradingClass ? { tradingClass: guest.tradingClass } : {})
-  };
 }
 
 function handleDeactivateSymbol() {
@@ -2151,14 +2147,6 @@ function requestAccountSummary() {
 
 // ── Order execution ───────────────────────────────────────────────────────
 
-function spxwContract(strike, right, expiry) {
-  return {
-    symbol: 'SPX', secType: 'OPT', exchange: 'SMART', currency: 'USD',
-    lastTradeDateOrContractMonth: expiry, strike, right,
-    multiplier: '100', tradingClass: 'SPXW'
-  };
-}
-
 function handleOrderRequest(ws, msg) {
   const send = (m) => { if (ws.readyState === 1) ws.send(JSON.stringify(m)); };
   const clientRef = msg.clientRef;
@@ -2170,93 +2158,23 @@ function handleOrderRequest(ws, msg) {
   }
   if (!ib || !connected) return reject('IBKR not connected');
 
-  const action = msg.action === 'SELL' ? 'SELL' : 'BUY';
-  const right = msg.right === 'P' ? 'P' : 'C';
-  const strike = Number(msg.strike);
-  const qty = Math.max(1, Math.min(99, parseInt(msg.qty, 10) || 0));
-
-  // A guest order carries a `symbol` (absent, or 'SPX', means SPXW exactly as
-  // before). Guests: build the OPT contract from DISCOVERED params, validate the
-  // strike/expiry against them, and refuse a naked MKT — marketable limits only
-  // in Phase A (the ⚡ red MKT arm is SPX-only). `makeContract` unifies both paths.
-  const guestSym = typeof msg.symbol === 'string' && msg.symbol && msg.symbol !== 'SPX'
-    ? msg.symbol.toUpperCase() : null;
-  let expiry, makeContract, orderSymbol;
-  if (guestSym) {
-    if (!guest || guest.symbol !== guestSym) return reject(`guest ${guestSym} not active`);
-    expiry = /^\d{8}$/.test(String(msg.expiry || '')) ? String(msg.expiry) : guest.expiry;
-    const v = validateGuestOrder({ strike, right, expiry }, { strikes: guest.strikes, expirations: guest.expirations });
-    if (!v.ok) return reject(v.reason);
-    // Naked MKT is never routed for a guest — require a real limit price.
-    if (!(Number.isFinite(Number(msg.limit)) && Number(msg.limit) > 0)) {
-      return reject('guest orders are marketable limits only (no MKT)');
-    }
-    orderSymbol = guestSym;
-    makeContract = () => guestOptContract(strike, right, expiry);
-  } else {
-    expiry = /^\d{8}$/.test(String(msg.expiry || '')) ? String(msg.expiry) : currentExpiry;
-    orderSymbol = 'SPX';
-    makeContract = () => spxwContract(strike, right, expiry);
-  }
-  if (!(strike > 0) || !qty || !expiry) return reject('invalid order (strike/qty/expiry)');
-
-  // Optional limit price: caps what a resting order can pay (a queued MKT order
-  // fills at whatever the overnight opening rotation prints — a blank check).
-  const limit = Number(msg.limit);
-  const isLimit = Number.isFinite(limit) && limit > 0;
-  // Optional bracket children (BUY-to-open only): take-profit limit and/or stop.
-  // The TP is a native limit (works overnight); the stop is IBKR-simulated for
-  // options, so overnight it inherits the evening-hold behavior — caller beware.
-  const takeProfit = Number(msg.takeProfit);
-  const stopLoss = Number(msg.stopLoss);
-  const wantTp = action === 'BUY' && Number.isFinite(takeProfit) && takeProfit > 0;
-  const wantSl = action === 'BUY' && Number.isFinite(stopLoss) && stopLoss > 0;
-  // Standalone stop (STP, auxPrice) — exits attached to an EXISTING position.
-  // IBKR simulates option stops, so pre-midnight they inherit the evening hold;
-  // the TP limit leg is native and works all night.
-  const stop = Number(msg.stop);
-  const isStop = !isLimit && Number.isFinite(stop) && stop > 0;
-  // Standalone trailing stop (TRAIL, auxPrice = trail amount in premium $):
-  // the stop rides that far behind the option's best price and is MOVED AT
-  // IBKR'S SERVERS — no repricing logic lives in this bridge. Simulated for
-  // options like STP, so it inherits the same overnight caveats.
-  const trail = Number(msg.trail);
-  const isTrail = !isLimit && !isStop && Number.isFinite(trail) && trail > 0;
-  // OCA group: paired exits cancel each other when one fills.
-  const ocaGroup = typeof msg.ocaGroup === 'string' && msg.ocaGroup ? msg.ocaGroup : null;
-  // Fill-quality reference (mid/ask seen at send — stamped onto the fill row)
-  // and the ⚡ quick flag: quick orders exist for their moment only and are
-  // auto-cancelled if still unfilled after the window (no chase, by design).
-  const refAtSend = Number(msg.refAtSend);
-  const hasRef = Number.isFinite(refAtSend) && refAtSend > 0;
-  const quick = msg.quick === true;
+  const plan = planOrderRequest(msg, { currentExpiry, guest, account });
+  if (!plan.ok) return reject(plan.reason);
+  const {
+    action, right, strike, qty, expiry, orderSymbol, contract, order,
+    isLimit, limit, isStop, stop, isTrail, trail, ocaGroup,
+    wantTp, wantSl, takeProfit, stopLoss, quick,
+  } = plan;
 
   const orderId = reqSeq++;
-  const order = {
-    action,
-    orderType: isLimit ? 'LMT' : isStop ? 'STP' : isTrail ? 'TRAIL' : 'MKT',
-    ...(isLimit ? { lmtPrice: limit } : {}),
-    ...(isStop ? { auxPrice: stop } : {}),
-    ...(isTrail ? { auxPrice: trail } : {}),
-    ...(ocaGroup ? { ocaGroup, ocaType: 1 } : {}),
-    totalQuantity: qty,
-    tif: 'DAY',
-    // With children attached, transmit only the LAST of the group — IBKR then
-    // activates the whole bracket atomically.
-    transmit: !(wantTp || wantSl),
-    account,
-    // SPXW trades the CBOE overnight session (~8:15pm–9:15am ET); without this an
-    // order placed outside RTH would be held until the regular open.
-    outsideRth: true
-  };
-  orders.set(orderId, { clientRef, symbol: orderSymbol, action, strike, right, expiry, qty, orderType: order.orderType, limit: isLimit ? limit : isStop ? stop : isTrail ? trail : null, status: 'submitted', filled: 0, avgFillPrice: 0, ...(hasRef ? { refAtSend } : {}) });
+  orders.set(orderId, parentOrderRecord(plan));
   // Track every id we hand to IBKR so a mid-bracket throw can unwind cleanly.
   // The parent goes out transmit:false when children exist; if a child placeOrder
   // throws, the parent is sitting HELD in TWS and must be cancelled, not just
   // dropped from the map — otherwise it squats an order-id slot forever.
   const placedIds = [];
   try {
-    ib.placeOrder(orderId, makeContract(), order);
+    ib.placeOrder(orderId, contract, order);
     placedIds.push(orderId);
     // ⚡ auto-cancel: a quick order that hasn't filled inside its window has
     // outlived its moment — cancel it rather than leave a zombie working at a
@@ -2277,24 +2195,19 @@ function handleOrderRequest(ws, msg) {
       }, QUICK_CANCEL_MS);
     }
     if (wantTp || wantSl) {
-      const contract = makeContract();
       if (wantTp) {
         const tpId = reqSeq++;
-        orders.set(tpId, { clientRef: `${clientRef}:tp`, symbol: orderSymbol, action: 'SELL', strike, right, expiry, qty, orderType: 'LMT', limit: takeProfit, status: 'submitted', filled: 0, avgFillPrice: 0 });
-        ib.placeOrder(tpId, contract, {
-          action: 'SELL', orderType: 'LMT', lmtPrice: takeProfit, totalQuantity: qty,
-          tif: 'DAY', parentId: orderId, transmit: !wantSl, account, outsideRth: true
-        });
+        const child = bracketChild(plan, 'tp', orderId, account);
+        orders.set(tpId, child.record);
+        ib.placeOrder(tpId, contract, child.order);
         placedIds.push(tpId);
         console.log(`[ibkr] bracket TP SELL LMT@${takeProfit} (order ${tpId}, parent ${orderId})`);
       }
       if (wantSl) {
         const slId = reqSeq++;
-        orders.set(slId, { clientRef: `${clientRef}:sl`, symbol: orderSymbol, action: 'SELL', strike, right, expiry, qty, orderType: 'STP', limit: stopLoss, status: 'submitted', filled: 0, avgFillPrice: 0 });
-        ib.placeOrder(slId, contract, {
-          action: 'SELL', orderType: 'STP', auxPrice: stopLoss, totalQuantity: qty,
-          tif: 'DAY', parentId: orderId, transmit: true, account, outsideRth: true
-        });
+        const child = bracketChild(plan, 'sl', orderId, account);
+        orders.set(slId, child.record);
+        ib.placeOrder(slId, contract, child.order);
         placedIds.push(slId);
         console.log(`[ibkr] bracket SL SELL STP@${stopLoss} (order ${slId}, parent ${orderId})`);
       }
@@ -2376,7 +2289,7 @@ function handleOptHistoryRequest(_ws, msg) {
     const v = validateGuestOrder({ strike, right, expiry }, { strikes: guest.strikes, expirations: guest.expirations });
     if (!v.ok) return;
     symbol = guestSym;
-    contract = guestOptContract(strike, right, expiry);
+    contract = guestOptionContract(guest, strike, right, expiry);
   } else {
     expiry = String(msg.expiry || currentExpiry || session.expiry);
     symbol = 'SPX';
