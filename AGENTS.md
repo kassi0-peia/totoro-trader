@@ -79,9 +79,9 @@ env vars. This file carries the working context the README doesn't.
   matters (fallback + daily-change reference) — keep it correct too.
 - **Candle bucket:** derived from `Date.now()` (floored to `CANDLE_MS`), **not** a trusted
   running edge — `series.edge` is kept in sync but never trusted, and a `BAR_RUNAWAY`
-  watchdog backstops it, so a clock drift can't spawn multiple bars/minute. Note: `feedSeries`
-  currently opens each candle at the prior close (`open = last.close`) → continuous tape, no
-  gaps; an open audit item is to open at first tick so session-seam gaps render.
+  watchdog backstops it, so a clock drift can't spawn multiple bars/minute. `feedCandleSeries`
+  (via `feedSeries`) opens each candle at its first real tick (`open = price`) so session-seam
+  gaps render; don't change it back to the prior close and paper those gaps over.
 - **Fills/positions are IBKR-authoritative.** Entry/exit prices are the real `avgFillPrice`;
   fills dedupe by **`execId`**; a reconnect runs a `reqExecutions` backfill to recover
   anything missed while disconnected. Don't synthesize positions client-side.
