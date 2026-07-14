@@ -37,6 +37,8 @@ import {
   planOrderRequest,
   spxwContract,
 } from './order-plan.js';
+import { atomicWriteSync } from './atomic-file.js';
+import { createTradeJournal } from './trade-journal.js';
 
 // Last-resort backstop: an unexpected throw in one handler must not kill the whole
 // bridge while working orders/brackets are live at IBKR. Log loudly and stay up —
@@ -211,12 +213,6 @@ let accountType = null;         // 'paper' | 'live' | null (unknown)
 let executionEnabled = false;   // true once an IBKR account is identified
 const orders = new Map();        // orderId -> { clientRef, action, strike, right, qty, expiry, status, filled, avgFillPrice }
 
-let trades = [];                 // today's fills (blotter): { id, orderId, ts, action, strike, right, expiry, qty, price }
-let tradesDate = null;           // ET YYYYMMDD the trades array belongs to
-let journal = {};                // multi-day fill archive: 'YYYYMMDD' -> [trade, ...] (see the journal section)
-let tradeSeq = 0;                // monotonic blotter id, seeded above persisted ids so reused IBKR order ids never collide
-const seenExecIds = new Set();   // IBKR execId dedupe for the reqExecutions backfill
-
 // IBKR-authoritative open option positions (shared across all connected clients).
 const ibPositions = new Map();   // conId -> { conId, symbol, strike, right, expiry, qty, avgCost, avgPremium }
 let funds = null;                // { availableFunds, buyingPower, netLiquidation }
@@ -228,9 +224,20 @@ let connecting = false;
 let mktDataTypeSent = false;
 let dataDelayed = false;         // true after 10197: a competing live session holds the market-data line
 
+const tradeJournal = createTradeJournal({
+  tradesFile: TRADES_FILE,
+  journalFile: JOURNAL_FILE,
+  shotsDir: SHOTS_DIR,
+  today: () => session.expiry,
+  tradeDateAt: (ts) => computeSession(new Date(ts)).expiry,
+  parseExecutionTime: parseExecTime,
+  getOrder: (orderId) => orders.get(orderId),
+  deltaAtFill,
+  broadcast,
+});
+
 loadBasis();
-loadJournal(); // before loadTrades — it may sweep a stale blotter into the journal
-loadTrades();
+tradeJournal.load();
 
 // ── HTTP(S) + WebSocket server ────────────────────────────────────────────────
 
@@ -268,7 +275,7 @@ wss.on('connection', (ws) => {
     else if (msg.type === 'history') handleHistoryRequest(ws, msg);
     else if (msg.type === 'optHistory') handleOptHistoryRequest(ws, msg);
     else if (msg.type === 'replayDay') handleReplayDayRequest(ws, msg);
-    else if (msg.type === 'journal') { if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'journalResult', days: journalDays() })); }
+    else if (msg.type === 'journal') { if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'journalResult', days: tradeJournal.days() })); }
     else if (msg.type === 'quote') handleQuoteRequest(ws, msg);
     else if (msg.type === 'cancel') handleCancel(ws, msg);
     else if (msg.type === 'cancelAll') handleCancelAll(ws, msg);
@@ -276,8 +283,8 @@ wss.on('connection', (ws) => {
     else if (msg.type === 'activateSymbol') handleActivateSymbol(ws, msg);
     else if (msg.type === 'deactivateSymbol') handleDeactivateSymbol(ws, msg);
     else if (msg.type === 'watchlist') handleWatchlist(ws, msg);
-    else if (msg.type === 'fillNote') handleFillNote(ws, msg);
-    else if (msg.type === 'fillShot') handleFillShot(ws, msg);
+    else if (msg.type === 'fillNote') tradeJournal.handleFillNote(msg);
+    else if (msg.type === 'fillShot') tradeJournal.handleFillShot(msg);
     else if (msg.type === 'armed') handleArmed(ws, msg);
   });
 });
@@ -418,7 +425,7 @@ function wireHandlers(api) {
       avgFillPrice
     });
     if (status === 'Filled' && remaining === 0) {
-      recordTrade(orderId, o, filled, avgFillPrice);
+      tradeJournal.recordOrderStatus(orderId, o, filled, avgFillPrice);
       console.log(`[ibkr] FILLED order ${orderId}: ${o.action} ${filled} ${o.strike}${o.right} @ ${avgFillPrice}`);
     }
   });
@@ -431,7 +438,7 @@ function wireHandlers(api) {
     // Live fills arrive with reqId -1; reqExecutions backfill rows carry the
     // positive reqId we passed. The two channels stamp time in different zones
     // (live ~UTC, backfill US/Central), so recordExecution treats them apart.
-    recordExecution(contract, execution, reqId < 0);
+    tradeJournal.recordExecution(contract, execution, reqId < 0);
   });
 
   // IBKR-authoritative positions: initial snapshot then live updates on every change.
@@ -2519,7 +2526,7 @@ function snapshotMsg() {
     // the leg as naked MKT. New order-shaping fields get a flag here, and
     // the client hides the control until its bridge advertises it.
     caps: { trail: true },
-    trades,
+    trades: tradeJournal.trades,
     positions: positionsList(),
     orders: workingOrdersList(),
     funds,
@@ -2532,16 +2539,6 @@ function snapshotMsg() {
   };
 }
 
-// Crash-safe persistence: write a temp file in the same directory, then rename
-// over the target (atomic on the same filesystem). A crash mid-write can then
-// never corrupt the previous good copy — the journal is the only data here with
-// real loss cost.
-function atomicWriteSync(file, data) {
-  const tmp = `${file}.tmp-${process.pid}`;
-  fs.writeFileSync(tmp, data);
-  fs.renameSync(tmp, file);
-}
-
 // ── Basis persistence ──────────────────────────────────────────────────────
 
 function saveBasis() {
@@ -2552,50 +2549,8 @@ function saveBasis() {
   }
 }
 
-// ── Trade blotter (today's fills) ───────────────────────────────────────────
-
-// The blotter's "day" is the TRADE date, which rolls at 16:15 ET — not
-// midnight. Evening GTH fills (8 PM–midnight) carry the NEXT day's trade date,
-// so a midnight roll would orphan them halfway through their own session.
-// computeSession's expiry is exactly this boundary (weekend-aware too).
-function todayET() {
-  return session.expiry;
-}
-
-function recordTrade(orderId, o, filled, avgFillPrice) {
-  const today = todayET();
-  if (today !== tradesDate) { tradesDate = today; trades = []; } // daily roll
-  // Dedupe per order via a session flag (orderStatus can repeat). We can't key on
-  // orderId because IBKR reuses ids across reconnects — that would drop real fills.
-  if (o.recorded) return;
-  // execDetails (which carries an execId) may have logged this exact fill first —
-  // don't double-count if the two channels race.
-  if (trades.some((t) => t.execId && t.orderId === orderId && t.action === o.action && t.strike === o.strike && t.right === o.right)) { o.recorded = true; return; }
-  o.recorded = true;
-  const trade = {
-    id: ++tradeSeq, orderId, ts: Date.now(), action: o.action, strike: o.strike,
-    right: o.right, expiry: o.expiry, qty: filled, price: avgFillPrice,
-    // Blotter/journal rows gain a symbol; absent (old rows) reads as SPXW.
-    ...(o.symbol && o.symbol !== 'SPX' ? { symbol: o.symbol } : {}),
-    // Fill-quality: the reference price (mid/ask) seen at the moment of send.
-    ...(o.refAtSend > 0 ? { ref: o.refAtSend } : {})
-  };
-  trades.push(trade);
-  if (trades.length > 1000) trades = trades.slice(-1000);
-  saveTrades();
-  broadcast({ type: 'trade', trade });
-}
-
-// Record a fill from an execDetails event. Idempotent via execId, and skips a
-// fill the live orderStatus path already captured (those carry no execId).
-// `live` true = a real-time fill (use the wall clock, the fill is happening now);
-// false = a reqExecutions backfill row, whose time string is US/Central.
-// Entry-greeks stamp (delta drift): the contract's delta as the fill lands,
-// read from the chain cache that's already streaming. LIVE fills only — a
-// reconnect backfill would stamp NOW's delta onto an old fill, which lies.
-// Omitted when the strike isn't in the streamed window or has no computed
-// greeks yet; the client shows no drift readout for such legs. Never modeled
-// here — this is IBKR's own delta or nothing.
+// Live entry-delta projection supplied to the journal service. Backfills never
+// stamp today's delta onto an old fill.
 function deltaAtFill(contract, live) {
   if (!live) return {};
   const key = `${Number(contract.strike)}${contract.right === 'P' ? 'P' : 'C'}`;
@@ -2603,197 +2558,6 @@ function deltaAtFill(contract, live) {
   const e = String(contract.symbol || '') === 'SPX' ? chain.get(key) : guestChain.get(key);
   if (!e || (e.expiry && e.expiry !== expiry)) return {};
   return Number.isFinite(e.delta) ? { delta: Math.round(e.delta * 100) / 100 } : {};
-}
-
-function recordExecution(contract, execution, live = false) {
-  if (!contract || contract.secType !== 'OPT') return;
-  const execId = execution?.execId;
-  if (!execId || seenExecIds.has(execId)) return;
-  const action = String(execution.side || '').toUpperCase().startsWith('S') ? 'SELL' : 'BUY';
-  const strike = Number(contract.strike);
-  const right = contract.right === 'P' ? 'P' : 'C';
-  const expiry = String(contract.lastTradeDateOrContractMonth || '').slice(0, 8);
-  // Underlying symbol is authoritative from the contract. SPX (SPXW) stays
-  // absent for back-compat; a guest carries its symbol on the row.
-  const symbol = String(contract.symbol || '') !== 'SPX' ? String(contract.symbol || '') : null;
-  const qty = execution.shares ?? 0;
-  const price = execution.avgPrice ?? execution.price ?? 0;
-  seenExecIds.add(execId);
-  if (!(strike > 0) || !qty) return;
-  // Don't double-count a fill the live orderStatus path already recorded.
-  const dup = trades.some((t) => !t.execId && t.orderId === execution.orderId &&
-    t.strike === strike && t.right === right && t.action === action && t.qty === qty);
-  if (dup) return;
-  const ord = orders.get(execution.orderId);
-  if (ord) ord.recorded = true; // stop the orderStatus path from re-recording this fill
-  const today = todayET();
-  if (today !== tradesDate) { tradesDate = today; trades = []; }
-  const trade = {
-    id: ++tradeSeq, orderId: execution.orderId, execId,
-    // Live fill: stamp now. Backfill: parse the Central time, clamped to now.
-    ts: live ? Date.now() : Math.min(parseExecTime(execution.time), Date.now()),
-    action, strike, right, expiry, qty, price,
-    ...(symbol ? { symbol } : {}),
-    // Fill-quality reference, when the placing order is known this session.
-    ...(ord && ord.refAtSend > 0 ? { ref: ord.refAtSend } : {}),
-    // Entry delta for the drift readout (live fills only — see deltaAtFill).
-    ...deltaAtFill(contract, live)
-  };
-  // Route the fill to ITS OWN trade date (16:15-roll + holiday aware). A
-  // backfill can re-deliver a PAST day's execution — that belongs in the
-  // journal under its day, never in today's blotter (kisa 2026-07-13:
-  // "todays trades shows a bunch of stuff from friday").
-  const rowDate = computeSession(new Date(trade.ts)).expiry;
-  if (rowDate !== tradesDate) {
-    const rows = journal[rowDate] || (journal[rowDate] = []);
-    if (!rows.some((t) => t.execId === execId)) {
-      rows.push(trade);
-      rows.sort((a, b) => (a.ts || 0) - (b.ts || 0));
-      saveJournal();
-      console.log(`[ibkr] backfilled fill routed to journal ${rowDate}: ${action} ${strike}${right}`);
-    }
-    return;
-  }
-  trades.push(trade);
-  if (trades.length > 1000) trades = trades.slice(-1000);
-  saveTrades();
-  broadcast({ type: 'trade', trade });
-}
-
-function saveTrades() {
-  try {
-    atomicWriteSync(TRADES_FILE, JSON.stringify({ date: tradesDate, trades }));
-  } catch (err) {
-    console.error('[ibkr] saveTrades failed:', err);
-  }
-  // Mirror the day into the journal as fills land, so history accrues live —
-  // before the journal existed, the daily roll simply discarded yesterday.
-  if (tradesDate && trades.length) {
-    journal[tradesDate] = trades;
-    saveJournal();
-  }
-}
-
-function loadTrades() {
-  tradesDate = todayET();
-  try {
-    const d = JSON.parse(fs.readFileSync(TRADES_FILE, 'utf8'));
-    if (d.date === tradesDate && Array.isArray(d.trades)) {
-      trades = d.trades;
-      tradeSeq = trades.reduce((m, t) => Math.max(m, t.id || 0), 0);
-      for (const t of trades) if (t.execId) seenExecIds.add(t.execId);
-      console.log(`[ibkr] loaded ${trades.length} trade(s) for ${tradesDate}`);
-    } else if (d.date && Array.isArray(d.trades) && d.trades.length && !journal[d.date]) {
-      // A previous day's blotter survived a bridge outage over the roll —
-      // sweep it into the journal instead of silently dropping it.
-      journal[d.date] = d.trades;
-      saveJournal();
-      console.log(`[ibkr] swept ${d.trades.length} trade(s) from ${d.date} into the journal`);
-    }
-  } catch {}
-}
-
-// ── Multi-day journal ────────────────────────────────────────────────────────
-// Every fill ever recorded, keyed by trade date (rolls 16:15 ET like the
-// blotter). The client's Journal drawer computes daily P/L and the equity
-// curve from these raw fills; the decision-replay feature reads them too.
-// (State `journal` is declared with the blotter vars up top — it's touched by
-// loadJournal() during startup, before this section is reached.)
-
-function loadJournal() {
-  try {
-    const d = JSON.parse(fs.readFileSync(JOURNAL_FILE, 'utf8'));
-    if (d && d.days && typeof d.days === 'object') {
-      journal = d.days;
-      // Seed the execId dedupe from the WHOLE archive, not just today's file —
-      // without this, a restart after the daily sweep forgot every past
-      // execId, and the reqExecutions backfill re-delivered Friday's fills
-      // into Monday's blotter as "new" (kisa, 2026-07-13).
-      let seeded = 0;
-      for (const rows of Object.values(journal)) {
-        for (const t of rows || []) {
-          if (t && t.execId) { seenExecIds.add(t.execId); seeded++; }
-        }
-      }
-      console.log(`[ibkr] journal: ${Object.keys(journal).length} day(s) loaded, ${seeded} execIds seeded`);
-    }
-  } catch {}
-}
-
-// {type:'fillNote', id, text} → attach/edit/clear a one-line note on a fill
-// row (kisa 2026-07-10: the journal had all the numbers and none of the WHY).
-// The note lives ON the row, so it rides the blotter broadcast, the journal,
-// the backups, and every device for free. Today's blotter first, then the
-// archive; row ids are unique across days (tradeSeq seeds above persisted ids).
-function handleFillNote(_ws, msg) {
-  const id = Number(msg.id);
-  if (!Number.isFinite(id)) return;
-  const text = String(msg.text ?? '').trim().slice(0, 240);
-  const apply = (row) => { if (text) row.note = text; else delete row.note; };
-  const t = trades.find((r) => r.id === id);
-  if (t) {
-    apply(t);
-    saveTrades();
-    broadcast({ type: 'noteResult', id, note: text || null, day: tradesDate });
-    return;
-  }
-  for (const [day, rows] of Object.entries(journal)) {
-    const r = (rows || []).find((x) => x.id === id);
-    if (r) {
-      apply(r);
-      saveJournal();
-      broadcast({ type: 'noteResult', id, note: text || null, day });
-      return;
-    }
-  }
-}
-
-// 📸 fill snapshot: one client-rendered still of the chart at fill time —
-// the bridge only persists what the client saw (it renders nothing itself).
-// The image lands in SHOTS_DIR, the row gains `shot: <filename>` (notes
-// pattern), and /shots/<file> serves it back. Size-capped: a downscaled
-// frame runs ~100KB; anything near the cap is not a chart frame.
-const SHOT_MAX_CHARS = 2_500_000;
-function handleFillShot(_ws, msg) {
-  const id = Number(msg.id);
-  if (!Number.isFinite(id)) return;
-  const s = String(msg.dataUrl ?? '');
-  if (s.length > SHOT_MAX_CHARS) return;
-  const m = /^data:image\/(webp|png|jpeg);base64,([A-Za-z0-9+/=]+)$/.exec(s);
-  if (!m) return;
-  const file = `${id}.${m[1] === 'jpeg' ? 'jpg' : m[1]}`;
-  const apply = (row, save, day) => {
-    try {
-      fs.mkdirSync(SHOTS_DIR, { recursive: true });
-      fs.writeFileSync(path.join(SHOTS_DIR, file), Buffer.from(m[2], 'base64'));
-    } catch (err) {
-      console.error('[ibkr] fill-shot write failed:', err);
-      return;
-    }
-    row.shot = file;
-    save();
-    broadcast({ type: 'shotResult', id, shot: file, day });
-  };
-  const t = trades.find((r) => r.id === id);
-  if (t) return apply(t, saveTrades, tradesDate);
-  for (const [day, rows] of Object.entries(journal)) {
-    const r = (rows || []).find((x) => x.id === id);
-    if (r) return apply(r, saveJournal, day);
-  }
-}
-
-function saveJournal() {
-  try {
-    atomicWriteSync(JOURNAL_FILE, JSON.stringify({ days: journal }));
-  } catch (err) {
-    console.error('[ibkr] saveJournal failed:', err);
-  }
-}
-
-function journalDays() {
-  const days = { ...journal };
-  if (tradesDate && trades.length) days[tradesDate] = trades; // today, live
-  return days;
 }
 
 // ── Basis persistence ──────────────────────────────────────────────────────
