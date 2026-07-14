@@ -5,10 +5,15 @@
 import { normalizePositionSymbol } from './positionModel.js';
 
 export const PINNED_CARDS_STORAGE_KEY = 'tt.pinnedPositionCards:v1';
-export const PINNED_CARD_MIN_WIDTH = 340;
-export const PINNED_CARD_MIN_HEIGHT = 360;
-export const PINNED_CARD_DEFAULT_WIDTH = 440;
-export const PINNED_CARD_DEFAULT_HEIGHT = 548;
+export const PINNED_CARD_MIN_WIDTH = 220;
+export const PINNED_CARD_MIN_HEIGHT = 240;
+export const PINNED_CARD_DEFAULT_WIDTH = 260;
+export const PINNED_CARD_DEFAULT_HEIGHT = 300;
+
+// Cards created before the compact-size pass persisted these exact defaults.
+// Migrate only that untouched footprint; deliberate user resizes stay intact.
+const LEGACY_DEFAULT_WIDTH = 440;
+const LEGACY_DEFAULT_HEIGHT = 548;
 
 const VIEWPORT_PAD = 8;
 const MAX_CARDS = 24;
@@ -205,10 +210,16 @@ export function loadPinnedCardState(storage, viewport = {}) {
     if (parsed?.version !== 1 || !Array.isArray(parsed.cards)) return createPinnedCardState([], viewport);
     // Persisted v1 rows always carry explicit canonical symbol/right fields.
     // Do not reinterpret malformed/legacy omissions as SPX CALL descriptors.
-    const explicit = parsed.cards.filter((card) => (
-      typeof card?.symbol === 'string'
-      && (card?.right === 'C' || card?.right === 'P')
-    ));
+    const explicit = parsed.cards
+      .filter((card) => (
+        typeof card?.symbol === 'string'
+        && (card?.right === 'C' || card?.right === 'P')
+      ))
+      .map((card) => (
+        Number(card.width) === LEGACY_DEFAULT_WIDTH && Number(card.height) === LEGACY_DEFAULT_HEIGHT
+          ? { ...card, width: PINNED_CARD_DEFAULT_WIDTH, height: PINNED_CARD_DEFAULT_HEIGHT }
+          : card
+      ));
     return createPinnedCardState(explicit, viewport);
   } catch {
     return createPinnedCardState([], viewport);

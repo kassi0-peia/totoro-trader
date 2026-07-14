@@ -468,12 +468,12 @@
 .pos-pinned-card {
   display: flex;
   flex-direction: column;
-  min-width: min(340px, calc(100vw - 16px));
-  min-height: min(360px, calc(100vh - 16px));
+  min-width: min(220px, calc(100vw - 16px));
+  min-height: min(240px, calc(100vh - 16px));
   max-width: calc(100vw - 16px);
   max-height: calc(100vh - 16px);
   margin: 0;
-  padding: 16px 18px;
+  padding: 10px 12px;
   overflow: auto;
   resize: both;
   pointer-events: auto;
@@ -487,9 +487,15 @@
 
 .pos-pinned-card .modal-head {
   flex: 0 0 auto;
-  margin-bottom: 8px;
-  padding-bottom: 10px;
+  gap: 6px;
+  margin-bottom: 4px;
+  padding-bottom: 6px;
 }
+
+.pos-pinned-card .modal-type { font-size: 9px; letter-spacing: 0.12em; }
+.pos-pinned-card .modal-strike { font-size: 19px; }
+.pos-pinned-card .modal-sym { font-size: 9px; }
+.pos-pinned-card .modal-exp { padding: 2px 4px; font-size: 8px; letter-spacing: 0.09em; }
 
 .pos-card-drag-handle {
   cursor: grab;
@@ -501,8 +507,8 @@
 
 .pos-card-pin {
   display: inline-flex;
-  width: 18px;
-  height: 18px;
+  width: 15px;
+  height: 15px;
   align-items: center;
   justify-content: center;
   color: var(--c-muted);
@@ -510,21 +516,21 @@
 }
 
 .pos-card-pin svg {
-  width: 15px;
-  height: 15px;
+  width: 13px;
+  height: 13px;
   fill: currentColor;
 }
 
 .pos-card-close {
-  width: 28px;
-  height: 28px;
+  width: 22px;
+  height: 22px;
   margin-left: auto;
   padding: 0;
   border: 1px solid transparent;
   border-radius: 7px;
   background: transparent;
   color: var(--c-muted);
-  font-size: 19px;
+  font-size: 16px;
   line-height: 1;
   cursor: pointer;
 }
@@ -536,10 +542,22 @@
 }
 
 .pos-pinned-card .pos-inspect-graph {
-  flex: 1 1 150px;
-  min-height: 120px;
+  flex: 1 1 100px;
+  min-height: 72px;
   height: auto;
+  margin: 6px 0 4px;
 }
+
+.pos-pinned-card .greek-grid {
+  gap: 4px 10px;
+  margin-bottom: 8px;
+}
+
+.pos-pinned-card .greek-grid span { font-size: 8px; }
+.pos-pinned-card .greek-grid b { font-size: 10px; }
+.pos-pinned-card .pos-greek-strip { padding-top: 6px; }
+.pos-pinned-card .pos-greek-strip i { font-size: 8px; }
+.pos-pinned-card .pos-greek-strip b { font-size: 9px; }
 
 .pos-pinned-card .greek-grid,
 .pos-pinned-card .pos-greek-strip,
@@ -553,9 +571,11 @@
 }
 
 .pos-pinned-card .order-kind {
-  flex: 1 1 260px;
+  flex: 1 1 180px;
   justify-content: flex-end;
 }
+
+.pos-pinned-card .limit-input { width: 56px; }
 
 .pos-card-unavailable {
   flex: 1 1 auto;
