@@ -4,6 +4,7 @@ import {
   bracketChild,
   bracketOcaGroup,
   findCancelableOrderId,
+  mergeBrokerOcaGroup,
   guestOptionContract,
   isValidExpiry,
   marketOrderHasFreshAsk,
@@ -107,6 +108,20 @@ test('bracket planning holds the parent and transmits the final child', () => {
   assert.equal(sl.order.parentId, 80);
   // A different parent must not share the OCA identity.
   assert.notEqual(bracketOcaGroup(80), bracketOcaGroup(81));
+});
+
+test('an empty-string broker ocaGroup never wipes a synthetic bracket group on merge', () => {
+  // @stoqey/ib decodes an unset broker group as '' and IBKR echoes openOrder
+  // right at placement — '' must keep the existing synthetic group intact.
+  assert.equal(mergeBrokerOcaGroup('', bracketOcaGroup(80)), bracketOcaGroup(80));
+  assert.equal(mergeBrokerOcaGroup(undefined, bracketOcaGroup(80)), bracketOcaGroup(80));
+  // A REAL broker group (attached-exit OCA legs carry one) still wins.
+  assert.equal(mergeBrokerOcaGroup('exit-oca-1', bracketOcaGroup(80)), 'exit-oca-1');
+  assert.equal(mergeBrokerOcaGroup('exit-oca-1', null), 'exit-oca-1');
+  // Both empty/absent normalizes to null, never ''.
+  assert.equal(mergeBrokerOcaGroup('', ''), null);
+  assert.equal(mergeBrokerOcaGroup('', null), null);
+  assert.equal(mergeBrokerOcaGroup(undefined, undefined), null);
 });
 
 test('parentOrderRecord preserves fill-quality reference only when valid', () => {

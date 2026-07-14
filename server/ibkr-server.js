@@ -36,6 +36,7 @@ import {
   findCancelableOrderId,
   guestOptionContract,
   marketOrderHasFreshAsk,
+  mergeBrokerOcaGroup,
   parentOrderRecord,
   planOrderRequest,
   isValidExpiry,
@@ -627,7 +628,9 @@ function wireHandlers(api) {
       qty: order?.totalQuantity ?? existing?.qty,
       orderType: order?.orderType ?? existing?.orderType,
       limit: order?.lmtPrice ?? existing?.limit ?? null,
-      ocaGroup: order?.ocaGroup ?? existing?.ocaGroup ?? null,
+      // The ib decoder reads an unset broker group as '' and IBKR echoes
+      // openOrder at placement; '' must not wipe a synthetic bracket group.
+      ocaGroup: mergeBrokerOcaGroup(order?.ocaGroup, existing?.ocaGroup),
       status: orderState?.status || existing?.status || 'open',
       filled: existing?.filled ?? 0,
       // reqAllOpenOrders does not provide a trustworthy remaining quantity.
