@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   bracketChild,
+  bracketOcaGroup,
   findCancelableOrderId,
   guestOptionContract,
   isValidExpiry,
@@ -71,6 +72,20 @@ test('bracket planning holds the parent and transmits the final child', () => {
   assert.equal(sl.order.orderType, 'STP');
   assert.equal(sl.order.auxPrice, 1);
   assert.equal(sl.order.transmit, true);
+
+  // TP and SL are one-cancels-other at the same parent: the guard-facing records
+  // share a synthetic OCA key so reduce-only collapses them into one unit, but
+  // the broker order objects carry only parentId — never ocaGroup (that would
+  // change IBKR routing).
+  assert.equal(tp.record.ocaGroup, bracketOcaGroup(80));
+  assert.equal(sl.record.ocaGroup, bracketOcaGroup(80));
+  assert.equal(tp.record.ocaGroup, sl.record.ocaGroup);
+  assert.equal('ocaGroup' in tp.order, false);
+  assert.equal('ocaGroup' in sl.order, false);
+  assert.equal(tp.order.parentId, 80);
+  assert.equal(sl.order.parentId, 80);
+  // A different parent must not share the OCA identity.
+  assert.notEqual(bracketOcaGroup(80), bracketOcaGroup(81));
 });
 
 test('parentOrderRecord preserves fill-quality reference only when valid', () => {
