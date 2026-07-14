@@ -273,6 +273,16 @@ export function findCancelableOrderId(orders, msg = {}) {
   return matches.length === 1 ? matches[0][0] : null;
 }
 
+// IB treats same-parentId bracket children as one-cancels-other, so their true
+// resting closing exposure is the max of the legs, not the sum. The broker order
+// objects carry only parentId (adding ocaGroup there would change IBKR routing);
+// the guard-facing RECORDS get a synthetic OCA key derived from the shared parent
+// so assessReduceOnlyOrder collapses TP+SL into one OCA unit instead of double-
+// counting them. Never sent to the broker or the browser order list.
+export function bracketOcaGroup(parentId) {
+  return `bracket:${parentId}`;
+}
+
 export function bracketChild(plan, kind, parentId, account) {
   const takeProfit = kind === 'tp';
   const price = takeProfit ? plan.takeProfit : plan.stopLoss;
@@ -290,7 +300,7 @@ export function bracketChild(plan, kind, parentId, account) {
       qty: plan.qty,
       orderType,
       limit: price,
-      ocaGroup: null,
+      ocaGroup: bracketOcaGroup(parentId),
       status: 'submitted',
       filled: 0,
       remaining: plan.qty,

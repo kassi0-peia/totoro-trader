@@ -141,6 +141,35 @@ test('OCA siblings reserve their maximum, while independent exits add', () => {
   assert.equal(independent.reservedQty, 6);
 });
 
+test('a bracket TP+SL reserves as one OCA unit, not the sum of both legs', () => {
+  // long 2 with a 1-lot bracket: TP 1 and SL 1 share a synthetic bracket group
+  // (server/order-plan.js bracketChild). True resting exposure is max(1,1)=1.
+  const bracket = [
+    order({ qty: 1, remaining: 1, ocaGroup: 'bracket:80' }),
+    order({ qty: 1, remaining: 1, ocaGroup: 'bracket:80', status: 'PreSubmitted' }),
+  ];
+  const long2 = authority({ position: { account: 'DU111', qty: 2, contract: contract() } });
+
+  // A manual partial CLOSE 1 is safe: max(1,1) + 1 = 2 <= 2.
+  const partial = assessReduceOnlyOrder({ plan: plan({ qty: 1 }), authority: long2, orders: bracket });
+  assert.equal(partial.ok, true);
+  assert.equal(partial.reservedQty, 2);
+
+  // A full CLOSE 2 would over-commit: max(1,1) + 2 = 3 > 2.
+  const full = assessReduceOnlyOrder({ plan: plan({ qty: 2 }), authority: long2, orders: bracket });
+  assert.equal(full.ok, false);
+  assert.equal(full.reservedQty, 3);
+
+  // Two UNRELATED standalone SELLs (no shared group) still sum, unchanged.
+  const standalone = assessReduceOnlyOrder({
+    plan: plan({ qty: 1 }),
+    authority: long2,
+    orders: [order({ qty: 1, remaining: 1 }), order({ qty: 1, remaining: 1 })],
+  });
+  assert.equal(standalone.ok, false);
+  assert.equal(standalone.reservedQty, 3);
+});
+
 test('a Filled callback stays reserved until exact-contract position authority advances', () => {
   const witness = {
     account: 'DU111', routeKey: optionRouteKey(contract()), contractRevision: 7, positionQty: 5,
