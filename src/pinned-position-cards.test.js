@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  PINNED_CARD_DEFAULT_HEIGHT,
+  PINNED_CARD_DEFAULT_WIDTH,
+  PINNED_CARD_MIN_HEIGHT,
   PINNED_CARDS_STORAGE_KEY,
   createPinnedCardState,
   loadPinnedCardState,
@@ -35,6 +38,8 @@ test('open deduplicates an exact contract and focuses the existing card', () => 
   state = pinnedCardReducer(state, { type: 'open', position: call(), viewport });
   assert.equal(state.cards.length, 2);
   assert.equal(topPinnedCard(state).key, firstKey);
+  assert.equal(topPinnedCard(state).width, PINNED_CARD_DEFAULT_WIDTH);
+  assert.equal(topPinnedCard(state).height, PINNED_CARD_DEFAULT_HEIGHT);
 });
 
 test('focus, move, resize, close, and viewport changes keep layouts clamped', () => {
@@ -54,7 +59,7 @@ test('focus, move, resize, close, and viewport changes keep layouts clamped', ()
   state = pinnedCardReducer(state, { type: 'resize', key: card.key, width: 9000, height: 1, viewport });
   card = topPinnedCard(state);
   assert.equal(card.width, viewport.width - 16);
-  assert.ok(card.height >= 360);
+  assert.equal(card.height, PINNED_CARD_MIN_HEIGHT);
   assert.equal(card.x, 8, 'growing the card also re-clamps its origin');
 
   state = pinnedCardReducer(state, { type: 'viewport', viewport: { width: 320, height: 500 } });
@@ -92,6 +97,21 @@ test('persistence validates, deduplicates, clamps, preserves order, and stores n
   assert.equal(persisted.version, 1);
   assert.equal('qty' in persisted.cards[0], false);
   assert.equal('openRef' in persisted.cards[0], false);
+});
+
+test('legacy untouched large defaults migrate to the compact footprint', () => {
+  const values = new Map([[PINNED_CARDS_STORAGE_KEY, JSON.stringify({
+    version: 1,
+    cards: [
+      { ...call(), right: 'C', width: 440, height: 548, x: 40, y: 50, z: 1 },
+      { ...call({ type: 'put', strike: 7400 }), right: 'P', width: 500, height: 548, x: 60, y: 70, z: 2 },
+    ],
+  })]]);
+  const loaded = loadPinnedCardState({ getItem: (key) => values.get(key) }, viewport);
+  assert.equal(loaded.cards[0].width, PINNED_CARD_DEFAULT_WIDTH);
+  assert.equal(loaded.cards[0].height, PINNED_CARD_DEFAULT_HEIGHT);
+  assert.equal(loaded.cards[1].width, 500, 'a deliberate resize is preserved');
+  assert.equal(loaded.cards[1].height, 548);
 });
 
 test('resolution uses current open authoritative positions and leaves missing cards honest', () => {
