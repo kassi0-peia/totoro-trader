@@ -61,6 +61,10 @@ export default function Chart({
   onToggleAxisChain = null,
   alerts = [],
   armed = [],
+  dayLevels = null,
+  beLine = null,
+  dayLevelsOn = false,
+  onToggleDayLevels = null,
   onMenu = null,
   apiRef = null,
   fillFlash = null
@@ -338,7 +342,7 @@ export default function Chart({
 
     drawCandles(ctx, { view, layout, theme, priceToY, indexToX, price, positions, showPositions, source, showVolume });
 
-    drawPriceLine(ctx, { layout, theme, priceToY, price, expectedMove, alerts, armed, rightAxis: RIGHT_AXIS });
+    drawPriceLine(ctx, { layout, theme, priceToY, price, expectedMove, alerts, armed, rightAxis: RIGHT_AXIS, dayLevels, beLine });
 
     drawAxisChain(ctx, { view, layout, theme, priceToY, price, axisChain, greeksMap, ivol, timeToExpiryYears, strikeStep });
 
@@ -360,7 +364,7 @@ export default function Chart({
     }
 
     busHitsRef.current = drawBusStops(ctx, { view, layout, theme, priceToY, indexToX, price, busStops, tfCandles, tToIdx, bucketMs });
-  }, [candles, price, positions, theme, size, view, layout, priceToY, indexToX, timeframe, showMarkers, showVolume, expectedMove, alerts, armed, axisChain, strikeStep, greeksMap, ivol, timeToExpiryYears, source, showPositions, ghostFills, busStops]);
+  }, [candles, price, positions, theme, size, view, layout, priceToY, indexToX, timeframe, showMarkers, showVolume, expectedMove, alerts, armed, dayLevels, beLine, axisChain, strikeStep, greeksMap, ivol, timeToExpiryYears, source, showPositions, ghostFills, busStops]);
 
   // wheel zoom — attach non-passive so we can preventDefault page scroll
   useEffect(() => {
@@ -1070,6 +1074,18 @@ export default function Chart({
           <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
             <path d="M20.5 13.4 11 3.9H4V11l9.5 9.5z" />
             <circle cx="7.6" cy="7.6" r="1.1" />
+          </svg>
+        </button>
+      )}
+      {onToggleDayLevels && (
+        <button
+          className={`daylevels-btn${dayLevelsOn ? ' active' : ''}`}
+          onClick={onToggleDayLevels}
+          aria-label="Toggle day levels"
+          data-tip={dayLevelsOn ? 'Hide day levels' : 'Day levels: prior high/low/close + today’s open'}
+        >
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+            <path d="M3 7h18M3 12h18M3 17h18" strokeDasharray="3 3" />
           </svg>
         </button>
       )}

@@ -2846,6 +2846,21 @@ function parseExecTime(s) {
 // fill the live orderStatus path already captured (those carry no execId).
 // `live` true = a real-time fill (use the wall clock, the fill is happening now);
 // false = a reqExecutions backfill row, whose time string is US/Central.
+// Entry-greeks stamp (delta drift): the contract's delta as the fill lands,
+// read from the chain cache that's already streaming. LIVE fills only — a
+// reconnect backfill would stamp NOW's delta onto an old fill, which lies.
+// Omitted when the strike isn't in the streamed window or has no computed
+// greeks yet; the client shows no drift readout for such legs. Never modeled
+// here — this is IBKR's own delta or nothing.
+function deltaAtFill(contract, live) {
+  if (!live) return {};
+  const key = `${Number(contract.strike)}${contract.right === 'P' ? 'P' : 'C'}`;
+  const expiry = String(contract.lastTradeDateOrContractMonth || '').slice(0, 8);
+  const e = String(contract.symbol || '') === 'SPX' ? chain.get(key) : guestChain.get(key);
+  if (!e || (e.expiry && e.expiry !== expiry)) return {};
+  return Number.isFinite(e.delta) ? { delta: Math.round(e.delta * 100) / 100 } : {};
+}
+
 function recordExecution(contract, execution, live = false) {
   if (!contract || contract.secType !== 'OPT') return;
   const execId = execution?.execId;
@@ -2876,7 +2891,9 @@ function recordExecution(contract, execution, live = false) {
     action, strike, right, expiry, qty, price,
     ...(symbol ? { symbol } : {}),
     // Fill-quality reference, when the placing order is known this session.
-    ...(ord && ord.refAtSend > 0 ? { ref: ord.refAtSend } : {})
+    ...(ord && ord.refAtSend > 0 ? { ref: ord.refAtSend } : {}),
+    // Entry delta for the drift readout (live fills only — see deltaAtFill).
+    ...deltaAtFill(contract, live)
   };
   // Route the fill to ITS OWN trade date (16:15-roll + holiday aware). A
   // backfill can re-deliver a PAST day's execution — that belongs in the
