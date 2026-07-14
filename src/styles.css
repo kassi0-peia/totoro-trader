@@ -1677,6 +1677,9 @@ button {
   font-size: 12px;
 }
 
+/* Delta drift readout: quiet by default; amber once |Δ| decays below half
+   its entry size (decay-toward-zero only — rising delta is going ITM). */
+.pos-drift.drift-warn { color: #e6a23c; }
 .cell-label {
   font-size: 9px;
   color: var(--c-muted);
@@ -2613,6 +2616,7 @@ button {
   .pos-row .pos-cell:nth-child(5) {
     display: none;
   }
+  .pos-drift { display: none; }  /* drift is desktop detail; the phone row stays lean */
   .pos-actions { flex-direction: column; gap: 4px; }
   .btn-rev, .btn-close { height: 28px; font-size: 10px; padding: 0 8px; }
 
