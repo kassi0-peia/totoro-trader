@@ -2,6 +2,23 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { randomPastWeekday } from './helpers.js';
 import { revealReplayGhosts, summarizeReplayGhosts } from '../replay.js';
 
+// Ask first, then create the loading shell. This keeps a failed/offline request
+// from erasing a practice book or trapping the picker behind LOADING forever.
+export function startReplayRequest(date, { blind = false, requestReplayDay, showToast }) {
+  if (!requestReplayDay(date)) {
+    showToast('Replay needs the bridge connection', 'err');
+    return null;
+  }
+  return {
+    date,
+    candles: [],
+    idx: 0,
+    speed: 2,
+    playing: false,
+    ...(blind ? { blind: true } : {}),
+  };
+}
+
 // Owns replay tape selection, playback, ghost reveal, and the isolated practice
 // position list. It receives bridge operations rather than importing the live
 // feed, so replay still has no hidden route to real order submission.
@@ -102,9 +119,10 @@ export default function useReplayController({
   }, [replay]);
 
   const loadDay = useCallback((date) => {
+    const next = startReplayRequest(date, { requestReplayDay, showToast });
+    if (!next) return;
     setReplayPositions([]);
-    setReplay({ date, candles: [], idx: 0, speed: 2, playing: false });
-    if (!requestReplayDay(date)) showToast('Replay needs the bridge connection', 'err');
+    setReplay(next);
     requestJournal();
   }, [requestReplayDay, requestJournal, showToast]);
 
@@ -112,9 +130,10 @@ export default function useReplayController({
     mysteryTriedRef.current = new Set();
     const date = randomPastWeekday(mysteryTriedRef.current);
     if (!date) return;
+    const next = startReplayRequest(date, { blind: true, requestReplayDay, showToast });
+    if (!next) return;
     setReplayPositions([]);
-    setReplay({ date, candles: [], idx: 0, speed: 2, playing: false, blind: true });
-    if (!requestReplayDay(date)) showToast('Replay needs the bridge connection', 'err');
+    setReplay(next);
   }, [requestReplayDay, showToast]);
 
   const setReplayPatch = useCallback((patch) => {
