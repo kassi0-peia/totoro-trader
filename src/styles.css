@@ -97,19 +97,19 @@ button {
 }
 /* The relative above must not reflow hosts that are intentionally absolute. */
 .snap-now-btn, .fs-btn, .axis-prem-btn, .vol-btn, .rec-btn, .quick-btn, .cw-btn, .rung-btn,
-.trades-pull { position: absolute; }
+.daylevels-btn, .trades-pull { position: absolute; }
 
 /* Edge-anchor tooltips on screen-edge controls so they never clip the viewport.
    The [data-tip] keeps specificity at/above the base rule so these win. */
 .fs-btn[data-tip]::after, .axis-prem-btn[data-tip]::after, .vol-btn[data-tip]::after,
 .rec-btn[data-tip]::after, .quick-btn[data-tip]::after, .snap-now-btn[data-tip]::after,
-.rung-btn[data-tip]::after, .acct-badge[data-tip]::after, .chart-acct-id[data-tip]::after,
+.rung-btn[data-tip]::after, .daylevels-btn[data-tip]::after, .acct-badge[data-tip]::after, .chart-acct-id[data-tip]::after,
 .acct-bus-btn[data-tip]::after, .acct-quick-btn[data-tip]::after {
   left: auto; right: -1px; transform: translateX(0) translateY(3px);
 }
 .fs-btn[data-tip]:hover::after, .axis-prem-btn[data-tip]:hover::after, .vol-btn[data-tip]:hover::after,
 .rec-btn[data-tip]:hover::after, .quick-btn[data-tip]:hover::after, .snap-now-btn[data-tip]:hover::after,
-.rung-btn[data-tip]:hover::after, .acct-badge[data-tip]:hover::after, .chart-acct-id[data-tip]:hover::after,
+.rung-btn[data-tip]:hover::after, .daylevels-btn[data-tip]:hover::after, .acct-badge[data-tip]:hover::after, .chart-acct-id[data-tip]:hover::after,
 .acct-bus-btn[data-tip]:hover::after, .acct-quick-btn[data-tip]:hover::after {
   transform: translateX(0) translateY(0);
 }
@@ -619,7 +619,8 @@ button {
 .rec-btn,
 .quick-btn,
 .cw-btn,
-.rung-btn {
+.rung-btn,
+.daylevels-btn {
   position: absolute;
   bottom: 30px;
   width: 34px;
@@ -647,12 +648,15 @@ button {
 .cw-btn:hover { color: var(--c-accent); border-color: var(--c-accent); }
 .rung-btn { right: 264px; }                 /* one-click ladder rung (toggle in gear panel) */
 .rung-btn:hover { color: var(--c-accent); border-color: var(--c-accent); }
+.daylevels-btn { right: 306px; }            /* day-levels overlay (SPX-only, opt-in) */
 .snap-now-btn:hover,
 .fs-btn:hover,
 .axis-prem-btn:hover,
 .axis-prem-btn.active,
 .vol-btn:hover,
 .vol-btn.active,
+.daylevels-btn:hover,
+.daylevels-btn.active,
 .rec-btn:hover {
   color: var(--c-accent);
   border-color: var(--c-accent);

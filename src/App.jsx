@@ -25,6 +25,7 @@ import { THEMES } from './themes.js';
 import { plDollars } from './pl.js';
 import { buildOpenOrder, buildQuickOrder } from './order-payload.js';
 import { chimeFill, chimeAlert } from './sounds.js';
+import { deriveDayLevels } from './levels.js';
 
 // Blind-replay day picker: a random weekday 3–60 days back (LOCAL date parts —
 // the UTC fence eats days after 8 PM ET). Holidays aren't modeled here; they
@@ -173,6 +174,11 @@ export default function App() {
   const [showMarkers, setShowMarkers] = useState(() => {
     try { const v = localStorage.getItem('tt.showMarkers'); return v == null ? true : v === '1'; } catch { return true; }
   });
+  // Day levels: opt-in overlay (kisa 2026-07-13 "day levels have to have a
+  // toggle i guess") — PDH/PDL/PDC + today's open from 1D history. SPX-only.
+  const [dayLevelsOn, setDayLevelsOn] = useState(() => {
+    try { return localStorage.getItem('tt.dayLevels') === '1'; } catch { return false; }
+  });
   const [quickMode, setQuickMode] = useState(false); // ⚡ right-click quick trade — per session, not persisted
   // 🚏 Bus Stop: called (price, time) coordinates. Stops persist (localStorage,
   // per-browser — the calibration record is the point); the arm toggle doesn't.
@@ -199,8 +205,9 @@ export default function App() {
       localStorage.setItem('tt.showOvn', showOvn ? '1' : '0');
       localStorage.setItem('tt.showPositions', showPositions ? '1' : '0');
       localStorage.setItem('tt.showMarkers', showMarkers ? '1' : '0');
+      localStorage.setItem('tt.dayLevels', dayLevelsOn ? '1' : '0');
     } catch {}
-  }, [axisChain, rungButton, showOvn, showPositions, showMarkers]);
+  }, [axisChain, rungButton, showOvn, showPositions, showMarkers, dayLevelsOn]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [now, setNow] = useState(Date.now());
   const [pulse, setPulse] = useState(false);
@@ -897,6 +904,37 @@ export default function App() {
   useEffect(() => {
     if (feed.live && timeframe > 1) feed.requestHistory(timeframe);
   }, [timeframe, feed.live, feed.requestHistory]);
+
+  // Day levels need the 1D bars (tf 1440). Fetch them on enable when they're
+  // not already loaded — SPX-only, so never in guest/replay. Cheap + cached.
+  useEffect(() => {
+    if (dayLevelsOn && !replayActive && !guestActive && feed.live && !(feed.histSeries[1440]?.length)) {
+      feed.requestHistory(1440);
+    }
+  }, [dayLevelsOn, replayActive, guestActive, feed.live, feed.histSeries, feed.requestHistory]);
+
+  // The overlay's derived levels (PDH/PDL/PDC + today's open), relative to the
+  // active trade date (feed.expiry, 16:15-rolled). null when off or when no bar
+  // yields a level — the painter draws nothing. SPX-only: hidden in guest/replay.
+  const dayLevels = useMemo(() => {
+    if (!dayLevelsOn || replayActive || guestActive) return null;
+    const bars = feed.histSeries[1440];
+    if (!bars || !bars.length) return null;
+    const lv = deriveDayLevels(bars, feed.expiry, feed.spxClose);
+    return lv.length ? lv : null;
+  }, [dayLevelsOn, replayActive, guestActive, feed.histSeries, feed.expiry, feed.spxClose]);
+
+  // Breakeven line, hover-only (kisa 2026-07-13): the hovered leg's at-expiry
+  // breakeven — strike ± its real entry premium (same line for shorts). Only
+  // for the active chart symbol; pending legs (no entryPremium) get no line.
+  const beLine = useMemo(() => {
+    if (hoverPos == null) return null;
+    const p = positionsLive.find((x) => x.id === hoverPos.id);
+    if (!p || (p.symbol ?? 'SPX') !== activeSymbol) return null;
+    if (!Number.isFinite(p.entryPremium)) return null;
+    const price = p.type === 'call' ? p.strike + p.entryPremium : p.strike - p.entryPremium;
+    return { price, type: p.type };
+  }, [hoverPos, positionsLive, activeSymbol]);
 
   // Symbols (beyond SPX) currently holding an open/in-flight position keep a
   // one-click tab in the control line (kisa 2026-07-10: a TSLA position must
@@ -1741,6 +1779,10 @@ export default function App() {
               histCandles={replayActive || guestActive ? null : feed.histSeries[timeframe] || null}
               axisChain={axisChain}
               onToggleAxisChain={() => setAxisChain((v) => !v)}
+              dayLevels={dayLevels}
+              beLine={beLine}
+              dayLevelsOn={dayLevelsOn}
+              onToggleDayLevels={replayActive || guestActive ? null : () => setDayLevelsOn((v) => !v)}
               onRung={rungButton && !guestActive ? buyNextRung : null}
               showOvn={guestActive ? false : showOvn}
               showPositions={showPositions}
