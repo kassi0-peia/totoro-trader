@@ -78,6 +78,54 @@ test('stale tokens cannot release or overwrite a newer reservation', () => {
   assert.equal(registry.release(second.token), true);
 });
 
+const ackFor = (ref) => ({ type: 'orderAck', clientRef: ref, accepted: true });
+const commitRef = (registry, ref, result = ackFor(ref)) => (
+  registry.commit(registry.reserve(ref, fingerprint(ref)).token, result)
+);
+
+test('committed refs prune to maxCommitted, evicting the oldest, which becomes re-acceptable', () => {
+  const registry = createOrderRequestRegistry({ maxCommitted: 2 });
+  commitRef(registry, 'a');
+  commitRef(registry, 'b');
+  assert.equal(registry.lookup('a').state, 'committed');
+  // A third committed ref pushes the bound past 2 and evicts the oldest ('a').
+  commitRef(registry, 'c');
+  assert.equal(registry.lookup('a'), null, 'oldest committed ref evicted');
+  assert.equal(registry.lookup('b').state, 'committed');
+  assert.equal(registry.lookup('c').state, 'committed');
+  // The evicted ref no longer replays a duplicate ack — it is freshly acceptable.
+  const reAccepted = registry.reserve('a', fingerprint('a'));
+  assert.equal(reAccepted.ok, true);
+  assert.equal(registry.lookup('a').state, 'reserved');
+});
+
+test('in-flight reserved refs are never evicted regardless of committed churn', () => {
+  const registry = createOrderRequestRegistry({ maxCommitted: 1 });
+  const inFlight = registry.reserve('live', fingerprint('live'));
+  assert.equal(inFlight.ok, true);
+  // Churn far more committed refs than the tiny committed bound allows.
+  for (const ref of ['c1', 'c2', 'c3', 'c4']) commitRef(registry, ref);
+  // The reserved ref survived: only the newest committed ref remains beside it.
+  assert.equal(registry.lookup('live').state, 'reserved');
+  assert.equal(registry.lookup('c4').state, 'committed');
+  assert.equal(registry.lookup('c3'), null);
+  // Its token is still live and can complete its lifecycle.
+  assert.equal(registry.commit(inFlight.token, ackFor('live')), true);
+});
+
+test('commit normalizes a null/non-object ack to null and replays that as a duplicate', () => {
+  const registry = createOrderRequestRegistry();
+  const first = registry.reserve('nul', fingerprint('nul'));
+  assert.equal(registry.commit(first.token, null), true);
+  assert.equal(registry.lookup('nul').result, null);
+  assert.deepEqual(registry.reserve('nul', fingerprint('nul')), {
+    ok: false, code: 'DUPLICATE_CLIENT_REF', state: 'committed', result: null,
+  });
+  const second = registry.reserve('str', fingerprint('str'));
+  assert.equal(registry.commit(second.token, 'not-an-object'), true);
+  assert.equal(registry.lookup('str').result, null);
+});
+
 test('canonical fingerprints ignore object key order but reject a different payload under the same ref', () => {
   assert.equal(
     fingerprintOrderRequest({ b: 2, a: 1 }),
