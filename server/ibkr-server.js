@@ -23,6 +23,7 @@ import { normalizeWatchlist, shapeWatchQuote } from './watchlist.js';
 import { validateArmedOrder, armedTriggered, ARMED_MAX } from './armed.js';
 import {
   CANDLE_MS,
+  createBarRunawayMonitor,
   feedCandleSeries,
   finishHistoricalSeed,
   newCandleSeries,
@@ -159,7 +160,6 @@ let spxClose = null;         // raw SPX price at the 4:00 capture (persisted)
 const watchdogState = {
   lastSpxTick: 0,
   lastEsTick: 0,
-  recentBars: { SPX: [], ES: [] },
   // History-seed health: if a request was issued (Requested != 0) and the
   // matching "finished" event never landed (Seeded < Requested) within
   // HIST_SEED_TIMEOUT_MS, the watchdog re-requests against a (hopefully now
@@ -172,6 +172,9 @@ const watchdogState = {
 const SPX_STALE_MS = 120_000;        // > 2 min with no SPX tick during RTH = stall
 const ES_STALE_MS = 300_000;         // > 5 min with no ES tick when ES is the source = stall
 const BAR_RUNAWAY = 3;               // > 3 new bars in any 60s window = runaway
+// Home SPX/ES candle-runaway monitor. SPX and ES are counted SEPARATELY (the
+// guest series keeps its own inline monitor in feedGuestSeries).
+const barRunaway = createBarRunawayMonitor({ maxBars: BAR_RUNAWAY });
 const HIST_SEED_TIMEOUT_MS = 60_000; // hist seed never finishes within 60s = retry
 const PORTFOLIO_SYNC_TIMEOUT_MS = 30_000;
 let lastWatchdogAction = 0;
@@ -832,7 +835,7 @@ function wireHandlers(api) {
     acctSummaryReqId = null;
     watchdogState.lastSpxTick = 0;
     watchdogState.lastEsTick = 0;
-    watchdogState.recentBars = { SPX: [], ES: [] };
+    barRunaway.reset();
     watchdogState.spxHistRequestedAt = 0;
     watchdogState.spxHistSeededAt = 0;
     watchdogState.esHistRequestedAt = 0;
@@ -1282,7 +1285,7 @@ function requestEsHistory() {
 function feedSeries(series, price, source) {
   return feedCandleSeries(series, price, {
     maxCandles: HISTORY_CANDLES + 32,
-    onNewBar: (now) => watchdogState.recentBars[source].push(now),
+    onNewBar: (now) => barRunaway.recordBar(source, now),
   });
 }
 
@@ -1352,16 +1355,13 @@ function watchdogTick() {
     try { ib.disconnect(); } catch {}
     return;
   }
-  for (const source of ['SPX', 'ES']) {
-    const recent = watchdogState.recentBars[source].filter((t) => now - t < 60_000);
-    watchdogState.recentBars[source] = recent;
-    if (recent.length > BAR_RUNAWAY) {
-      console.log(`[watchdog] ${source} candle runaway (${recent.length} bars/min) — reconnecting`);
-      lastWatchdogAction = now;
-      watchdogState.recentBars = { SPX: [], ES: [] };
-      try { ib.disconnect(); } catch {}
-      return;
-    }
+  const runaway = barRunaway.runawaySource(now);
+  if (runaway) {
+    console.log(`[watchdog] ${runaway} candle runaway (${barRunaway.count(runaway, now)} bars/min) — reconnecting`);
+    lastWatchdogAction = now;
+    barRunaway.reset();
+    try { ib.disconnect(); } catch {}
+    return;
   }
 
   // History-seed stall: HMDS can silently no-reply on slow days. If a request
