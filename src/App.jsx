@@ -26,6 +26,7 @@ import { plDollars } from './pl.js';
 import { buildOpenOrder, buildQuickOrder } from './order-payload.js';
 import { chimeFill, chimeAlert } from './sounds.js';
 import { deriveDayLevels } from './levels.js';
+import useReplayController from './app/useReplayController.js';
 import {
   EMPTY_ARR,
   EMPTY_GREEKS,
@@ -34,7 +35,6 @@ import {
   SPXW_STRIKE_STEP,
   optHistKey,
   posKey,
-  randomPastWeekday,
   rightOf,
   timeToExpiryYearsAt,
 } from './app/helpers.js';
@@ -71,17 +71,6 @@ export default function App() {
   const [hoverPos, setHoverPos] = useState(null);   // { id, x, y } — hover card over a position row
   const cardHoveredRef = useRef(false);             // mouse is over the floating hover card itself
   const cardHideRef = useRef(null);                 // pending 0.5s dismiss after leaving the card
-  const mysteryTriedRef = useRef(new Set());        // blind-replay dates already rolled (incl. empty/holiday)
-
-  // ── Replay mode (desktop practice): play back a past day's 1-min session ──
-  // and trade it with simulated fills at Black–Scholes prices. No real orders.
-  const [replayBarOpen, setReplayBarOpen] = useState(false);
-  const [replay, setReplay] = useState(null); // { date, candles, idx, speed, playing }
-  const [replayPositions, setReplayPositions] = useState([]);
-  const replayActive = replay != null && replay.candles.length > 0;
-  const replayLoading = replay != null && replay.candles.length === 0;
-  const replayPrice = replayActive ? replay.candles[replay.idx].close : null;
-  const replayNow = replayActive ? replay.candles[replay.idx].t : null;
   // Slide-in drawer: today's fills over the chart. Open/closed state is
   // layout memory (tt.drawerOpen) — if she trades with it pinned open, it
   // greets her open on the next load.
@@ -314,6 +303,37 @@ export default function App() {
 
   const feed = useIbkrFeed({ onOrderEvent: handleOrderEvent });
 
+  // Replay owns its tape clock and simulated book in a controller that receives
+  // only replay/journal bridge operations—never sendOrder.
+  const {
+    replayBarOpen,
+    setReplayBarOpen,
+    replay,
+    setReplay,
+    replayPositions,
+    setReplayPositions,
+    replayActive,
+    replayLoading,
+    replayPrice,
+    replayNow,
+    dayGhosts,
+    ghostsOn,
+    visibleGhosts,
+    toggleReplay,
+    loadDay,
+    loadMystery,
+    setReplayPatch,
+    changeDay,
+    exitReplay,
+    toggleGhosts,
+  } = useReplayController({
+    replayDays: feed.replayDays,
+    journal: feed.journal,
+    requestReplayDay: feed.requestReplayDay,
+    requestJournal: feed.requestJournal,
+    showToast,
+  });
+
   // Journal fetch for the drawer's history view: whenever it's showing and the
   // socket is up — covers the first open AND a reconnect (the bridge re-serves it).
   useEffect(() => {
@@ -489,71 +509,6 @@ export default function App() {
   const priceStale = priceStaleMs > PRICE_STALE_MS;
   const priceStaleSecs = Math.round(priceStaleMs / 1000);
 
-  // Replay: adopt the day's bars when the bridge delivers them, starting at the
-  // very first bar of the session. A zero-bar day (holiday / missing data) exits
-  // cleanly — or, on a blind mystery day, quietly re-rolls another date.
-  useEffect(() => {
-    if (!replay || replay.candles.length > 0) return;
-    const bars = feed.replayDays[replay.date];
-    if (!bars) return; // still loading
-    if (bars.length > 0) {
-      setReplay((r) => (r && r.date === replay.date ? { ...r, candles: bars, idx: 0, playing: false } : r));
-      return;
-    }
-    mysteryTriedRef.current.add(replay.date);
-    if (replay.blind) {
-      const next = randomPastWeekday(mysteryTriedRef.current);
-      if (next && feed.requestReplayDay(next)) {
-        setReplay({ date: next, candles: [], idx: 0, speed: replay.speed, playing: false, blind: true });
-        return;
-      }
-    }
-    showToast(`No session data for ${replay.date} (holiday?)`, 'err');
-    setReplay(null);
-  }, [feed.replayDays, replay]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Decision replay (ghost fills): the fills she ACTUALLY took on the replayed
-  // day, revealed only as the replay clock passes them — no future leakage.
-  // Disabled on blind mystery days (her own fills would date the tape).
-  const dayGhosts = useMemo(() => {
-    if (!replayActive || replay.blind || !feed.journal) return null;
-    const fills = feed.journal[replay.date];
-    if (!fills || fills.length === 0) return null;
-    const first = replay.candles[0].t;
-    const last = replay.candles[replay.candles.length - 1].t + 60000;
-    return {
-      inSession: fills.filter((f) => f.ts >= first && f.ts < last).sort((a, b) => a.ts - b.ts),
-      outside: fills.filter((f) => f.ts < first || f.ts >= last).length
-    };
-  }, [replayActive, replay?.blind, replay?.date, replay?.candles, feed.journal]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const ghostsOn = replayActive && replay.ghosts !== false;
-  const visibleGhosts = useMemo(() => {
-    if (!dayGhosts || !ghostsOn || replayNow == null) return [];
-    const cutoff = replayNow + 60000; // a fill inside the current bar counts as revealed
-    return dayGhosts.inSession.filter((f) => f.ts < cutoff);
-  }, [dayGhosts, ghostsOn, replayNow]);
-
-  // Replay: the playback clock (speed = bars per second). Pressing play from the
-  // very first bar gets a 5s breather to get your bearings before the tape rolls;
-  // resuming mid-session starts immediately.
-  useEffect(() => {
-    if (!replayActive || !replay.playing) return;
-    let interval = null;
-    const start = () => {
-      setReplay((r) => (r && r.leadIn ? { ...r, leadIn: false } : r));
-      interval = setInterval(() => {
-        setReplay((r) => {
-          if (!r || r.idx >= r.candles.length - 1) return r ? { ...r, playing: false } : r;
-          return { ...r, idx: r.idx + 1 };
-        });
-      }, Math.max(40, 1000 / replay.speed));
-    };
-    const leadIn = replay.idx === 0 ? 5000 : 0;
-    if (leadIn) setReplay((r) => (r ? { ...r, leadIn: true } : r));
-    const timer = setTimeout(start, leadIn);
-    return () => { clearTimeout(timer); if (interval) clearInterval(interval); setReplay((r) => (r && r.leadIn ? { ...r, leadIn: false } : r)); };
-  }, [replayActive, replay?.playing, replay?.speed]); // eslint-disable-line react-hooks/exhaustive-deps
   priceRef.current = feed.price;
 
   useEffect(() => {
@@ -1619,10 +1574,7 @@ export default function App() {
             theme={theme}
             replayOn={replay != null || replayBarOpen}
             // Replay is SPX-only (disabled in guest mode). VIX stays (global).
-            onReplay={guestActive ? null : () => {
-              if (replay != null) { setReplay(null); setReplayPositions([]); setReplayBarOpen(false); }
-              else setReplayBarOpen((v) => !v);
-            }}
+            onReplay={guestActive ? null : toggleReplay}
           />
           {/* One control line (kisa, 2026-07-09): acct · 🚏 · ⚡ · 🔍, right-aligned
               under the ATM strip. The acct cluster moved up from its old float
@@ -1699,25 +1651,13 @@ export default function App() {
               theme={theme}
               replay={replay}
               loading={replayLoading}
-              onLoad={(date) => {
-                setReplayPositions([]);
-                setReplay({ date, candles: [], idx: 0, speed: 2, playing: false });
-                if (!feed.requestReplayDay(date)) showToast('Replay needs the bridge connection', 'err');
-                feed.requestJournal(); // ghost fills for this day, if any were recorded
-              }}
-              onMystery={() => {
-                mysteryTriedRef.current = new Set();
-                const date = randomPastWeekday(mysteryTriedRef.current);
-                if (!date) return;
-                setReplayPositions([]);
-                setReplay({ date, candles: [], idx: 0, speed: 2, playing: false, blind: true });
-                if (!feed.requestReplayDay(date)) showToast('Replay needs the bridge connection', 'err');
-              }}
-              onSet={(patch) => setReplay((r) => (r ? { ...r, ...patch } : r))}
-              onChangeDay={() => { setReplay(null); setReplayPositions([]); setReplayBarOpen(true); }}
-              onExit={() => { setReplay(null); setReplayPositions([]); setReplayBarOpen(false); }}
+              onLoad={loadDay}
+              onMystery={loadMystery}
+              onSet={setReplayPatch}
+              onChangeDay={changeDay}
+              onExit={exitReplay}
               ghosts={dayGhosts ? { total: dayGhosts.inSession.length, outside: dayGhosts.outside, on: ghostsOn } : null}
-              onToggleGhosts={() => setReplay((r) => (r ? { ...r, ghosts: !(r.ghosts !== false) } : r))}
+              onToggleGhosts={toggleGhosts}
             />
           )}
           <div className="chart-area">
