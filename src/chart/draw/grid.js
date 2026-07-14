@@ -84,7 +84,7 @@ export function drawGrid(ctx, { view, layout, theme, priceToY, indexToX, timefra
   // Label the first bar CROSSING each step boundary, not only bars landing
   // exactly on it — IBKR deep-history bars are session-aligned (09:30…) and
   // never hit epoch 12h boundaries, which left whole history stretches
-  // unlabeled (kisa's 60m screenshot, 2026-07-07). Seam-tolerant like tToIdx.
+  // unlabeled. Seam-tolerant like tToIdx.
   let prevBucket = null;
   for (let i = 0; i < view.slotCount; i++) {
     const c = view.slots[i];

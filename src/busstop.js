@@ -1,7 +1,7 @@
 // Bus Stop 🚏 — plant a (price, time) coordinate on the chart, get the contract
 // that pays best if the tape actually pulls up there, then score the call
 // (the bus came / was late / didn't run). Pure logic — no React, no sockets —
-// so it stays testable in plain node. Spec: spec-bus-stop.md.
+// so it stays testable in plain node.
 
 import { greeks } from './options.js';
 import { optionExpiryCutoffMs } from './market-time.js';
@@ -30,7 +30,7 @@ export function expiryCutoffMs(expiry, now = Date.now()) {
 //  - rows       all priceable strikes, closest-in first
 //  - sturdy     🛡 best geometric mean across on-target / 20-min-late / short —
 //               the pick that survives being *almost* right
-//  - tenX       🎯 the closest-in strike still paying ≥10× if she's exactly
+//  - tenX       🎯 the closest-in strike still paying ≥10× if price is exactly
 //               right (closest-in keeps the most cushion), or null if the
 //               coordinate physically can't produce a ten-bagger
 //  - best       raw max on-target multiple (the lottery ticket, for context)

@@ -374,8 +374,7 @@ export default function Chart({
   // permission prompt at all. The old getDisplayMedia path died silently in the
   // chromeless app window: Firefox anchors its screen-share doorhanger to the
   // toolbox that userChrome.css collapses, so the prompt opened invisibly and
-  // the button "did nothing" (kisa, 2026-07-13 — recording last worked 06-11,
-  // the chromeless window shipped 06-25). Canvas capture starts instantly,
+  // the button appeared inert. Canvas capture starts instantly,
   // records at full dpr resolution, and the chart IS the app; DOM overlays
   // (hover cards, toasts) aren't in the clip — the tape and its lines are.
   // Click again to finish (downloads a .webm); auto-stops at 90 s.

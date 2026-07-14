@@ -1,7 +1,7 @@
 import React from 'react';
 
-// The ? overlay (kisa 2026-07-13, after forgetting two features in three
-// days): every key, gesture, and mark in one glance. Zero resting chrome —
+// The ? overlay keeps every key, gesture, and mark discoverable at a glance.
+// Zero resting chrome —
 // it exists only while open; ? toggles, Esc or click-away closes. Curated,
 // not exhaustive: the things worth re-finding, not a manual.
 const KEYS = [

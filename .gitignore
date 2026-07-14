@@ -13,7 +13,7 @@ server/.journal-shots/
 server/.kill-lock.json
 server/.reverse-lock.json
 
-# machine-local Claude Code settings
+# machine-local agent settings
 .claude/settings.local.json
 
 # generated basis-check reports
@@ -28,12 +28,26 @@ totoro-original.png
 # desktop screenshots dropped in the repo folder
 Screenshot from *.png
 
-# session recaps stay local (our little secret)
+# local session recaps
 RECAP-*.md
 
-# Agent project instructions stay local (internal working docs)
+# Local agent and planning docs
 AGENTS.md
 CLAUDE.md
+BACKLOG.md
+spec-*.md
+
+# machine-specific desktop launchers
+deploy/claude-click.sh
+deploy/totoro-click.sh
+deploy/launch-totoro.sh
+deploy/set-window-icon.py
+
+# local investigations and parked experiments
+scripts/check-basis.mjs
+scripts/fetch-fri-close.mjs
+server/mark-audit.js
+src/experimental/
 
 # process scratch dropped in the repo folder — notes, shared images, zips
 attachments.zip

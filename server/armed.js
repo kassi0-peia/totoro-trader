@@ -1,5 +1,5 @@
-// ⚔ Armed orders — the ONE deliberate robot in totoro (kisa chose design B,
-// 2026-07-11): a pre-authorized entry that fires as a fresh marketable limit
+// ⚔ Armed orders — the one deliberate automated entry path: a pre-authorized
+// entry that fires as a fresh marketable limit
 // at the live ask the moment the displayed price crosses its trigger level.
 //
 // The rails, all of them:

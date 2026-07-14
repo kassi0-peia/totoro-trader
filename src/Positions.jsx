@@ -41,8 +41,8 @@ export default function Positions({ positions, theme, onClose, onReverse, onCanc
     .reduce((s, p) => s + (plOf(p).dollars ?? 0), 0);
   const closedPL = done.reduce((s, p) => s + (p.closedPL || 0), 0);
 
-  // Net greeks of the open book (roadmap #6, kisa's clutter rule: one line in
-  // this summary row, visible only while something is open). Per-contract
+  // Net greeks of the open book use one summary line, visible only while
+  // something is open. Per-contract
   // greeks × 100 × qty, sign-flipped for shorts: Δ in SPX-point dollars-ish
   // share equivalents, Θ in $/day, ν in $/vol-point.
   const net = positions.reduce((acc, p) => {

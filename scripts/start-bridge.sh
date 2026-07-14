@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Launch the TotoroTrader bridge (HTTPS + live data) DETACHED so it survives the
-# terminal/Claude session. Idempotent: does nothing if :8787 is already serving.
+# interactive terminal session. Idempotent: does nothing if :8787 is already serving.
 if ss -tlnp 2>/dev/null | grep -q ':8787'; then
   echo "bridge already running on :8787"
   exit 0

@@ -44,8 +44,8 @@ export function buildView({ tfCandles, visibleCount, viewOffset, priceOffset, pr
     }
   }
   if (!anyReal) return null;
-  // Open-position strikes deliberately do NOT stretch the price scale
-  // (kisa, 2026-07-10): entering a far-OTM wing used to yank the range out
+  // Open-position strikes deliberately do NOT stretch the price scale:
+  // entering a far-OTM wing used to yank the range out
   // to its strike and squash the tape into a sliver. The view stays on the
   // candles; a strike line beyond the range simply isn't visible until you
   // zoom out yourself (the positions drawer always carries the P/L).
