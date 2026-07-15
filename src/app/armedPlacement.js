@@ -21,12 +21,13 @@ export function armedPlacementStrikeOnGrid(strike, strikeStep = 5) {
   return Math.abs(units - Math.round(units)) <= GRID_EPSILON;
 }
 
-export function armedContractChoices(strike) {
+export function armedContractChoices(strike, marketPrice) {
   if (!positiveFinite(strike)) return [];
-  return [
-    { strike, right: 'C', type: 'call', label: `Buy ${strike} CALL if level reached`, contract: `${strike}C` },
-    { strike, right: 'P', type: 'put', label: `Buy ${strike} PUT if level reached`, contract: `${strike}P` },
-  ];
+  const call = { strike, right: 'C', type: 'call', label: `Buy ${strike} CALL if level reached`, contract: `${strike}C` };
+  const put = { strike, right: 'P', type: 'put', label: `Buy ${strike} PUT if level reached`, contract: `${strike}P` };
+  return positiveFinite(marketPrice) && strike < marketPrice
+    ? [put, call]
+    : [call, put];
 }
 
 // The bridge only watches contracts in its continuously streamed SPXW chain.
