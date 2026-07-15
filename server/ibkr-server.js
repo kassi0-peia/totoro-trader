@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url';
 import { IBApi, EventName } from '@stoqey/ib';
 import { WebSocketServer } from 'ws';
 import { computeSession, etParts, ymd, lastCloseEt } from './session.js';
-import { computeOptionsForward } from './options-forward.js';
+import { createBasisController } from './basis-controller.js';
 import { pickExpiry, deriveStrikeStep, strikeWindow, validateOrder as validateGuestOrder } from './guest-symbol.js';
 import { normalizeWatchlist, shapeWatchQuote } from './watchlist.js';
 import { validateArmedOrder, armedTriggered, ARMED_MAX } from './armed.js';
@@ -104,11 +104,10 @@ const MARKET_DATA_TYPE = parseInt(process.env.IBKR_MD_TYPE || '3', 10);
 // SIMULTANEOUS snapshot of live ES minus live SPX, then frozen and applied to all
 // overnight ES ticks. The cold-start fallback (see coldStartBasis) only matters
 // when the server starts overnight with no captured/persisted basis at all.
-// COLD_START_BASIS_ENV is an explicit operator override; COLD_START_BASIS_LITERAL
-// is the last-resort constant (ES≈7540 − SPX≈7520) used only when nothing is known.
+// COLD_START_BASIS_ENV is an explicit operator override handed to the basis
+// controller (which owns the last-resort literal, the 4:00 capture minute, and the
+// rest of the ladder). See server/basis-controller.js.
 const COLD_START_BASIS_ENV = process.env.COLD_START_BASIS != null ? parseFloat(process.env.COLD_START_BASIS) : null;
-const COLD_START_BASIS_LITERAL = 20;
-const BASIS_CAPTURE_MIN = 16 * 60; // 4:00 PM ET — when SPX cash settles and both feeds are live
 
 const STRIKE_STEP = 5;
 // ±20 strikes (±100 pts) — 82 option subs + SPX/ES/VIX = 85 lines, under IBKR's
@@ -136,14 +135,10 @@ let esPrice = null;
 let vixLast = null;   // VIX index level
 let vixClose = null;  // prior close (for the day change + color)
 
-// ES-SPX basis. Live during RTH, frozen otherwise.
-let basis = null;
-let basisFrozen = true;
-let basisEstimated = false; // true when from the cold-start fallback, not a real 4:00 capture
-let basisCaptureDate = null; // YYYYMMDD of the day we captured the 4:00 basis
-let basisEsExpiry = null;    // ES contract expiry the basis was measured against (persisted)
-let esClose = null;          // raw ES price at the 4:00 capture (persisted)
-let spxClose = null;         // raw SPX price at the 4:00 capture (persisted)
+// ES-SPX basis state + its fallback ladder are owned by the basis controller
+// (server/basis-controller.js), instantiated below once `session` exists. The
+// coordinator only feeds it witnesses (ES/SPX ticks, the SPXW chain, close bars)
+// and publishes its snapshot — it never mutates basis state directly.
 
 // Watchdog: catches a stalled mkt-data feed or a runaway candle builder (e.g. after
 // the IBKR session is kicked when the mobile app logs in) and forces a reconnect.
@@ -404,7 +399,17 @@ const tradeJournal = createTradeJournal({
   broadcast,
 });
 
-loadBasis();
+// The single owner of the ES↔SPX basis and its fallback ladder. Injected clock +
+// persistence keep it unit-testable (server/basis-controller.test.js); the
+// coordinator feeds it witnesses and publishes basisCtl.snapshot().
+const basisCtl = createBasisController({
+  session: () => session,
+  coldStartEnv: COLD_START_BASIS_ENV,
+  persist: (obj) => atomicWriteSync(BASIS_FILE, JSON.stringify(obj)),
+  readCache: () => JSON.parse(fs.readFileSync(BASIS_FILE, 'utf8')),
+});
+
+basisCtl.load();
 tradeJournal.load();
 
 // ── HTTP(S) + WebSocket server ────────────────────────────────────────────────
@@ -996,7 +1001,7 @@ function wireHandlers(api) {
       finishHistoricalSeed(series, s.bars, { maxCandles: HISTORY_CANDLES });
       const lastClose = series.candles.length ? series.candles[series.candles.length - 1].close : null;
       if (s.kind === 'spx-hist' && spxPrice == null) spxPrice = lastClose;
-      if (s.kind === 'es-hist' && esPrice == null) { esPrice = lastClose; ensureOvernightBasis(); }
+      if (s.kind === 'es-hist' && esPrice == null) { esPrice = lastClose; basisCtl.ensureOvernight(esPrice); }
       if (s.kind === 'spx-hist') watchdogState.spxHistSeededAt = Date.now();
       if (s.kind === 'es-hist') watchdogState.esHistSeededAt = Date.now();
       if (s.kind === 'spx-hist') applySpyVolumeToSpx(); // SPY volume may already be seeded
@@ -1186,9 +1191,9 @@ function feedEsTick(price) {
   esPrice = price;
   watchdogState.lastEsTick = Date.now();
   const candle = feedSeries(es, price, 'ES');
-  ensureOvernightBasis();
+  basisCtl.ensureOvernight(esPrice);
   if (session.source === 'ES') {
-    const b = effectiveBasis();
+    const b = basisCtl.effectiveBasis();
     broadcast({ type: 'tick', source: 'ES', price: esPrice - b, candle: shiftCandle(candle, b) });
   }
   maybeRecenterChain(displayPrice());
@@ -1268,68 +1273,22 @@ setInterval(watchdogTick, 15_000);
 // 5s session timer, so it fires within a few seconds of 4:00.
 function captureCloseBasis() {
   const e = etParts();
-  const mins = e.hh * 60 + e.mm;
-  const today = ymd(e.y, e.mo, e.d);
-  // session.rth is true only on weekdays in [09:30, 16:15); gate to the close window.
+  const now = Date.now();
   // Freshness guard: if a watchdog-driven reconnect lands just before 4:00 PM
   // the cached esPrice/spxPrice can be stale ticks from before the stall.
-  // Capturing them would freeze a wrong basis for the next session, so we
-  // defer until a fresh tick (< 30 s old) is available on each leg. The 5-s
-  // session timer keeps retrying through the 16:00–16:15 window.
-  const now = Date.now();
-  const spxFresh = watchdogState.lastSpxTick && now - watchdogState.lastSpxTick < 30_000;
-  const esFresh = watchdogState.lastEsTick && now - watchdogState.lastEsTick < 30_000;
-  if (session.rth && mins >= BASIS_CAPTURE_MIN && basisCaptureDate !== today &&
-      esPrice != null && spxPrice != null && spxFresh && esFresh) {
-    basis = esPrice - spxPrice;
-    basisFrozen = true;
-    basisEstimated = false;
-    basisCaptureDate = today;
-    basisEsExpiry = esExpiry; // the front month this basis is valid for
-    esClose = esPrice;
-    spxClose = spxPrice;
-    saveBasis();
-    console.log(`[ibkr] 4:00 PM basis captured = ${basis.toFixed(2)} (ES ${esPrice.toFixed(2)} − SPX ${spxPrice.toFixed(2)}, simultaneous, ${esExpiry})`);
-  }
-}
-
-// Resolve the cold-start basis, preferring real information over the literal:
-//   1. an explicit COLD_START_BASIS env override (operator knows best);
-//   2. the most recent persisted 4:00 capture — basis, or recomputed from the
-//      persisted ES/SPX closes. Even days-stale, the real premium tracks the
-//      price level far better than a fixed constant. (loadBasis already restores
-//      a trusted capture into `basis`, so this path is the belt-and-braces case
-//      where the file was rejected but still carries usable closes.)
-//   3. the literal constant — only when nothing at all is known.
-function coldStartBasis() {
-  if (COLD_START_BASIS_ENV != null && Number.isFinite(COLD_START_BASIS_ENV)) {
-    return { value: COLD_START_BASIS_ENV, from: 'env override' };
-  }
-  try {
-    const d = JSON.parse(fs.readFileSync(BASIS_FILE, 'utf8'));
-    // Only trust a real 4:00 capture (mirror loadBasis); ignore a persisted estimate.
-    if (typeof d.basis === 'number' && !d.basisEstimated) {
-      return { value: d.basis, from: 'persisted 4:00 capture' };
-    }
-    if (typeof d.esClose === 'number' && typeof d.spxClose === 'number') {
-      return { value: d.esClose - d.spxClose, from: 'persisted ES/SPX closes' };
-    }
-  } catch { /* no/old cache file */ }
-  return { value: COLD_START_BASIS_LITERAL, from: 'literal default' };
-}
-
-// Cold-start fallback: server started overnight with no trusted basis loaded.
-// Seed from coldStartBasis() and apply it to live ES. Replaced by the next 4:00
-// capture (or the backfill, which heals a stale value once SPX bars are available).
-function ensureOvernightBasis() {
-  if (!session.rth && basis == null && esPrice != null) {
-    const cs = coldStartBasis();
-    basis = cs.value;
-    basisEstimated = true;
-    basisFrozen = true;
-    saveBasis();
-    console.log(`[ibkr] cold-start basis = ${basis.toFixed(2)} (${cs.from}). SPX-equiv = ES − ${basis.toFixed(2)}. The next 4:00 capture replaces it.`);
-  }
+  // Capturing them would freeze a wrong basis for the next session, so we defer
+  // until a fresh tick (< 30 s old) is available on each leg. The 5-s session
+  // timer keeps retrying through the 16:00–16:15 window. The controller gates the
+  // ET-minute / same-day / null checks; the coordinator proves each leg is fresh.
+  basisCtl.captureFrozen({
+    etMins: e.hh * 60 + e.mm,
+    today: ymd(e.y, e.mo, e.d),
+    esPrice,
+    spxPrice,
+    esExpiry,
+    spxFresh: !!(watchdogState.lastSpxTick && now - watchdogState.lastSpxTick < 30_000),
+    esFresh: !!(watchdogState.lastEsTick && now - watchdogState.lastEsTick < 30_000),
+  });
 }
 
 // Basis backfill: if the 4:00 PM live capture was missed (e.g. delayed data
@@ -1345,74 +1304,24 @@ let basisFillInFlight = false;
 let basisFillTimer = null;
 const basisFill = { target: null, spxBarClose: null, esBarClose: null };
 
-// Same-day audit of the live 16:00 capture. The capture is one tick-pair from
-// the most violent minute of the day; on a fast close the SPX print lags the
-// market and the frozen basis lands points wrong (24 pts on 2026-06-26). The
-// old guard below returned early whenever a same-day capture existed — so a bad
-// grab stamped the day and shielded itself from the corrective bar backfill.
-// Now the first backfill pass of the day runs even with a capture in hand and
-// arbitrates: agree within tolerance → keep the capture; disagree → adopt the
-// better witness. Once per day (barring restarts, which harmlessly re-audit).
-let basisAuditDate = null;
-let basisAuditWaitUntil = null; // grace window while waiting for the options arbiter
-const BASIS_AUDIT_TOLERANCE = 2.0; // pts — normal capture-vs-bar jitter is well under 0.5
-
+// The audit/grace/tolerance state and the arbitration logic live in the basis
+// controller. The coordinator owns only the broker I/O: it asks the controller
+// what the day's capture needs (planBackfill), and when the answer is 'need-bars'
+// it finds/fetches the 15:59 close bars and hands them back via applyBars.
 function maybeBackfillBasis() {
   if (basisFillInFlight || !ib || !connected) return;
   const target = lastCloseEt();
-  if (!target) return;
-  // A basis is stale if it's from an earlier day, an estimate, OR was measured
-  // against a different ES contract than the one we now stream. The last case is
-  // the front-month roll (e.g. ESM6 → ESU6): the calendar contract jumps ~60–80
-  // pts over the prior month, so a basis frozen on the old contract overstates
-  // SPX-equiv by the whole roll spread until re-derived. esExpiry==null (old
-  // cache, unknown contract) also re-derives, to be safe. Guard on esExpiry being
-  // resolved so we never invalidate before the front month is known.
-  const contractStale = !!esExpiry && basisEsExpiry !== esExpiry;
-  const current = basisCaptureDate === target.ymd && !basisEstimated && !contractStale;
-  if (current && basisAuditDate === target.ymd) return; // captured AND bar-audited
-  // Audit mode, strongest witness first: with a fresh options-implied basis in
-  // hand, arbitrate against parity directly — no bar fetch at all (HMDS goes
-  // quiet overnight and a silently dead request used to strand the audit).
-  if (current && !session.rth && basisLiveFresh()) {
-    basisAuditDate = target.ymd;
-    if (Math.abs(basisLive - basis) <= BASIS_AUDIT_TOLERANCE) {
-      console.log(`[ibkr] 4:00 basis audit ok: capture ${basis.toFixed(2)} vs options parity ${basisLive.toFixed(2)} — keeping the capture`);
-      return;
-    }
-    console.log(`[ibkr] 4:00 basis audit OVERRIDE: capture ${basis.toFixed(2)} vs options parity ${basisLive.toFixed(2)} (Δ ${(basis - basisLive).toFixed(2)}) — the live grab likely froze a lagging print; adopting the options value`);
-    basis = basisLive;
-    basisFrozen = true;
-    basisEstimated = false;
-    basisCaptureDate = target.ymd;
-    if (esExpiry) basisEsExpiry = esExpiry;
-    saveBasis();
-    broadcast(snapshotMsg());
-    return;
-  }
-  // No qualifying chain yet: hold a 45 s grace WINDOW (not a one-shot flag —
-  // both the SPX and ES seed completions call in here seconds apart, and a flag
-  // lets the second caller barge through to the bar witness while the chain is
-  // still warming). A dead chain — pre-8:15 GTH, weekend — just means the timed
-  // retry lands on the 15:59 bars, which is the correct fallback.
-  if (current && !session.rth) {
-    if (basisAuditWaitUntil == null) {
-      basisAuditWaitUntil = Date.now() + 45_000;
-      setTimeout(maybeBackfillBasis, 46_000);
-      return;
-    }
-    if (Date.now() < basisAuditWaitUntil) return; // inside the grace window — the timer retries
-    // window expired with no qualifying chain → fall through to the bar witness
-  }
-  if (contractStale) {
-    basisEstimated = true; // honest header until the re-derivation below lands
-    console.log(`[ibkr] basis contract roll detected (was ${basisEsExpiry ?? 'unknown'}, now ${esExpiry}) — re-deriving against the current front month`);
-  }
+  const plan = basisCtl.planBackfill({ target, esExpiry });
+  if (plan.action === 'skip') return;
+  if (plan.action === 'applied') { if (plan.changed) broadcast(snapshotMsg()); return; }
+  if (plan.action === 'wait') { if (plan.scheduleMs) setTimeout(maybeBackfillBasis, plan.scheduleMs); return; }
+  // action === 'need-bars': supply the 1-min bars closing at 16:00 ET.
   const barT = target.closeMs - 60_000; // 1-min bar covering 15:59–16:00 ET
   const spxBar = spx.candles.find((c) => c.t === barT);
   const esBar = es.candles.find((c) => c.t === barT);
   if (spxBar && esBar) {
-    applyBackfilledBasis(target, spxBar.close, esBar.close, 'seeded');
+    const { changed } = basisCtl.applyBars(target, spxBar.close, esBar.close, 'seeded', esExpiry);
+    if (changed) broadcast(snapshotMsg());
     return;
   }
   basisFillInFlight = true;
@@ -1457,7 +1366,8 @@ function finishBasisFill() {
   }
   const t = basisFill.target;
   if (t && basisFill.spxBarClose != null && basisFill.esBarClose != null) {
-    applyBackfilledBasis(t, basisFill.spxBarClose, basisFill.esBarClose, 'fetched');
+    const { changed } = basisCtl.applyBars(t, basisFill.spxBarClose, basisFill.esBarClose, 'fetched', esExpiry);
+    if (changed) broadcast(snapshotMsg());
   } else if (t) {
     console.log(`[ibkr] basis backfill for ${t.ymd}: 16:00 close bars unavailable (spx=${basisFill.spxBarClose}, es=${basisFill.esBarClose})`);
   }
@@ -1476,96 +1386,20 @@ function resetBasisFill() {
   }
 }
 
-function applyBackfilledBasis(target, spxBarClose, esBarClose, how) {
-  const barBasis = esBarClose - spxBarClose;
-  const haveCapture = basisCaptureDate === target.ymd && !basisEstimated &&
-    (!esExpiry || basisEsExpiry === esExpiry);
-  if (haveCapture) {
-    basisAuditDate = target.ymd;
-    // Arbiter: a fresh options-implied basis is the strongest witness (parity is
-    // arbitrage-enforced and lag-immune); the 15:59 close bars are next-best.
-    const optionsFresh = !session.rth && basisLiveFresh();
-    const arbiter = optionsFresh ? basisLive : barBasis;
-    const witness = optionsFresh ? 'options parity' : `15:59 bars (ES ${esBarClose.toFixed(2)} − SPX ${spxBarClose.toFixed(2)})`;
-    if (Math.abs(arbiter - basis) <= BASIS_AUDIT_TOLERANCE) {
-      console.log(`[ibkr] 4:00 basis audit ok: capture ${basis.toFixed(2)} vs ${witness} ${arbiter.toFixed(2)} — keeping the capture`);
-      return;
-    }
-    console.log(`[ibkr] 4:00 basis audit OVERRIDE: capture ${basis.toFixed(2)} vs ${witness} ${arbiter.toFixed(2)} (Δ ${(basis - arbiter).toFixed(2)}) — the live grab likely froze a lagging print; adopting the ${optionsFresh ? 'options' : 'bar'} value`);
-    basis = arbiter;
-  } else {
-    basis = barBasis;
-    basisAuditDate = target.ymd; // freshly bar-derived — no separate audit needed
-  }
-  basisFrozen = true;
-  basisEstimated = false;
-  basisCaptureDate = target.ymd;
-  basisEsExpiry = esExpiry; // re-derived against the current front month
-  esClose = esBarClose;
-  spxClose = spxBarClose;
-  saveBasis();
-  console.log(`[ibkr] 4:00 basis backfilled (${how} bars, ${target.ymd}, ${esExpiry}) = ${basis.toFixed(2)} (ES ${esBarClose.toFixed(2)} − SPX ${spxBarClose.toFixed(2)})`);
-  broadcast(snapshotMsg());
-}
-
 // ── Options-implied live basis (overnight) ──────────────────────────────────
-// The frozen 4 PM basis is one tick-pair grabbed in the most violent minute of
-// the day — twice in five days (2026-06-26 recon, 2026-07-01 quarter turn) a
-// lagging close print froze it points wrong and the whole overnight chart read
-// off by that much. Overnight the SPXW chain trades live, and put-call parity
-// gives the true forward model-free — so keep a chain-anchored basis fresh and
-// prefer it; the frozen snapshot stays as the fallback, the daily-change
-// reference, and the cold-start seed. See spec-options-implied-basis.md.
-let basisLive = null;   // esPrice − optionsForward; never persisted
-let basisLiveTs = 0;    // Date.now() of the last good recompute
-const BASIS_LIVE_FRESH_MS = 30_000;    // trust window after a good recompute
+// The overnight recompute owner. The chain-anchored parity math and the
+// options↔frozen ladder live in the basis controller; the coordinator feeds it
+// the live ES price + the active-expiry chain on a fixed cadence and re-levels the
+// chart the moment the applied basis flips (a good chain appearing, or quotes
+// going quiet/stale). See spec-options-implied-basis.md.
 const BASIS_LIVE_THROTTLE_MS = 2_000;  // recompute cadence
-
-function basisLiveFresh() {
-  return basisLive != null && Date.now() - basisLiveTs < BASIS_LIVE_FRESH_MS;
-}
-
-// The number every overnight conversion uses: fresh options-implied when the
-// chain qualifies, else the frozen 4 PM capture (which coldStartBasis already
-// seeds when nothing better is known). RTH never reaches here for the price
-// (source is SPX cash), and the !rth guard keeps a lingering basisLive from
-// touching an RTH-built bar.
-function effectiveBasis() {
-  if (!session.rth && basisLiveFresh()) return basisLive;
-  return basis ?? 0;
-}
-
-function recomputeOptionsBasis() {
-  if (session.rth || esPrice == null || currentExpiry == null) return;
-  const frozenEstimate = esPrice - (basis ?? 0);
-  const f = computeOptionsForward(
-    [...chain.values()].filter((e) => e.expiry === currentExpiry),
-    // Anchor the strike band on the best current estimate so it survives a bad
-    // frozen basis; sanity-check against the frozen estimate so a corrupt or
-    // wrong-expiry chain can't drag the price somewhere wild.
-    { anchor: esPrice - effectiveBasis(), sanityAnchor: frozenEstimate }
-  );
-  if (!f) return; // fallback: effectiveBasis() degrades to frozen after the fresh window
-  if (!basisLiveFresh()) {
-    console.log(`[ibkr] options-implied basis live = ${(esPrice - f.forward).toFixed(2)} (fwd ${f.forward.toFixed(2)}, ${f.n} strikes; frozen ${basis == null ? 'none' : basis.toFixed(2)})`);
-  }
-  basisLive = esPrice - f.forward;
-  basisLiveTs = Date.now();
-}
-
-// Drive the recompute and re-level the chart the moment the applied basis flips
-// options↔frozen in either direction (a good chain appearing, or quotes going
-// quiet/stale) — otherwise old candles keep the previous level until the next
-// incidental snapshot broadcast.
-let basisLiveWasFresh = false;
 setInterval(() => {
-  recomputeOptionsBasis();
-  const fresh = !session.rth && basisLiveFresh();
-  if (fresh !== basisLiveWasFresh) {
-    basisLiveWasFresh = fresh;
-    if (!fresh) console.log('[ibkr] options-implied basis stale/unavailable — falling back to frozen');
-    broadcast(snapshotMsg());
-  }
+  const { freshChanged } = basisCtl.recomputeFromChain({
+    esPrice,
+    currentExpiry,
+    entries: [...chain.values()],
+  });
+  if (freshChanged) broadcast(snapshotMsg());
 }, BASIS_LIVE_THROTTLE_MS);
 
 // Shift a raw ES bar into SPX-equivalent (minus the applied basis) and tag it as
@@ -1573,18 +1407,18 @@ setInterval(() => {
 // (cold start / mid-roll) so the chart can mark it as a proxy-on-an-estimate —
 // a fresh options-implied basis is chain-anchored, not an estimate.
 function shiftCandle(c, b) {
-  return { t: c.t, open: c.open - b, high: c.high - b, low: c.low - b, close: c.close - b, volume: c.volume, src: 'ES', est: basisEstimated && !basisLiveFresh() };
+  return { t: c.t, open: c.open - b, high: c.high - b, low: c.low - b, close: c.close - b, volume: c.volume, src: 'ES', est: basisCtl.estimatedProxy() };
 }
 
 // SPX-equivalent price for the active source.
 function displayPrice() {
   if (session.source === 'SPX') return spxPrice;
   if (esPrice == null) return null;
-  return esPrice - effectiveBasis();
+  return esPrice - basisCtl.effectiveBasis();
 }
 
 function displayCandles() {
-  const b = effectiveBasis();
+  const b = basisCtl.effectiveBasis();
   // ALWAYS merge the overnight ES proxy (shifted to SPX-equiv) with the RTH SPX
   // cash bars, in every session — so the full continuous history stays visible
   // even overnight (previously overnight returned ES-only and the day's RTH bars
@@ -3317,6 +3151,7 @@ function chainPayload(e) {
 
 function snapshotMsg() {
   const portfolioState = portfolio.publicSnapshot();
+  const basisState = basisCtl.snapshot();
   const greeks = [];
   for (const e of chain.values()) {
     if (e.expiry !== currentExpiry) continue;
@@ -3339,15 +3174,15 @@ function snapshotMsg() {
     greeks,
     expiry: currentExpiry || session.expiry,
     esExpiry,
-    basis,
-    basisFrozen,
-    basisEstimated,
+    basis: basisState.basis,
+    basisFrozen: basisState.basisFrozen,
+    basisEstimated: basisState.basisEstimated,
     // Honesty about which basis the overnight conversion is applying right now:
     // 'options' = live chain-anchored, 'frozen' = the 4 PM capture, 'estimated'
     // = cold-start fallback. RTH shows SPX cash directly, so it reports 'frozen'
     // vacuously there.
-    basisLive: basisLiveFresh() ? basisLive : null,
-    basisSource: !session.rth && basisLiveFresh() ? 'options' : basisEstimated ? 'estimated' : 'frozen',
+    basisLive: basisState.basisLive,
+    basisSource: basisState.basisSource,
     rth: session.rth,
     vix: { last: vixLast, close: vixClose },
     account: portfolioState.account,
@@ -3366,23 +3201,13 @@ function snapshotMsg() {
     positions: portfolioState.positions,
     orders: workingOrdersList(),
     funds: portfolioState.funds,
-    spxClose,
+    spxClose: basisState.spxClose,
     // Staleness heartbeat: when the displayed price last ticked. Seeds the client's
     // freshness clock at (re)connect for the price it actually shows — SPX cash in
     // RTH, the ES proxy overnight — so a feed that's already frozen at connect reads
     // as stale immediately (the client re-stamps this on every live tick after).
     tickTs: (session.source === 'ES' ? watchdogState.lastEsTick : watchdogState.lastSpxTick) || null
   };
-}
-
-// ── Basis persistence ──────────────────────────────────────────────────────
-
-function saveBasis() {
-  try {
-    atomicWriteSync(BASIS_FILE, JSON.stringify({ basis, basisEstimated, esClose, spxClose, captureDate: basisCaptureDate, esExpiry: basisEsExpiry, ts: Date.now() }));
-  } catch (err) {
-    console.error('[ibkr] saveBasis failed:', err);
-  }
 }
 
 // Live entry-delta projection supplied to the journal service. Backfills never
@@ -3402,37 +3227,6 @@ function deltaAtFill(contract, live) {
   }
   if (!e || (e.expiry && e.expiry !== expiry)) return {};
   return Number.isFinite(e.delta) ? { delta: Math.round(e.delta * 100) / 100 } : {};
-}
-
-// ── Basis persistence ──────────────────────────────────────────────────────
-
-function loadBasis() {
-  try {
-    const d = JSON.parse(fs.readFileSync(BASIS_FILE, 'utf8'));
-    // Only trust a real 4:00 capture. A persisted *estimate* (cold-start) must not
-    // pin the value — let the fallback re-fire until the next 4:00 capture.
-    if (typeof d.basis === 'number' && !d.basisEstimated) {
-      basis = d.basis;
-      basisEstimated = false;
-      basisFrozen = true;
-      if (typeof d.esClose === 'number') esClose = d.esClose;
-      if (typeof d.spxClose === 'number') spxClose = d.spxClose;
-      // The ES contract the basis was measured against. Older cache files lack
-      // it (null) — maybeBackfillBasis then re-derives against the resolved front
-      // month, which both heals a missing value and catches a roll.
-      if (typeof d.esExpiry === 'string') basisEsExpiry = d.esExpiry;
-      // Capture date drives the staleness check for the backfill. Older cache
-      // files lack the field — derive it from the save timestamp's ET date.
-      if (typeof d.captureDate === 'string') basisCaptureDate = d.captureDate;
-      else if (typeof d.ts === 'number') {
-        const e = etParts(new Date(d.ts));
-        basisCaptureDate = ymd(e.y, e.mo, e.d);
-      }
-      const tail = (esClose != null && spxClose != null)
-        ? ` (ES ${esClose.toFixed(2)} − SPX ${spxClose.toFixed(2)})` : '';
-      console.log(`[ibkr] loaded persisted 4:00 basis ${basis.toFixed(2)}${tail}`);
-    }
-  } catch {}
 }
 
 async function tryConnect() {
