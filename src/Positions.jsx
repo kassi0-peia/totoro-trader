@@ -3,8 +3,12 @@ import { plDollars, plSign } from './pl.js';
 import { unrepresentedWorkingOrders } from './app/positionModel.js';
 
 function plOf(pos) {
-  // No live feed for this symbol right now (inactive guest) → no honest mark.
-  if (pos.greeksLive?.source === 'nodata') return { live: null, dollars: null, pct: null };
+  // A missing, unsupported, or settled quote has no honest mark. In particular,
+  // never turn a settled-but-unreconciled broker row into fake $0 P/L by falling
+  // back to its entry premium.
+  if (['nodata', 'unavailable', 'settled'].includes(pos.greeksLive?.source)) {
+    return { live: null, dollars: null, pct: null };
+  }
   const live = pos.greeksLive?.premium ?? pos.entryPremium ?? 0;
   const entry = pos.entryPremium ?? 0;
   const dollars = plDollars(pos, live, entry);
@@ -47,6 +51,7 @@ export default function Positions({ positions, theme, onClose, onReverse, onCanc
   // share equivalents, Θ in $/day, ν in $/vol-point.
   const net = positions.reduce((acc, p) => {
     if (p.status !== 'open' || !p.greeksLive) return acc;
+    if (['nodata', 'unavailable', 'settled'].includes(p.greeksLive.source)) return acc;
     const m = 100 * (p.qty || 0) * plSign(p);
     acc.on = true;
     acc.delta += (p.greeksLive.delta || 0) * m;
@@ -133,6 +138,11 @@ export default function Positions({ positions, theme, onClose, onReverse, onCanc
           const inflight = p.status === 'pending' || p.status === 'closing';
           const tag = p.status === 'pending' ? 'FILLING' : p.status === 'closing' ? 'CLOSING' : null;
           const { live, dollars, pct } = plOf(p);
+          const unavailableTip = p.greeksLive?.source === 'settled'
+            ? 'Contract has reached its exchange settlement cutoff — awaiting broker reconciliation'
+            : p.greeksLive?.source === 'unavailable'
+              ? 'Exact contract quote is unavailable'
+              : `No live feed for ${p.symbol ?? 'this symbol'} — open its tab for live marks`;
           const flash = flashOf(p);
           return (
             <div
@@ -163,7 +173,7 @@ export default function Positions({ positions, theme, onClose, onReverse, onCanc
                   </span>
                   <span className="pos-cell pos-pl" style={{ color: dollars == null ? theme.muted : dollars >= 0 ? theme.profit : theme.loss }}>
                     {dollars == null ? (
-                      <span data-tip={`No live feed for ${p.symbol ?? 'this symbol'} — open its tab for live marks`}>—</span>
+                      <span data-tip={unavailableTip}>—</span>
                     ) : (
                       <>
                         {dollars >= 0 ? '+' : '−'}${Math.abs(dollars).toFixed(2)}

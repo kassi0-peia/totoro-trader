@@ -74,10 +74,11 @@ export default function ChartTooltips({
         const p = markerHover.position;
         const isClosed = p.status === 'closed';
         const filled = p.entryPremium != null; // false while the open order is still working
-        const live = p.greeksLive?.premium ?? p.entryPremium ?? 0;
-        const exitPrem = p.exitPremium ?? live;
-        const pl = filled ? plDollars(p, exitPrem) : 0;
-        const pct = filled && p.entryPremium ? ((exitPrem - p.entryPremium) / p.entryPremium) * 100 * plSign(p) : 0;
+        const live = p.greeksLive?.premium;
+        const exitPrem = isClosed ? p.exitPremium : live;
+        const markKnown = Number.isFinite(exitPrem);
+        const pl = filled && markKnown ? plDollars(p, exitPrem) : null;
+        const pct = filled && markKnown && p.entryPremium ? ((exitPrem - p.entryPremium) / p.entryPremium) * 100 * plSign(p) : null;
         const kind = isClosed ? 'CLOSED' : p.status === 'open' ? 'OPEN' : (p.status || '').toUpperCase();
         const c = p.type === 'call' ? theme.up : theme.down;
         const candleCloseAt = (ts) => {
@@ -120,13 +121,15 @@ export default function ChartTooltips({
             <div className="tt-row"><span>Entry @</span><b>{entryAt != null ? `${entryApprox ? '~' : ''}${entryAt.toFixed(2)}` : '—'}</b></div>
             <div className="tt-row"><span>{isClosed ? 'Exit @' : 'Mark @'}</span><b>{exitAt != null ? `${exitApprox ? '~' : ''}${exitAt.toFixed(2)}` : '—'}</b></div>
             <div className="tt-row"><span>Entry Prem</span><b>{filled ? `$${p.entryPremium.toFixed(2)}` : 'filling…'}</b></div>
-            <div className="tt-row"><span>{isClosed ? 'Exit Prem' : 'Mark Prem'}</span><b>${exitPrem.toFixed(2)}</b></div>
+            <div className="tt-row"><span>{isClosed ? 'Exit Prem' : 'Mark Prem'}</span><b>{markKnown ? `$${exitPrem.toFixed(2)}` : '—'}</b></div>
             <div className="tt-row"><span>Qty</span><b>×{p.qty}</b></div>
             {filled && (
               <div className="tt-row">
                 <span>P/L</span>
-                <b style={{ color: pl >= 0 ? theme.profit : theme.loss }}>
-                  {pl >= 0 ? '+' : '−'}${Math.abs(pl).toFixed(2)} ({pct >= 0 ? '+' : ''}{pct.toFixed(1)}%)
+                <b style={{ color: pl == null ? theme.muted : pl >= 0 ? theme.profit : theme.loss }}>
+                  {pl == null
+                    ? '—'
+                    : `${pl >= 0 ? '+' : '−'}$${Math.abs(pl).toFixed(2)} (${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%)`}
                 </b>
               </div>
             )}
