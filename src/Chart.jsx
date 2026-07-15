@@ -294,7 +294,7 @@ export default function Chart({
 
     drawCandles(ctx, { view, layout, theme, priceToY, indexToX, price, positions, showPositions, source, showVolume });
 
-    drawPriceLine(ctx, { layout, theme, priceToY, price, expectedMove, alerts, armed, rightAxis: RIGHT_AXIS, dayLevels, beLine });
+    drawPriceLine(ctx, { layout, theme, priceToY, price, expectedMove, alerts, rightAxis: RIGHT_AXIS, dayLevels, beLine });
 
     drawAxisChain(ctx, { view, layout, theme, priceToY, price, axisChain, greeksMap, ivol, timeToExpiryYears, strikeStep });
 
@@ -316,7 +316,7 @@ export default function Chart({
     }
 
     busHitsRef.current = drawBusStops(ctx, { view, layout, theme, priceToY, indexToX, price, busStops, tfCandles, tToIdx, bucketMs });
-  }, [candles, price, positions, theme, size, view, layout, priceToY, indexToX, timeframe, showMarkers, showVolume, expectedMove, alerts, armed, dayLevels, beLine, axisChain, strikeStep, greeksMap, ivol, timeToExpiryYears, source, showPositions, ghostFills, busStops, highlightPositionId, tfCandles, clearHitLists]);
+  }, [candles, price, positions, theme, size, view, layout, priceToY, indexToX, timeframe, showMarkers, showVolume, expectedMove, alerts, dayLevels, beLine, axisChain, strikeStep, greeksMap, ivol, timeToExpiryYears, source, showPositions, ghostFills, busStops, highlightPositionId, tfCandles, clearHitLists]);
 
   const {
     pinchRef,
@@ -674,6 +674,7 @@ export default function Chart({
             const nearArmed = armed.find((a) => Math.abs(priceToY(a.level) - target.y) <= 8);
             onMenu({
               x: e.clientX, y: e.clientY, price: target.price,
+              marketPrice: price,
               alertId: near ? near.id : null, alertPrice: near ? near.price : null,
               armedId: nearArmed ? nearArmed.id : null,
               armedLabel: nearArmed ? `${nearArmed.strike}${nearArmed.right} @ ${nearArmed.level}` : null
@@ -706,6 +707,11 @@ export default function Chart({
         );
         const one = group.items.length === 1 ? group.items[0].arm : null;
         const label = one ? `⚔ ${one.strike}${one.right}` : `⚔ ×${group.items.length}`;
+        const rights = new Set(group.items.map(({ arm }) => arm.right));
+        const onlyRight = rights.size === 1 ? group.items[0].arm.right : null;
+        const labelColor = onlyRight === 'C'
+          ? theme.callLine
+          : onlyRight === 'P' ? theme.putLine : theme.text;
         return (
           <div
             key={group.items.map(({ arm }) => arm.id).join(':')}
@@ -715,6 +721,7 @@ export default function Chart({
               top: controlTop,
               width: RIGHT_AXIS,
               '--armed-popover-top': `${cardTop - controlTop}px`,
+              '--armed-axis-color': labelColor,
             }}
             onContextMenu={(event) => event.preventDefault()}
           >
@@ -726,6 +733,18 @@ export default function Chart({
             >
               {label}
             </button>
+            {group.items.map(({ arm, y }) => (
+              <span
+                key={`guide:${arm.id}`}
+                className="armed-axis-guide"
+                aria-hidden="true"
+                style={{
+                  top: y - controlTop,
+                  width: layout.chartW,
+                  borderColor: arm.right === 'C' ? theme.callLine : theme.putLine,
+                }}
+              />
+            ))}
             <div className="armed-axis-popover" role="dialog" aria-label="Armed triggers">
               <div className="armed-axis-head">
                 <b>ARMED</b>
@@ -734,7 +753,7 @@ export default function Chart({
               {group.items.map(({ arm }) => (
                 <div className="armed-axis-item" key={arm.id}>
                   <div className="armed-axis-contract">
-                    <b>{arm.strike}{arm.right}</b>
+                    <b style={{ color: arm.right === 'C' ? theme.callLine : theme.putLine }}>{arm.strike}{arm.right}</b>
                     <span>{String(arm.expiry).replace(/^(\d{4})(\d{2})(\d{2})$/, '$1-$2-$3')}</span>
                   </div>
                   <div className="armed-axis-route">

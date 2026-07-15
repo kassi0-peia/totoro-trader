@@ -17,7 +17,13 @@ const eligible = {
   armedCount: 0, maxArmed: 3, contractAvailable: true, strikeStep: 5,
 };
 
-test('the first menu step always offers both rights at the exact snapped strike', () => {
+test('the first menu step offers both rights in spot-relative order', () => {
+  const call = { strike: 7500, right: 'C', type: 'call', label: 'Buy 7500 CALL if level reached', contract: '7500C' };
+  const put = { strike: 7500, right: 'P', type: 'put', label: 'Buy 7500 PUT if level reached', contract: '7500P' };
+
+  assert.deepEqual(armedContractChoices(7500, 7550), [put, call]);
+  assert.deepEqual(armedContractChoices(7500, 7450), [call, put]);
+  assert.deepEqual(armedContractChoices(7500, 7500), [call, put]);
   assert.deepEqual(armedContractChoices(7500), [
     { strike: 7500, right: 'C', type: 'call', label: 'Buy 7500 CALL if level reached', contract: '7500C' },
     { strike: 7500, right: 'P', type: 'put', label: 'Buy 7500 PUT if level reached', contract: '7500P' },

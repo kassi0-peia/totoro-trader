@@ -25,7 +25,7 @@ export default function ChartMenu({
   // The first arm step chooses one exact contract at this snapped strike. The
   // chart exclusively owns the second step: placing its independent SPX trigger.
   const showArm = canArm && !!onArm;
-  const armChoices = showArm ? armedContractChoices(strike) : [];
+  const armChoices = showArm ? armedContractChoices(strike, menu.marketPrice) : [];
   const rows = (canTrade ? 2 : 0) + (showSell ? 2 : 0) + (showAlert ? 1 : 0) +
     (menu.alertId != null ? 1 : 0) + armChoices.length + (menu.armedId != null ? 1 : 0);
   if (rows === 0) return null;
