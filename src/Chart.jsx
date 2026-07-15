@@ -577,7 +577,10 @@ export default function Chart({
   const armPreview = armPlacement && armPreviewLevel != null
     ? resolveArmedTrigger(armPlacement, { level: armPreviewLevel, marketPrice: price })
     : null;
-  const armedAxisGroups = armPlacement
+  // Offline/empty startup has no canvas layout yet. Axis controls are derived
+  // from that layout, so keep them absent until both coordinate witnesses exist
+  // instead of dereferencing layout during React's first render.
+  const armedAxisGroups = armPlacement || !layout || !view
     ? []
     : buildArmedAxisGroups({
       armed,
