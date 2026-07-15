@@ -3,9 +3,9 @@ import { liveQuote } from '../feed.js';
 import { nearestOtmStrike } from '../options.js';
 import { buildOpenOrder, buildQuickOrder, freshQuoteMid } from '../order-payload.js';
 import { plDollars } from '../pl.js';
-import { positionCloseRefs, positionContractKey } from './positionModel.js';
 import { executeKillIntent } from './killAction.js';
 import { rightOf } from './helpers.js';
+import { POSITION_LIFECYCLE } from './positionLifecycle.js';
 import {
   planAddToPosition,
   planAttachedExits,
@@ -17,7 +17,7 @@ import {
   symbolFieldFor,
 } from './liveOrderPlanner.js';
 
-let posSeq = 1;
+let replayPosSeq = 1;
 
 export default function useOrderActions({
   activeSymbol,
@@ -41,7 +41,7 @@ export default function useOrderActions({
   setArmed,
   setBusStops,
   setPending,
-  setPositions,
+  dispatchPositionLifecycle,
   setReplayPositions,
   showToast,
   strikeStep,
@@ -101,7 +101,7 @@ export default function useOrderActions({
     if (replayActive) {
       const sell = pending.side === 'sell';
       setReplayPositions((prev) => [...prev, {
-        id: posSeq++, type: pending.type, side: sell ? 'short' : 'long', strike: pending.strike, qty,
+        id: replayPosSeq++, type: pending.type, side: sell ? 'short' : 'long', strike: pending.strike, qty,
         expiry: replay.date, status: 'open', entryPremium: pending.greeks.premium,
         entryPrice: dispPrice, openedAt: replayNow
       }]);
@@ -139,12 +139,15 @@ export default function useOrderActions({
       built.payload.takeProfit != null ? `${ref}:tp` : null,
       built.payload.stopLoss != null ? `${ref}:sl` : null,
     ].filter(Boolean);
-    setPositions((prev) => [...prev, {
-      id: posSeq++, symbol: activeSymbol, type: pending.type, side: sell ? 'short' : 'long', strike: pending.strike, qty, expiry: cockpitExpiry,
-      status: 'pending', openRef: ref, entryPremium: null, estPremium: limit ?? pending.greeks.premium,
-      entryPrice: cockpitPrice, openedAt: Date.now(), greeksLive: pending.greeks,
-      closeRef: closeRefs[0] ?? null, closeRefs,
-    }]);
+    dispatchPositionLifecycle({
+      type: POSITION_LIFECYCLE.OPEN_SUBMITTED,
+      row: {
+        symbol: activeSymbol, type: pending.type, side: sell ? 'short' : 'long', strike: pending.strike, qty, expiry: cockpitExpiry,
+        status: 'pending', openRef: ref, entryPremium: null, estPremium: limit ?? pending.greeks.premium,
+        entryPrice: cockpitPrice, openedAt: Date.now(), greeksLive: pending.greeks,
+        closeRef: closeRefs[0] ?? null, closeRefs,
+      },
+    });
     // Entered from a bus-stop timetable → pair the trade with the called shot.
     if (pending.busStopId) {
       const { busStopId, strike } = pending;
@@ -163,7 +166,7 @@ export default function useOrderActions({
     if (replayActive) {
       const g = resolveGreeks(strike, type);
       setReplayPositions((prev) => [...prev, {
-        id: posSeq++, type, side: 'long', strike, qty: 1, expiry: replay.date,
+        id: replayPosSeq++, type, side: 'long', strike, qty: 1, expiry: replay.date,
         status: 'open', entryPremium: g.premium, entryPrice: dispPrice, openedAt: replayNow
       }]);
       showToast(`⚡ REPLAY BUY 1 ${strike}${rightOf(type)} @ $${g.premium.toFixed(2)}`, 'ok');
@@ -182,11 +185,14 @@ export default function useOrderActions({
     const ask = Number(quote?.ask);
     refAtSendRef.current[ref] = { px: ask, kind: 'ask' };
     const g = resolveGreeks(strike, type);
-    setPositions((prev) => [...prev, {
-      id: posSeq++, symbol: activeSymbol, type, side: 'long', strike, qty: 1, expiry: cockpitExpiry,
-      status: 'pending', openRef: ref, entryPremium: null, estPremium: market ? ask : limit,
-      entryPrice: cockpitPrice, openedAt: Date.now(), greeksLive: g
-    }]);
+    dispatchPositionLifecycle({
+      type: POSITION_LIFECYCLE.OPEN_SUBMITTED,
+      row: {
+        symbol: activeSymbol, type, side: 'long', strike, qty: 1, expiry: cockpitExpiry,
+        status: 'pending', openRef: ref, entryPremium: null, estPremium: market ? ask : limit,
+        entryPrice: cockpitPrice, openedAt: Date.now(), greeksLive: g,
+      },
+    });
     // Routing is unchanged — red MKT still routes a real MKT. But IBKR holds an
     // option MKT placed outside RTH until the overnight session opens (~00:10 ET),
     // so the position will sit pending for a while. Say so, so the long pending
@@ -204,42 +210,6 @@ export default function useOrderActions({
   const triggerPulse = () => {
     setPulse(true);
     setTimeout(() => setPulse(false), 420);
-  };
-
-  // Mark the matching local open position as closing, or — when the position is
-  // only known from server truth (opened on another device) — add a local
-  // closing shadow so the fill still resolves into closed P&L on this device.
-  const markClosing = (prev, pos, closeRef) => {
-    const k = positionContractKey(pos);
-    const hasLocalOpen = prev.some((p) => p.status === 'open' && positionContractKey(p) === k);
-    if (hasLocalOpen) {
-      return prev.map((p) => (p.status === 'open' && positionContractKey(p) === k
-        ? { ...p, status: 'closing', closeRef, closeRefs: [closeRef] }
-        : p));
-    }
-    return [...prev, {
-      id: posSeq++, symbol: pos.symbol, type: pos.type, side: pos.side, strike: pos.strike, qty: pos.qty, expiry: pos.expiry,
-      status: 'closing', entryPremium: pos.entryPremium, entryPrice: pos.entryPrice, openedAt: pos.openedAt,
-      closeRef, closeRefs: [closeRef]
-    }];
-  };
-
-  const trackAttachedExits = (prev, pos, refs) => {
-    const k = positionContractKey(pos);
-    const nextRefs = [...new Set(refs.filter(Boolean))];
-    let matched = false;
-    const next = prev.map((p) => {
-      if ((p.status !== 'open' && p.status !== 'closing') || positionContractKey(p) !== k) return p;
-      matched = true;
-      const closeRefs = [...new Set([...positionCloseRefs(p), ...nextRefs])];
-      return { ...p, closeRef: closeRefs[0] ?? null, closeRefs };
-    });
-    if (matched) return next;
-    return [...next, {
-      id: posSeq++, symbol: pos.symbol, type: pos.type, side: pos.side, strike: pos.strike, qty: pos.qty, expiry: pos.expiry,
-      status: 'open', entryPremium: pos.entryPremium, entryPrice: pos.entryPrice, openedAt: pos.openedAt,
-      closeRef: nextRefs[0] ?? null, closeRefs: nextRefs,
-    }];
   };
 
   const closePosition = (pos) => {
@@ -265,7 +235,11 @@ export default function useOrderActions({
     if (!plan.ok) { showToast(plan.reason, 'err'); return false; }
     const ref = feed.sendOrder(plan.payload);
     if (!ref) { showToast('Close not sent — not connected', 'err'); return false; }
-    setPositions((prev) => markClosing(prev, pos, ref));
+    dispatchPositionLifecycle({
+      type: POSITION_LIFECYCLE.CLOSE_SUBMITTED,
+      position: pos,
+      closeRef: ref,
+    });
     triggerPulse();
     return true;
   };
@@ -279,7 +253,7 @@ export default function useOrderActions({
     if (replayActive) {
       const g = resolveGreeks(pos.strike, pos.type);
       setReplayPositions((prev) => [...prev, {
-        id: posSeq++, type: pos.type, side: pos.side, strike: pos.strike, qty: 1, expiry: pos.expiry,
+        id: replayPosSeq++, type: pos.type, side: pos.side, strike: pos.strike, qty: 1, expiry: pos.expiry,
         status: 'open', entryPremium: g.premium, entryPrice: dispPrice, openedAt: replayNow
       }]);
       showToast(`REPLAY +1 ${pos.strike}${rightOf(pos.type)} @ $${g.premium.toFixed(2)}`, 'ok');
@@ -304,11 +278,14 @@ export default function useOrderActions({
     // row on the position's own underlying instead of borrowing the guest
     // cockpit price during the short interval before IBKR's fill arrives.
     const entryPrice = symbol === 'SPX' ? feed.price : cockpitPrice;
-    setPositions((prev) => [...prev, {
-      id: posSeq++, symbol, type: pos.type, side: pos.side, strike: pos.strike, qty: 1, expiry: pos.expiry,
-      status: 'pending', openRef: ref, entryPremium: null, estPremium: plan.limit,
-      entryPrice, openedAt: Date.now(), greeksLive: g
-    }]);
+    dispatchPositionLifecycle({
+      type: POSITION_LIFECYCLE.OPEN_SUBMITTED,
+      row: {
+        symbol, type: pos.type, side: pos.side, strike: pos.strike, qty: 1, expiry: pos.expiry,
+        status: 'pending', openRef: ref, entryPremium: null, estPremium: plan.limit,
+        entryPrice, openedAt: Date.now(), greeksLive: g,
+      },
+    });
     showToast(`+1 ${pos.strike}${rightOf(pos.type)} LMT ${plan.limit.toFixed(2)}`, 'ok');
     triggerPulse();
   };
@@ -342,7 +319,11 @@ export default function useOrderActions({
       const ref = feed.sendOrder(plan.payload);
       if (!ref) continue;
       sent += 1;
-      setPositions((prev) => markClosing(prev, position, ref));
+      dispatchPositionLifecycle({
+        type: POSITION_LIFECYCLE.CLOSE_SUBMITTED,
+        position,
+        closeRef: ref,
+      });
     }
     if (sent) triggerPulse();
     const unsent = batch.closable.length - sent;
@@ -427,7 +408,11 @@ export default function useOrderActions({
     } else {
       showToast(`Exit attached ${tp != null ? `TP $${tp.toFixed(2)} ` : ''}${sl != null ? `SL $${sl.toFixed(2)} ` : ''}${trail != null ? `TRAIL $${trail.toFixed(2)}` : ''}`, 'ok');
     }
-    setPositions((prev) => trackAttachedExits(prev, pos, refs));
+    dispatchPositionLifecycle({
+      type: POSITION_LIFECYCLE.EXITS_SUBMITTED,
+      position: pos,
+      refs,
+    });
   };
 
   // One-click rung: buy the next further-OTM strike in the ladder's direction
@@ -444,7 +429,7 @@ export default function useOrderActions({
       const next = type === 'put' ? Math.min(...strikes) - 25 : Math.max(...strikes) + 25;
       const g = resolveGreeks(next, type);
       setReplayPositions((prev) => [...prev, {
-        id: posSeq++, type, side: 'long', strike: next, qty: 1, expiry: replay.date,
+        id: replayPosSeq++, type, side: 'long', strike: next, qty: 1, expiry: replay.date,
         status: 'open', entryPremium: g.premium, entryPrice: dispPrice, openedAt: replayNow
       }]);
       showToast(`RUNG (replay): BUY 1 ${next}${rightOf(type)} @ $${g.premium.toFixed(2)}`, 'ok');
@@ -467,11 +452,14 @@ export default function useOrderActions({
     const ref = feed.sendOrder(plan.payload);
     if (!ref) { showToast('Rung not sent — not connected', 'err'); return; }
     const g = resolveGreeks(plan.strike, plan.type);
-    setPositions((prev) => [...prev, {
-      id: posSeq++, symbol: 'SPX', type: plan.type, side: 'long', strike: plan.strike, qty: 1, expiry: cockpitExpiry,
-      status: 'pending', openRef: ref, entryPremium: null, estPremium: plan.limit,
-      entryPrice: cockpitPrice, openedAt: Date.now(), greeksLive: g
-    }]);
+    dispatchPositionLifecycle({
+      type: POSITION_LIFECYCLE.OPEN_SUBMITTED,
+      row: {
+        symbol: 'SPX', type: plan.type, side: 'long', strike: plan.strike, qty: 1, expiry: cockpitExpiry,
+        status: 'pending', openRef: ref, entryPremium: null, estPremium: plan.limit,
+        entryPrice: cockpitPrice, openedAt: Date.now(), greeksLive: g,
+      },
+    });
     showToast(`RUNG: BUY 1 ${plan.strike}${rightOf(plan.type)} LMT $${plan.limit.toFixed(2)}`, 'ok');
     triggerPulse();
   };
@@ -485,7 +473,7 @@ export default function useOrderActions({
       const newStrike = nearestOtmStrike(dispPrice, oppType, strikeStep);
       const g = resolveGreeks(newStrike, oppType);
       setReplayPositions((prev) => [...prev, {
-        id: posSeq++, type: oppType, side: pos.side, strike: newStrike, qty: pos.qty,
+        id: replayPosSeq++, type: oppType, side: pos.side, strike: newStrike, qty: pos.qty,
         expiry: replay.date, status: 'open', entryPremium: g.premium,
         entryPrice: dispPrice, openedAt: replayNow
       }]);
