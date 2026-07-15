@@ -61,6 +61,12 @@ import {
 } from './app/positionModel.js';
 import { POSITION_LIFECYCLE, positionLifecycleReducer } from './app/positionLifecycle.js';
 import {
+  POSITION_QUOTE_MODE,
+  planPositionQuoteRequests,
+  positionQuoteAccess,
+  unavailablePositionGreeks,
+} from './app/positionQuotePolicy.js';
+import {
   loadPinnedCardState,
   pinnedCardReducer,
   savePinnedCardState,
@@ -852,6 +858,7 @@ export default function App() {
   // guest is currently active AND the position is that guest's — an SPX position
   // keeps marking against SPX even while a guest cockpit is up.
   const resolveGreeks = (strike, type, expiry = null, symbol = activeSymbol, conId = null) => {
+    const contractSymbol = String(symbol ?? 'SPX').trim().toUpperCase() || 'SPX';
     const contractExpiry = expiry ?? modelExpiry;
     const contractT = contractExpiry === modelExpiry
       ? T
@@ -862,23 +869,24 @@ export default function App() {
       const g = bsGreeks({ S: dispPrice, K: strike, T: contractT, sigma: ivol, type });
       return { ...g, source: 'replay' };
     }
-    // A position on a symbol with NO live feed (a guest that isn't the active
-    // cockpit) cannot be marked honestly. The old fallthrough priced it on the
-    // SPX path — a TSLA ~315C "marked" against SPX ≈ 7500 → comedy P/L (kisa,
-    // 2026-07-10). No data → no mark: premium null, the row shows —, P/L
-    // contributions freeze at entry until the symbol's cockpit is active again.
-    if (symbol !== 'SPX' && !(guestActive && symbol === activeSymbol)) {
+    // The shared resolver prices current order tickets as well as positions.
+    // Exact position-only expiry/settlement rules live in
+    // resolvePositionGreeks below so the 16:00–16:15 chain-roll gap cannot hand
+    // a new ticket null model fields.
+    if (contractSymbol !== 'SPX' && !(guestActive && contractSymbol === activeSymbol)) {
       // The 30s exact-contract snapshot poller keeps inactive marks and, when
       // IBKR supplies model fields, Greeks honest. Missing fields remain null
       // (the card renders —); stale (>90s) snapshots become no-data entirely.
-      const q = feed.posQuotes?.[conId != null ? `conId:${conId}` : `${symbol}|${strike}|${rightOf(type)}|${expiry}`];
+      const q = feed.posQuotes?.[conId != null
+        ? `conId:${conId}`
+        : `${contractSymbol}|${strike}|${rightOf(type)}|${contractExpiry}`];
       return inactivePositionSnapshotGreeks(q, now, 90_000);
     }
     // Guest mode: mark against the guest chain with the SAME ladder SPX uses —
     // fresh bid/ask mid first, then the model tick, then flat-IV BS. No 16:15
     // roll / cash-settlement intrinsic (stocks don't PM-settle to an index).
     // Only for THIS guest's own strikes; an SPX position falls through to SPX.
-    if (guestActive && symbol === activeSymbol) {
+    if (guestActive && contractSymbol === activeSymbol) {
       const S = guest.price;
       const gLive = liveGreeks(feed.guestGreeksMap, strike, type);
       const gq = liveQuote(feed.guestGreeksMap, strike, type);
@@ -893,11 +901,10 @@ export default function App() {
       const g = bsGreeks({ S, K: strike, T: contractT, sigma: ivol, type });
       return { ...g, source: 'bs' };
     }
-    // The greeks map is keyed by strike+right only and always holds the chain's
-    // CURRENT target expiry. After the 16:15 roll a still-open position from the
-    // expired chain would be marked against the NEXT day's quotes at the same
-    // strike — mark it at settlement intrinsic (SPXW PM-settles at the 4:00 SPX
-    // cash close, captured as spxClose) instead.
+    // Preserve the established non-position behavior after the bridge rolls:
+    // callers with an explicitly older SPX expiry get settlement intrinsic,
+    // never the new chain's same-strike quote. Position rows are stricter and
+    // become unavailable at the exact settlement cutoff below.
     if (expiry && feed.expiry && expiry < feed.expiry) {
       const S = feed.spxClose ?? feed.price;
       const intrinsic = Math.max(0, type === 'call' ? S - strike : strike - S);
@@ -942,6 +949,35 @@ export default function App() {
     return { ...g, source: 'bs' };
   };
 
+  // Position marking is deliberately stricter than current-ticket pricing.
+  // It preserves the broker row's exact expiry (including malformed/missing)
+  // and fences cached/streamed quotes with the same policy as the poller.
+  const resolvePositionGreeks = (position) => {
+    if (replayActive) {
+      return resolveGreeks(position.strike, position.type, null, position.symbol ?? activeSymbol, position.conId);
+    }
+    const contractSymbol = String(position.symbol ?? 'SPX').trim().toUpperCase() || 'SPX';
+    const quoteAccess = positionQuoteAccess({ ...position, symbol: contractSymbol }, {
+      now: modelNow,
+      currentSpxExpiry: feed.expiry,
+      activeGuest: guestActive ? { symbol: activeSymbol, expiry: guest?.expiry } : null,
+    });
+    if (quoteAccess === POSITION_QUOTE_MODE.SETTLED || quoteAccess === POSITION_QUOTE_MODE.UNAVAILABLE) {
+      return unavailablePositionGreeks(quoteAccess);
+    }
+    if (quoteAccess === POSITION_QUOTE_MODE.SNAPSHOT) {
+      const q = feed.posQuotes?.[`conId:${position.conId}`];
+      return inactivePositionSnapshotGreeks(q, now, 90_000);
+    }
+    return resolveGreeks(
+      position.strike,
+      position.type,
+      position.expiry,
+      contractSymbol,
+      position.conId,
+    );
+  };
+
   // Reconcile local optimistic lifecycle with IBKR-authoritative positions so a
   // position opened on any device shows everywhere. Server truth drives which
   // positions are open; local records add entry price / greeks / lifecycle tags.
@@ -958,28 +994,26 @@ export default function App() {
     return source.map((p) => {
       const fills = replayActive ? null : fillsForPosition(p, feed.trades);
       if (p.status === 'closed' || p.status === 'rejected') return fills ? { ...p, fills } : p;
-      const psym = p.symbol ?? 'SPX';
+      const psym = String(p.symbol ?? 'SPX').trim().toUpperCase() || 'SPX';
       let dayQuote = null;
       if (!replayActive) {
-        if (psym === 'SPX') {
-          // The SPX chain map belongs only to the bridge's current expiry.
-          // Never show tomorrow's same-strike range/IV on an expired leg.
-          if (!p.expiry || !feed.expiry || p.expiry === feed.expiry) {
-            dayQuote = liveQuote(feed.greeksMap, p.strike, p.type);
-          }
-        } else if (guestActive && psym === activeSymbol && (!p.expiry || !guest?.expiry || p.expiry === guest.expiry)) {
-          // guestGreeksMap belongs only to the active guest cockpit.
+        const quoteAccess = positionQuoteAccess(p, {
+          now: modelNow,
+          currentSpxExpiry: feed.expiry,
+          activeGuest: guestActive ? { symbol: activeSymbol, expiry: guest?.expiry } : null,
+        });
+        if (quoteAccess === POSITION_QUOTE_MODE.STREAM && psym === 'SPX') {
+          dayQuote = liveQuote(feed.greeksMap, p.strike, p.type);
+        } else if (quoteAccess === POSITION_QUOTE_MODE.STREAM) {
           dayQuote = liveQuote(feed.guestGreeksMap, p.strike, p.type);
-        } else {
-          // Inactive guests have exact, contract-keyed snapshots. Preserve only
-          // fields IBKR actually supplied; missing range/model fields render —.
-          dayQuote = feed.posQuotes?.[p.conId != null ? `conId:${p.conId}` : `${psym}|${p.strike}|${rightOf(p.type)}|${p.expiry}`] ?? null;
+        } else if (quoteAccess === POSITION_QUOTE_MODE.SNAPSHOT) {
+          dayQuote = feed.posQuotes?.[`conId:${p.conId}`] ?? null;
         }
       }
       return {
         ...p,
         fills,
-        greeksLive: resolveGreeks(p.strike, p.type, replayActive ? null : p.expiry, psym, p.conId),
+        greeksLive: resolvePositionGreeks({ ...p, symbol: psym }),
         // The day quote reads only from this position's own symbol + expiry.
         dayQuote
       };
@@ -1014,22 +1048,14 @@ export default function App() {
   // plus the two money-ward neighbors. Those neighbors give wingCapMid a live
   // bound when the position strike itself is a wing the market won't quote, so
   // an unquoted deep-OTM leg can't fall back to the phantom flat-IV model.
-  openStrikesRef.current = replayActive ? [] : positionsLive
-    .filter((p) => p.status === 'open')
-    .flatMap((p) => {
-      const right = rightOf(p.type);
-      const psym = p.symbol ?? 'SPX';
-      if (psym !== 'SPX') {
-        // An inactive guest's leg gets ONE slow snapshot quote for its own
-        // contract, so its mark stays honest without a cockpit switch (kisa
-        // 2026-07-10, the TSLA follow-up). The ACTIVE guest's legs stream
-        // via its chain — don't double-quote them.
-        if (guestActive && psym === activeSymbol) return [];
-        return [{ symbol: psym, strike: p.strike, right, expiry: p.expiry, conId: p.conId }];
-      }
-      const stepToMoney = p.type === 'call' ? -SPXW_STRIKE_STEP : SPXW_STRIKE_STEP;
-      return [0, 1, 2].map((n) => ({ strike: p.strike + n * stepToMoney, right, expiry: p.expiry }));
-    });
+  openStrikesRef.current = planPositionQuoteRequests({
+    positions: positionsLive,
+    replayActive,
+    now,
+    currentSpxExpiry: feed.expiry,
+    activeGuest: guestActive ? { symbol: activeSymbol, expiry: guest?.expiry } : null,
+    spxStrikeStep: SPXW_STRIKE_STEP,
+  });
 
   // Chart shows only positions for the CURRENT session's expiry (these are 0DTE —
   // a prior day's position has a past expiry and is already settled, so its lines
