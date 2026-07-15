@@ -25,6 +25,7 @@ import {
 import { drawMarkers } from './chart/draw/markers.js';
 import { drawBusStops } from './chart/draw/busstops.js';
 import {
+  buildArmedAxisGroups,
   resolveChartClickIntent,
   resolveChartContextTarget
 } from './chart/interactionIntent.js';
@@ -86,6 +87,7 @@ export default function Chart({
   armPlacement = null,
   onPlaceArmTrigger = null,
   onCancelArmPlacement = null,
+  onDisarmArmed = null,
   onToggleAxisChain = null,
   alerts = [],
   armed = [],
@@ -575,6 +577,14 @@ export default function Chart({
   const armPreview = armPlacement && armPreviewLevel != null
     ? resolveArmedTrigger(armPlacement, { level: armPreviewLevel, marketPrice: price })
     : null;
+  const armedAxisGroups = armPlacement
+    ? []
+    : buildArmedAxisGroups({
+      armed,
+      priceToY,
+      priceTop: layout.priceTop + 8,
+      priceBot: layout.priceBot - 8,
+    });
 
   // Imperative surface for App's keyboard layer: Space = snapToNow, C/P read
   // the hovered strike (only the tradeable live-edge hover counts — history
@@ -684,6 +694,69 @@ export default function Chart({
         timeframe={timeframe}
         tooltipRef={tooltipRef}
       />
+      {armedAxisGroups.map((group) => {
+        const controlTop = group.y - 8.5;
+        const cardHeight = 54 + group.items.length * 82;
+        const cardTop = Math.max(
+          layout.priceTop + 4,
+          Math.min(group.y - cardHeight / 2, layout.priceBot - cardHeight - 4),
+        );
+        const one = group.items.length === 1 ? group.items[0].arm : null;
+        const label = one ? `⚔ ${one.strike}${one.right}` : `⚔ ×${group.items.length}`;
+        return (
+          <div
+            key={group.items.map(({ arm }) => arm.id).join(':')}
+            className="armed-axis-control"
+            style={{
+              left: layout.chartW,
+              top: controlTop,
+              width: RIGHT_AXIS,
+              '--armed-popover-top': `${cardTop - controlTop}px`,
+            }}
+            onContextMenu={(event) => event.preventDefault()}
+          >
+            <button
+              type="button"
+              className="armed-axis-label"
+              aria-label={`${group.items.length} armed trigger${group.items.length === 1 ? '' : 's'} — show details`}
+              aria-haspopup="true"
+            >
+              {label}
+            </button>
+            <div className="armed-axis-popover" role="dialog" aria-label="Armed triggers">
+              <div className="armed-axis-head">
+                <b>ARMED</b>
+                <span>ONE-SHOT</span>
+              </div>
+              {group.items.map(({ arm }) => (
+                <div className="armed-axis-item" key={arm.id}>
+                  <div className="armed-axis-contract">
+                    <b>{arm.strike}{arm.right}</b>
+                    <span>{String(arm.expiry).replace(/^(\d{4})(\d{2})(\d{2})$/, '$1-$2-$3')}</span>
+                  </div>
+                  <div className="armed-axis-route">
+                    SPX {arm.dir === 'up' ? '↑' : '↓'} {Number(arm.level).toFixed(2)}
+                  </div>
+                  <div className="armed-axis-order">BUY 1 · ASK + 1 TICK · LMT</div>
+                  {onDisarmArmed && (
+                    <button
+                      type="button"
+                      className="armed-axis-disarm"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onDisarmArmed(arm.id);
+                      }}
+                    >
+                      DISARM
+                    </button>
+                  )}
+                </div>
+              ))}
+              {armed.length < 3 && <div className="armed-axis-hint">RIGHT-CLICK A STRIKE TO ADD ANOTHER</div>}
+            </div>
+          </div>
+        );
+      })}
       {armPlacement && (
         <div className="arm-placement-instruction" role="status">
           ARMING {armPlacement.strike}{armPlacement.right} · HOVER TRIGGER LEVEL · CLICK TO PLACE · ESC / RIGHT-CLICK CANCEL

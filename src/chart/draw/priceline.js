@@ -117,7 +117,8 @@ export function drawPriceLine(ctx, { layout, theme, priceToY, price, expectedMov
   }
 
   // ⚔ armed orders (design B, kisa 2026-07-11): a SOLID line — this level is
-  // loaded, not just watched — with an axis tag naming the contract it fires.
+  // loaded, not just watched. Chart renders the interactive right-axis tag as
+  // DOM above the canvas; this painter owns only the exact trigger line.
   // One-shot; the client prunes it the moment the bridge fires or fails it.
   if (armed && armed.length) {
     for (const a of armed) {
@@ -131,21 +132,6 @@ export function drawPriceLine(ctx, { layout, theme, priceToY, price, expectedMov
       ctx.moveTo(0, ya + 0.5);
       ctx.lineTo(layout.chartW, ya + 0.5);
       ctx.stroke();
-      ctx.restore();
-      ctx.save();
-      ctx.globalAlpha = 0.95;
-      ctx.fillStyle = theme.surface;
-      ctx.strokeStyle = theme.accent;
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.rect(layout.chartW + 0.5, ya - 8.5, rightAxis - 1, 17);
-      ctx.fill();
-      ctx.stroke();
-      ctx.fillStyle = theme.text;
-      ctx.font = '9px "JetBrains Mono", monospace';
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(`⚔ ${a.strike}${a.right}`, layout.chartW + 4, ya);
       ctx.restore();
     }
   }

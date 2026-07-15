@@ -21,7 +21,7 @@
 
 /* ── Bottom drawer (kisa 2026-07-10): chart runs edge-to-edge; tf-bar +
    positions live in a panel that slides up OVER the chart's bottom. The grab
-   band is invisible chrome — hover peeks, click pins, closing fills auto-peek. ── */
+   band is invisible chrome — hover peeks and click pins. ── */
 .bottom-zone {
   position: absolute;
   left: 0;
@@ -39,6 +39,9 @@
   border: none;
   background: none;
   cursor: pointer;
+}
+.bottom-zone.interaction-blocked {
+  pointer-events: none;
 }
 .bottom-grab[data-tip]::after { left: 50%; }
 .bottom-panel {
@@ -400,6 +403,138 @@
 }
 
 .arm-placement-chip.invalid { max-width: 250px; }
+
+/* Resting ⚔ triggers keep their exact line on canvas, but the right-axis tag
+   is a real control: hover or keyboard-focus reveals routing truth and a safe
+   per-trigger disarm action. Nearby labels collapse into one ×N control. */
+.armed-axis-control {
+  position: absolute;
+  z-index: 8;
+  height: 17px;
+  pointer-events: auto;
+}
+
+.armed-axis-label {
+  width: 100%;
+  height: 17px;
+  padding: 0 3px;
+  overflow: hidden;
+  border: 1px solid var(--c-accent);
+  border-radius: 0;
+  background: var(--c-surface);
+  color: var(--c-text);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 9px;
+  line-height: 15px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.armed-axis-label:hover,
+.armed-axis-label:focus-visible,
+.armed-axis-control:focus-within .armed-axis-label {
+  background: color-mix(in srgb, var(--c-accent) 14%, var(--c-surface));
+  outline: none;
+}
+
+.armed-axis-popover {
+  position: absolute;
+  top: var(--armed-popover-top);
+  right: calc(100% - 1px);
+  width: 236px;
+  padding: 8px;
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  border: 1px solid var(--c-accent);
+  border-radius: 7px 0 7px 7px;
+  background: color-mix(in srgb, var(--c-bg) 96%, transparent);
+  color: var(--c-text);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.48);
+  backdrop-filter: blur(8px);
+  transition: opacity 120ms ease, visibility 120ms ease;
+}
+
+.armed-axis-control:hover .armed-axis-popover,
+.armed-axis-control:focus-within .armed-axis-popover {
+  visibility: visible;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.armed-axis-head,
+.armed-axis-contract {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.armed-axis-head {
+  padding: 0 2px 6px;
+  color: var(--c-accent);
+  font-size: 9px;
+  letter-spacing: 0.14em;
+}
+
+.armed-axis-head span,
+.armed-axis-contract span,
+.armed-axis-order,
+.armed-axis-hint {
+  color: var(--c-muted);
+}
+
+.armed-axis-item {
+  padding: 7px 2px;
+  border-top: 1px solid var(--c-border);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 10px;
+}
+
+.armed-axis-contract b {
+  color: var(--c-accent);
+  font-size: 12px;
+}
+
+.armed-axis-route {
+  padding-top: 4px;
+  font-weight: 700;
+}
+
+.armed-axis-order {
+  padding-top: 3px;
+  font-size: 9px;
+  letter-spacing: 0.03em;
+}
+
+.armed-axis-disarm {
+  width: 100%;
+  margin-top: 6px;
+  padding: 4px 6px;
+  border: 1px solid var(--c-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--c-loss);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  cursor: pointer;
+}
+
+.armed-axis-disarm:hover,
+.armed-axis-disarm:focus-visible {
+  border-color: var(--c-loss);
+  outline: none;
+}
+
+.armed-axis-hint {
+  padding: 6px 2px 0;
+  border-top: 1px solid var(--c-border);
+  font-size: 8px;
+  letter-spacing: 0.07em;
+  text-align: center;
+}
 
 @media (max-width: 720px) {
   .arm-placement-instruction {

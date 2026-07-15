@@ -50,7 +50,6 @@ import {
   readGuestIntent,
   resolveExactGuestMatch,
   rightOf,
-  shouldPeekBottomForFill,
   timeToExpiryYearsAt,
   writeGuestIntent,
 } from './app/helpers.js';
@@ -106,8 +105,6 @@ export default function App() {
     return 1;
   });
   const [positions, setPositions] = useState([]);
-  const positionsRef = useRef(positions);
-  positionsRef.current = positions;
   const [pending, setPending] = useState(null);
   const [hoverPos, setHoverPos] = useState(null);   // { id, x, y } — hover card over a position row
   const cardHoveredRef = useRef(false);             // mouse is over the floating hover card itself
@@ -184,10 +181,10 @@ export default function App() {
   }, [tradesPeek, drawerMounted]);
   // ── Bottom drawer (kisa 2026-07-10: "hide everything below the chart") ──
   // Invisible bottom band + footer: hover 1.5s or click to reveal the panel;
-  // clicks-off/Esc close it; a closing fill auto-peeks it ~5s. Opening fills
-  // stay quiet so entering a position never covers the chart. All timers,
-  // click-away and dwell handlers live in useBottomDrawer.
-  const { bottomOpen, setBottomOpen, bottomShown, peekBottom, armBottom, disarmBottom, toggleBottom, bottomZoneRef, bottomPeekTimer, footerRef } = useBottomDrawer();
+  // clicks-off/Esc close it. Order fills never open it; the chart stays put
+  // unless the user deliberately reveals the drawer. Click-away and dwell
+  // handlers live in useBottomDrawer.
+  const { bottomOpen, setBottomOpen, bottomShown, armBottom, disarmBottom, toggleBottom, bottomZoneRef, footerRef } = useBottomDrawer();
   // ── Trades-drawer view: today's blotter ↔ multi-day journal (history) ──
   // The history view (equity curve + daily P/L) renders INSIDE the drawer;
   // the toggle lives in the drawer header — zero new cockpit chrome.
@@ -224,6 +221,12 @@ export default function App() {
   // and guest inputs (feed/guest/activeSymbol/showToast) are in scope.
   const [chartMenu, setChartMenu] = useState(null); // {x, y, price, alertId, alertPrice}
   const [armPlacement, dispatchArmPlacement] = useReducer(armedPlacementReducer, null);
+  // Trigger placement owns the chart interaction until its second click. Do not
+  // let a pending footer/bottom-edge dwell materialize the positions drawer in
+  // the middle of that gesture.
+  useEffect(() => {
+    if (armPlacement) disarmBottom();
+  }, [armPlacement, disarmBottom]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [now, setNow] = useState(Date.now());
   const [toast, setToast] = useState(null); // { text, kind: 'ok'|'err' }
@@ -249,10 +252,9 @@ export default function App() {
   // (clientRef → {px, kind}) so the fill toast can say what hurrying cost.
   const refAtSendRef = useRef({});
   const [fillFlash, setFillFlash] = useState(null);
-  const markFillFlash = useCallback((msg, { revealDrawer = true } = {}) => {
+  const markFillFlash = useCallback((msg) => {
     setFillFlash({ strike: msg.strike, right: msg.right, expiry: msg.expiry, symbol: msg.symbol ?? 'SPX', action: msg.action, ts: Date.now() });
-    if (revealDrawer) peekBottom();
-  }, [peekBottom]);
+  }, []);
 
   // Apply IBKR order lifecycle events to local positions. Entry/exit prices come
   // from IBKR's reported avgFillPrice — never local estimates.
@@ -373,7 +375,7 @@ export default function App() {
       const refNote = d != null ? ` · ${d >= 0 ? '+' : '−'}$${Math.abs(d).toFixed(2)} vs ${sent.kind}@send` : '';
       showToast(`FILLED ${msg.action} ${msg.strike}${msg.right} ×? @ $${Number(msg.avgFillPrice).toFixed(2)}${refNote}`.replace('×?', `×${msg.filled}`), 'ok');
       chimeFill();
-      markFillFlash(msg, { revealDrawer: shouldPeekBottomForFill(msg, positionsRef.current) });
+      markFillFlash(msg);
     }
   }, [showToast, markFillFlash]);
 
@@ -484,6 +486,11 @@ export default function App() {
   useEffect(() => {
     if (feed.socketOpen) feed.sendArmed(armed);
   }, [feed.socketOpen, armed]); // eslint-disable-line react-hooks/exhaustive-deps
+  const disarmArmed = useCallback((id) => {
+    setArmed((list) => list.filter((arm) => arm.id !== id));
+    setChartMenu(null);
+    showToast('⚔ disarmed', 'ok');
+  }, [showToast]);
 
   // Replay replaces the live book on screen, so it is available only after
   // IBKR has explicitly finished recovering both positions and working orders,
@@ -1741,6 +1748,7 @@ export default function App() {
               armPlacement={armPlacement}
               onPlaceArmTrigger={placeArmTrigger}
               onCancelArmPlacement={cancelArmPlacement}
+              onDisarmArmed={disarmArmed}
               alerts={chartAlerts}
               armed={replayActive || activeSymbol !== 'SPX' ? EMPTY_ARR : armed}
               onMenu={replayTransitionBlocked ? null : setChartMenu}
@@ -1803,18 +1811,17 @@ export default function App() {
             )}
           </div>
           {/* Bottom drawer: everything below the chart, folded (kisa 2026-07-10).
-              The band is invisible chrome — hover peeks, click pins, closing
-              fills auto-peek via markFillFlash. Mobile: statically open. */}
+              The band is invisible chrome — hover peeks and click pins.
+              Order fills never open it. Mobile: statically open. */}
           <div
             ref={bottomZoneRef}
-            className={`bottom-zone${bottomShown ? ' open' : ''}`}
-            onMouseEnter={() => clearTimeout(bottomPeekTimer.current)}
+            className={`bottom-zone${bottomShown ? ' open' : ''}${armPlacement ? ' interaction-blocked' : ''}`}
           >
             <button
               className="bottom-grab"
-              onMouseEnter={armBottom}
-              onMouseLeave={disarmBottom}
-              onClick={toggleBottom}
+              onMouseEnter={armPlacement ? undefined : armBottom}
+              onMouseLeave={armPlacement ? undefined : disarmBottom}
+              onClick={armPlacement ? undefined : toggleBottom}
               aria-label="Positions and timeframes"
               data-tip="Positions & timeframes — rest here a moment, or click"
             />
@@ -1868,7 +1875,7 @@ export default function App() {
             onRemoveAlert={(id) => { setAlerts((l) => l.filter((a) => a.id !== id)); setChartMenu(null); }}
             canArm={!replaySurfaceOpen && activeSymbol === 'SPX' && !guestActive && feed.live && feed.executionEnabled && armed.length < ARMED_MAX_CLIENT}
             onArm={beginArmTriggerPlacement}
-            onDisarm={(id) => { setArmed((l) => l.filter((a) => a.id !== id)); setChartMenu(null); showToast('⚔ disarmed', 'ok'); }}
+            onDisarm={disarmArmed}
             onClose={() => setChartMenu(null)}
           />
         );
@@ -1980,9 +1987,9 @@ export default function App() {
       <footer
         className="footer"
         ref={footerRef}
-        onMouseEnter={armBottom}
-        onMouseLeave={disarmBottom}
-        onClick={toggleBottom}
+        onMouseEnter={armPlacement ? undefined : armBottom}
+        onMouseLeave={armPlacement ? undefined : disarmBottom}
+        onClick={armPlacement ? undefined : toggleBottom}
       >
         <span>{feed.live ? 'IBKR LIVE DATA' : 'OFFLINE — NO CONNECTION'}</span>
         <span>TotoroTrader v0.5</span>
