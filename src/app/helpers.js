@@ -87,20 +87,6 @@ export function inactivePositionSnapshotGreeks(quote, now = Date.now(), maxAgeMs
   };
 }
 
-// A completed opening fill already appears as a glow + toast; do not pull the
-// positions drawer over the chart just because a new position landed. Closing
-// fills (including bracket children) still reveal the drawer, and unknown fills
-// keep the old reveal behavior so a reconnect/backfill cannot disappear quietly.
-export function shouldPeekBottomForFill(msg, positions) {
-  const ref = typeof msg?.clientRef === 'string' && msg.clientRef ? msg.clientRef : null;
-  if (!ref) return true;
-  if (Array.isArray(positions) && positions.some((p) => (
-    p?.closeRef === ref || (Array.isArray(p?.closeRefs) && p.closeRefs.includes(ref))
-  ))) return true;
-  if (Array.isArray(positions) && positions.some((p) => p?.openRef === ref)) return false;
-  return true;
-}
-
 // The chart marker for a real fill needs the underlying price of THAT fill's
 // symbol. A guest fill must never inherit the always-present SPX price merely
 // because its own cockpit is inactive. Callers provide the currently witnessed

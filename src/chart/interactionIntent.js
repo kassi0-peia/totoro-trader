@@ -55,6 +55,38 @@ function pointInPricePane(x, y, layout) {
     y >= layout.priceTop && y <= layout.priceBot;
 }
 
+// Axis tags are DOM controls rather than canvas paint so they can expose a
+// real hover/focus surface. Nearby triggers share one tag instead of stacking
+// inaccessible buttons on top of each other; each exact arm remains separate
+// inside the popover and can be disarmed independently.
+export function buildArmedAxisGroups({
+  armed = [],
+  priceToY,
+  priceTop = 0,
+  priceBot = Infinity,
+  minGap = 18,
+} = {}) {
+  if (!Array.isArray(armed) || typeof priceToY !== 'function') return [];
+  const items = armed
+    .filter((arm) => Number.isFinite(arm?.level))
+    .map((arm) => ({ arm, y: priceToY(arm?.level) }))
+    .filter(({ y }) => Number.isFinite(y) && y > priceTop && y < priceBot)
+    .sort((a, b) => a.y - b.y);
+
+  const groups = [];
+  for (const item of items) {
+    const group = groups[groups.length - 1];
+    if (group && item.y - group.lastY < minGap) {
+      group.items.push(item);
+      group.lastY = item.y;
+      group.y = group.items.reduce((sum, candidate) => sum + candidate.y, 0) / group.items.length;
+    } else {
+      groups.push({ y: item.y, lastY: item.y, items: [item] });
+    }
+  }
+  return groups.map(({ y, items: groupedItems }) => ({ y, items: groupedItems }));
+}
+
 // Trigger placement temporarily owns every canvas click. A valid price-pane
 // click yields only a trigger level; clicks over position controls, annotations,
 // axes, or volume are swallowed so none can become an order/ticket interaction.

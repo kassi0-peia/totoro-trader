@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  buildArmedAxisGroups,
   resolveArmPlacementClickIntent,
   resolveChartClickIntent,
   resolveChartContextTarget,
@@ -89,6 +90,28 @@ test('armed trigger placement exclusively owns chart clicks', () => {
   assert.deepEqual(resolveChartClickIntent({ ...common, x: 101, y: 25 }), { kind: 'swallow' });
   assert.deepEqual(resolveArmPlacementClickIntent({ active: false, x: 50, y: 25, layout, view }), null);
   assert.deepEqual(resolveArmPlacementClickIntent({ active: true, x: 50, y: 101, layout, view }), { kind: 'swallow' });
+});
+
+test('armed axis controls group nearby visible triggers without losing exact arms', () => {
+  const armed = [
+    { id: 'a', level: 10 },
+    { id: 'b', level: 26 },
+    { id: 'c', level: 70 },
+    { id: 'off-pane', level: 110 },
+    { id: 'invalid', level: null },
+  ];
+  const groups = buildArmedAxisGroups({
+    armed,
+    priceToY: (level) => level,
+    priceTop: 0,
+    priceBot: 100,
+    minGap: 18,
+  });
+
+  assert.equal(groups.length, 2);
+  assert.equal(groups[0].y, 18);
+  assert.deepEqual(groups[0].items.map(({ arm }) => arm.id), ['a', 'b']);
+  assert.deepEqual(groups[1].items.map(({ arm }) => arm.id), ['c']);
 });
 
 test('armed bus-stop click owns history and extrapolates future time', () => {
