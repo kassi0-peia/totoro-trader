@@ -54,14 +54,12 @@ import {
   writeGuestIntent,
 } from './app/helpers.js';
 import {
-  closeLocalPositionEpisode,
   deriveClosedChartAnnotations,
   fillsForPosition,
   filterChartPositions,
-  positionHasCloseRef,
   reconcilePositions,
-  removePositionCloseRef,
 } from './app/positionModel.js';
+import { POSITION_LIFECYCLE, positionLifecycleReducer } from './app/positionLifecycle.js';
 import {
   loadPinnedCardState,
   pinnedCardReducer,
@@ -104,7 +102,7 @@ export default function App() {
     } catch {}
     return 1;
   });
-  const [positions, setPositions] = useState([]);
+  const [positions, dispatchPositionLifecycle] = useReducer(positionLifecycleReducer, []);
   const [pending, setPending] = useState(null);
   const [hoverPos, setHoverPos] = useState(null);   // { id, x, y } — hover card over a position row
   const cardHoveredRef = useRef(false);             // mouse is over the floating hover card itself
@@ -268,11 +266,11 @@ export default function App() {
       return;
     }
     if (msg.type === 'orderAck' && msg.accepted === false) {
-      setPositions((prev) => prev.map((p) => {
-        if (p.openRef === msg.clientRef) return { ...p, status: 'rejected', note: msg.reason };
-        if (positionHasCloseRef(p, msg.clientRef)) return removePositionCloseRef(p, msg.clientRef, msg.reason);
-        return p;
-      }));
+      dispatchPositionLifecycle({
+        type: POSITION_LIFECYCLE.ORDER_FAILED,
+        clientRef: msg.clientRef,
+        reason: msg.reason,
+      });
       showToast(`Order rejected: ${msg.reason}`, 'err');
       return;
     }
@@ -306,11 +304,11 @@ export default function App() {
       return;
     }
     if (msg.type === 'orderError') {
-      setPositions((prev) => prev.map((p) => {
-        if (p.openRef === msg.clientRef && p.status === 'pending') return { ...p, status: 'rejected', note: msg.reason };
-        if (positionHasCloseRef(p, msg.clientRef)) return removePositionCloseRef(p, msg.clientRef, msg.reason);
-        return p;
-      }));
+      dispatchPositionLifecycle({
+        type: POSITION_LIFECYCLE.ORDER_FAILED,
+        clientRef: msg.clientRef,
+        reason: msg.reason,
+      });
       showToast(`Order error: ${msg.reason}`, 'err');
       return;
     }
@@ -325,18 +323,25 @@ export default function App() {
       if (childMatch && msg.status === 'Filled' && (msg.remaining === 0 || msg.remaining == null)) {
         const px = freshUnderlyingPriceForFill(msg, fillUnderlyingRef.current);
         const closedAt = Date.now();
-        setPositions((prev) => closeLocalPositionEpisode(prev, msg, { exitPrice: px, closedAt }));
+        dispatchPositionLifecycle({
+          type: POSITION_LIFECYCLE.ORDER_FILLED,
+          fill: msg,
+          underlyingPrice: px,
+          filledAt: closedAt,
+          positionsRevision: authority.positionsRevision,
+        });
         showToast(`BRACKET ${childMatch[2].toUpperCase()} FILLED ${msg.strike}${msg.right} @ $${Number(msg.avgFillPrice).toFixed(2)}`, 'ok');
         chimeFill();
         markFillFlash(msg);
         return;
       }
       if (msg.status === 'Cancelled' || msg.status === 'ApiCancelled') {
-        setPositions((prev) => prev.map((p) => {
-          if (p.openRef === msg.clientRef && p.status === 'pending') return { ...p, status: 'rejected', note: 'canceled' };
-          if (positionHasCloseRef(p, msg.clientRef)) return removePositionCloseRef(p, msg.clientRef, 'close canceled');
-          return p;
-        }));
+        dispatchPositionLifecycle({
+          type: POSITION_LIFECYCLE.ORDER_CANCELLED,
+          clientRef: msg.clientRef,
+          reason: 'canceled',
+          closeReason: 'close canceled',
+        });
         showToast(`CANCELED ${msg.action} ${msg.strike}${msg.right}`, 'ok');
         return;
       }
@@ -348,25 +353,12 @@ export default function App() {
         && authority.positionsRevision >= 0
         ? authority.positionsRevision
         : null;
-      setPositions((prev) => {
-        const withOpenedFill = prev.map((p) => {
-          if (p.openRef !== msg.clientRef || p.status !== 'pending') return p;
-          return {
-            ...p,
-            status: 'open',
-            entryPremium: msg.avgFillPrice,
-            entryPrice: px,
-            openedAt: filledAt,
-            fillPositionsRevision,
-            awaitingPositionAuthority: true,
-          };
-        });
-        // 'closing' = an active close in flight; 'open' with the exact ref = a
-        // resting attached exit. One fill may flatten several scale-in rows.
-        return closeLocalPositionEpisode(withOpenedFill, msg, {
-          exitPrice: px,
-          closedAt: filledAt,
-        });
+      dispatchPositionLifecycle({
+        type: POSITION_LIFECYCLE.ORDER_FILLED,
+        fill: msg,
+        underlyingPrice: px,
+        filledAt,
+        positionsRevision: fillPositionsRevision,
       });
       // Fill quality: how far the fill landed from the price seen at send —
       // the number that teaches which moments are expensive to hurry.
@@ -1275,7 +1267,7 @@ export default function App() {
     setArmed,
     setBusStops,
     setPending,
-    setPositions,
+    dispatchPositionLifecycle,
     setReplayPositions,
     showToast,
     strikeStep,
