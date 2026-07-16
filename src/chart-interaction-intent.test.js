@@ -2,10 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildArmedAxisGroups,
+  resolveArmedGuideGrab,
+  resolveArmedRetargetDrop,
   resolveArmPlacementClickIntent,
   resolveChartClickIntent,
   resolveChartContextTarget,
-  resolveChartHitIntent
+  resolveChartHitIntent,
+  snapArmedTrigger
 } from './chart/interactionIntent.js';
 
 const layout = {
@@ -76,6 +79,58 @@ test('chart click falls through to trade only at the live edge or future space',
     hits: { ghosts: [point({ x: 25, y: 25, fill: 'annotation' })] }
   }), { kind: 'swallow' }, 'an annotation cannot fall through into a trade');
   assert.equal(resolveChartClickIntent({ ...common, x: 101, y: 25 }), null);
+});
+
+test('a retarget drag can only grab a live ARMED guide, exclusively and inside the pane', () => {
+  // priceToY: view hi=110 lo=90 over priceTop..priceBot 0..100 → 100 at y=50.
+  const priceToY = (p) => (110 - p) / 20 * 100;
+  const armedRow = {
+    id: 'arm-1', level: 100, strike: 105, right: 'C', dir: 'up', expiry: '20260715',
+    qty: 1, liveAuthorization: true, status: 'ARMED',
+  };
+  const base = { armed: [armedRow], layout, priceToY, x: 25 };
+
+  assert.deepEqual(resolveArmedGuideGrab({ ...base, y: 50 }), {
+    kind: 'grab-armed-guide', arm: armedRow,
+  });
+  assert.equal(resolveArmedGuideGrab({ ...base, y: 47 })?.kind, 'grab-armed-guide', 'within threshold');
+  assert.equal(resolveArmedGuideGrab({ ...base, y: 62 }), null, 'beyond the 8px grab threshold');
+  assert.equal(resolveArmedGuideGrab({ ...base, y: 50, x: 130 }), null, 'outside the price pane horizontally');
+  assert.equal(resolveArmedGuideGrab({ ...base, y: 130 }), null, 'below the price pane');
+
+  // A pending/creating row is never grabbable — only a confirmed live watcher.
+  for (const status of ['RETARGETING · CURRENT LEVEL MAY STILL FIRE', 'DISARMING · MAY STILL FIRE']) {
+    assert.equal(resolveArmedGuideGrab({ ...base, y: 50, armed: [{ ...armedRow, status }] }), null);
+  }
+  assert.equal(resolveArmedGuideGrab({
+    ...base, y: 50, armed: [{ ...armedRow, liveAuthorization: false, status: 'ARMED' }],
+  }), null);
+
+  // Nearest eligible guide wins when two are close.
+  const near = { ...armedRow, id: 'arm-2', level: 102 };
+  const grab = resolveArmedGuideGrab({ ...base, y: 42, armed: [armedRow, near] });
+  assert.equal(grab.arm.id, 'arm-2', 'y=42 is nearer 102 (y=40) than 100 (y=50)');
+});
+
+test('a retarget drop snaps to the grid and cancels off-fence, ITM, or unmoved drops', () => {
+  assert.equal(snapArmedTrigger(7503, 5), 7505);
+  assert.equal(snapArmedTrigger(7502, 5), 7500);
+  assert.equal(snapArmedTrigger('x', 5), null);
+
+  const arm = { level: 100, strike: 105, right: 'C', expiry: '20260715' };
+  // A valid down-side move snaps to the grid and flips the crossing direction.
+  assert.deepEqual(resolveArmedRetargetDrop({ arm, level: 95.4, marketPrice: 98 }), {
+    ok: true, level: 95, dir: 'down',
+  });
+  // Out of the ±10% fence cancels.
+  assert.equal(resolveArmedRetargetDrop({ arm, level: 80, marketPrice: 98 }).ok, false);
+  // Pushing the call ITM (level above the strike) cancels.
+  assert.equal(resolveArmedRetargetDrop({ arm, level: 110, marketPrice: 98 }).ok, false);
+  // An unmoved snapped level cancels with no command.
+  const unmoved = resolveArmedRetargetDrop({ arm, level: 100.2, marketPrice: 98 });
+  assert.equal(unmoved.ok, false);
+  assert.match(unmoved.reason, /did not move/);
+  assert.equal(resolveArmedRetargetDrop({ arm: null, level: 100, marketPrice: 98 }).ok, false);
 });
 
 test('armed trigger placement exclusively owns chart clicks', () => {

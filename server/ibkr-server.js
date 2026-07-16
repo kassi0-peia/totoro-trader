@@ -21,7 +21,19 @@ import { createBasisController } from './basis-controller.js';
 import { createHomeMarket } from './home-market.js';
 import { pickExpiry, deriveStrikeStep, strikeWindow, validateOrder as validateGuestOrder } from './guest-symbol.js';
 import { normalizeWatchlist, shapeWatchQuote } from './watchlist.js';
-import { validateArmedOrder, armedTriggered, ARMED_MAX } from './armed.js';
+import {
+  addArmedOrderQuantity,
+  armedTriggered,
+  retargetArmedOrder,
+  ARMED_MAX,
+  ARMED_QTY_MAX,
+  validateArmedOrder,
+} from './armed.js';
+import {
+  ARMED_STATE_BLOCKED,
+  ARMED_STATE_READY,
+  createArmedStateStore,
+} from './armed-state-store.js';
 import {
   CANDLE_MS,
   finishHistoricalSeed,
@@ -46,6 +58,7 @@ import { createOrderRequestRegistry, fingerprintOrderRequest } from './order-req
 import { createPortfolioController } from './portfolio.js';
 import { isPortfolioReady, portfolioMessage } from './portfolio-sync.js';
 import { createQuoteService } from './quote-service.js';
+import { recoverQuickOrders } from './quick-order-recovery.js';
 import { optionRouteKey } from './reduce-only.js';
 import { createReverseCoordinator } from './reverse.js';
 import { waitForPositionAuthority } from './position-authority-fence.js';
@@ -69,6 +82,7 @@ const TRADES_FILE = path.join(__dirname, '.trades.json');
 const JOURNAL_FILE = path.join(__dirname, '.journal.json');
 const KILL_LOCK_FILE = path.join(__dirname, '.kill-lock.json');
 const REVERSE_LOCK_FILE = path.join(__dirname, '.reverse-lock.json');
+const ARMED_STATE_FILE = path.join(__dirname, '.armed-state.json');
 const SHOTS_DIR = path.join(__dirname, '.journal-shots'); // 📸 fill snapshots (client-rendered chart stills)
 
 // HTTPS is opt-in (TLS=1 or explicit TLS_CERT/TLS_KEY) so the default HTTP mode
@@ -163,13 +177,13 @@ const watchQuotes = new Map();    // symbol -> last good shaped quote { symbol, 
 const watchResolving = new Set(); // symbols with a reqContractDetails in flight (dedupe)
 const watchInFlight = new Map();  // symbol -> reqId of the snapshot currently on the wire
 
-// ── ⚔ Armed orders (kisa chose design B, 2026-07-11 — see server/armed.js) ──
-// Client-owned list, wholesale-set like the watchlist; NOT persisted (a bridge
-// restart fails safe to disarmed until a client re-sends). firedIds guards a
-// stale client list from re-arming something that already fired this session.
-let armedOrders = [];
+// ── ⚔ Armed orders ─────────────────────────────────────────────────────────
+// The bridge is the sole authority. The store is created lazily once IBKR names
+// the selected account, then persists the exact account/expiry/order set before
+// any mutation becomes visible. Browser storage is only a display cache and is
+// never replayed into this authority.
+let armedStateStore = null;
 let armedPrevPrice = null;        // previous displayed price for crossing detection
-const armedFiredIds = new Set();
 const killLockStore = createRoutingLockStore({ file: KILL_LOCK_FILE });
 let killRoutingLocked = killLockStore.isLocked(); // staged KILL bypasses normal browser/armed routes
 if (killRoutingLocked) {
@@ -262,6 +276,19 @@ const orderGateway = createOrderGateway({
   onOrderFilled: ({ orderId, order, filled, avgFillPrice }) => {
     tradeJournal.recordOrderStatus(orderId, order, filled, avgFillPrice);
   },
+  onQuickRecoveryHazard: (hazard) => {
+    // A TTQ1 row whose broker deadline can no longer be trusted must never sit
+    // behind an execution-ready UI. The correlated recovery pipeline below is
+    // the only code allowed to cancel it; this callback only drops readiness.
+    ordersReady = false;
+    if (!portfolioRecoveryStartedAt) portfolioRecoveryStartedAt = Date.now();
+    console.error(`[ibkr] quick-order recovery hazard ${hazard?.orderId ?? '?'}: ${hazard?.code || 'UNKNOWN'} — ${hazard?.reason || 'unsafe TTQ1 metadata'}`);
+    try { broadcastPortfolio(); } catch { /* startup/event reporting only */ }
+    // Start the exact snapshot/cancel/proof path immediately. If this callback
+    // arose inside an already-running recovery snapshot, the existing promise
+    // is reused and no second uncorrelated scan is started.
+    queueMicrotask(() => requestOpenOrderRecovery());
+  },
   log: (message) => console.log(message),
 });
 
@@ -288,11 +315,7 @@ const killCoordinator = createKillSwitchCoordinator({
     }
   },
   getAccount: () => (ib && connected ? portfolio.publicSnapshot().account : null),
-  clearArmed: () => {
-    armedOrders = [];
-    armedPrevPrice = null;
-    broadcast({ type: 'armedCleared', reason: 'KILL transaction' });
-  },
+  clearArmed: () => clearArmedAuthorityForKill(),
   snapshotOpenOrders: (context) => killOrderService.snapshotOpenOrders(context),
   cancelOrder: (orderId, context) => killOrderService.cancelOrder(orderId, context),
   waitForCancellations: (orderIds, context) => killOrderService.waitForCancellations(orderIds, context),
@@ -430,7 +453,8 @@ wss.on('connection', (ws) => {
     else if (msg.type === 'watchlist') handleWatchlist(ws, msg);
     else if (msg.type === 'fillNote') tradeJournal.handleFillNote(msg);
     else if (msg.type === 'fillShot') tradeJournal.handleFillShot(msg);
-    else if (msg.type === 'armed') handleArmed(ws, msg);
+    else if (msg.type === 'armedCommand') handleArmedCommand(ws, msg);
+    else if (msg.type === 'armed' || msg.type === 'armedQtyAdd') handleLegacyArmedCommand(ws, msg);
     else if (msg.type === 'kill') handleKill(ws, msg);
     else if (msg.type === 'reverse') handleReverse(ws, msg);
   });
@@ -1583,52 +1607,235 @@ function watchQuotesMsg() {
   return { type: 'watchlistQuotes', quotes };
 }
 
-// ── ⚔ Armed orders (design B, kisa 2026-07-11) ──────────────────────────────
-// {type:'armed', orders:[...]} → wholesale set (the watchlist pattern): the
-// client owns the list and re-sends on (re)connect. Every order is
-// re-validated server-side; anything already fired this session is refused so
-// a stale client list can't re-arm a spent trigger.
-function handleArmed(_ws, msg) {
-  const list = Array.isArray(msg.orders) ? msg.orders.slice(0, ARMED_MAX) : [];
-  if (killRoutingLocked || reverseRoutingLocked) {
-    armedOrders = [];
-    armedPrevPrice = null;
-    if (list.length) broadcast({ type: 'armedCleared', reason: killRoutingLocked ? 'KILL transaction active' : 'REVERSE transaction active' });
-    return;
+// ── ⚔ Durable armed-order authority ────────────────────────────────────────
+
+function currentArmedExpiry() {
+  return homeMarket.getCurrentExpiry() || session.expiry;
+}
+
+function publicArmedState() {
+  return armedStateStore?.publicState() ?? null;
+}
+
+function armedContractIsMonitored(order, expiry) {
+  if (homeMarket.isChainPaused()) return false;
+  const entry = order && typeof order.strike === 'number'
+    && (order.right === 'C' || order.right === 'P')
+    ? homeMarket.getChainEntry(`${order.strike}${order.right}`)
+    : null;
+  return !!entry && entry.expiry === expiry;
+}
+
+function validateStoredArmedOrder(order, { expiry, source } = {}) {
+  const liveMutation = source === 'create' || source === 'add' || source === 'retarget';
+  return validateArmedOrder(order, {
+    price: liveMutation ? homeMarket.displayPrice() : null,
+    expiry,
+    // A persisted row is structurally validated before the chain has started;
+    // CREATE/ADD must name an exact row monitored right now.
+    contractAvailable: liveMutation ? armedContractIsMonitored(order, expiry) : undefined,
+  });
+}
+
+function broadcastArmedState(extra = {}) {
+  const state = publicArmedState();
+  if (!state) return false;
+  return broadcast({ type: 'armedState', ...state, ...extra });
+}
+
+function ensureArmedStateStore(account = portfolio.publicSnapshot().account) {
+  if (armedStateStore) return armedStateStore;
+  const expiry = currentArmedExpiry();
+  if (!account || !expiry) return null;
+  armedStateStore = createArmedStateStore({
+    file: ARMED_STATE_FILE,
+    initialAccount: account,
+    initialExpiry: expiry,
+    maxOrders: ARMED_MAX,
+    validateOrder: validateStoredArmedOrder,
+    deriveAddQuantity: (order, delta) => addArmedOrderQuantity(order, delta),
+    deriveRetarget: (order, patch) => retargetArmedOrder(order, patch),
+  });
+  const state = publicArmedState();
+  if (state.phase === ARMED_STATE_BLOCKED) {
+    console.error(`[ibkr] armed authority BLOCKED: ${state.error || 'persisted state is not trustworthy'}; staged KILL is required before routing resumes`);
+  } else {
+    syncArmedAuthorityAnchor({ reason: 'bridge authority initialized' });
   }
-  const px = homeMarket.displayPrice();
-  const currentExpiry = homeMarket.getCurrentExpiry();
-  const next = [];
-  for (const raw of list) {
-    if (raw && armedFiredIds.has(String(raw.id))) {
-      broadcast({ type: 'armedRejected', id: String(raw.id), reason: 'already fired this session' });
-      continue;
+  broadcastArmedState();
+  return armedStateStore;
+}
+
+function clearReadyArmedState({ nextAccount, nextExpiry, reason, notify = true } = {}) {
+  const before = publicArmedState();
+  if (!before || before.phase !== ARMED_STATE_READY) return { ok: false, reason: before?.error || 'armed authority unavailable' };
+  const result = armedStateStore.clearInternal({
+    lineageId: before.lineageId,
+    account: before.account,
+    expiry: before.expiry,
+    baseRevision: before.revision,
+    baseDigest: before.digest,
+    nextAccount: nextAccount || before.account,
+    nextExpiry: nextExpiry || before.expiry,
+  });
+  if (!result.ok) {
+    broadcastArmedState();
+    return result;
+  }
+  armedPrevPrice = null;
+  broadcastArmedState();
+  if (notify) {
+    for (const order of before.orders) {
+      broadcast({ type: 'armedFailed', ...order, reason: reason || 'disarmed by bridge authority change' });
     }
-    const exactChainEntry = typeof raw?.strike === 'number'
-      && (raw?.right === 'C' || raw?.right === 'P')
-      ? homeMarket.getChainEntry(`${raw.strike}${raw.right}`)
-      : null;
-    // An empty, unpaused chain is a transient reconnect/startup unknown, not
-    // proof that a persisted arm names a missing contract. A guest-paused
-    // chain is known unavailable; once initialized, anything outside the exact
-    // monitored SPXW row is also rejected immediately.
-    const contractAvailable = homeMarket.isChainPaused()
-      ? false
-      : homeMarket.chainSize() === 0
-        ? undefined
-        : !!exactChainEntry && exactChainEntry.expiry === currentExpiry;
-    const v = validateArmedOrder(raw, {
-      price: px,
-      expiry: currentExpiry,
-      contractAvailable,
+  }
+  return result;
+}
+
+function syncArmedAuthorityAnchor({ reason = 'armed authority changed' } = {}) {
+  const state = publicArmedState();
+  const selectedAccount = portfolio.publicSnapshot().account;
+  const expiry = currentArmedExpiry();
+  if (!state || state.phase !== ARMED_STATE_READY || !selectedAccount || !expiry) return false;
+
+  // An expired authorization can never become today's contract. Clear it
+  // durably; an active state belonging to another account stays visible but is
+  // fenced from its watcher until explicitly disarmed or that account returns.
+  if (state.expiry !== expiry) {
+    const result = clearReadyArmedState({
+      nextAccount: selectedAccount,
+      nextExpiry: expiry,
+      reason: `${reason}: expiry rolled — disarmed`,
     });
-    if (v.ok) next.push(v.armed);
-    else broadcast({ type: 'armedRejected', id: raw?.id != null ? String(raw.id) : null, reason: v.reason });
+    return result.ok;
   }
-  armedOrders = next;
-  if (next.length) {
-    console.log(`[ibkr] ⚔ armed: ${next.map((a) => `${a.strike}${a.right} @ ${a.level}${a.dir === 'up' ? '↑' : '↓'}`).join(' · ')}`);
+  if (state.orders.length === 0 && state.account !== selectedAccount) {
+    const result = clearReadyArmedState({
+      nextAccount: selectedAccount,
+      nextExpiry: expiry,
+      reason,
+      notify: false,
+    });
+    return result.ok;
   }
+  if (state.orders.length && state.account !== selectedAccount) {
+    console.error(`[ibkr] armed authority belongs to ${state.account}; selected account ${selectedAccount} cannot watch or increase it`);
+  }
+  return true;
+}
+
+function rejectArmedCommand(ws, msg, code, reason, state = publicArmedState()) {
+  return sendWs(ws, {
+    type: 'armedCommandRejected',
+    protocol: 1,
+    requestId: typeof msg?.requestId === 'string' ? msg.requestId : null,
+    code,
+    reason,
+    currentState: state,
+  });
+}
+
+function handleArmedCommand(ws, msg) {
+  const store = ensureArmedStateStore();
+  if (!store) return rejectArmedCommand(ws, msg, 'NO_AUTHORITY', 'no selected account is available for armed authority');
+  if (msg?.protocol !== 1) return rejectArmedCommand(ws, msg, 'PROTOCOL_MISMATCH', 'armed protocol 1 is required');
+
+  const operationType = msg?.operation?.type;
+  if (operationType === 'CREATE' || operationType === 'ADD_QTY' || operationType === 'RETARGET') {
+    const state = publicArmedState();
+    const selectedAccount = portfolio.publicSnapshot().account;
+    const expiry = currentArmedExpiry();
+    if (killRoutingLocked || reverseRoutingLocked) {
+      return rejectArmedCommand(
+        ws,
+        msg,
+        'ROUTING_LOCKED',
+        killRoutingLocked ? 'KILL transaction active' : 'REVERSE transaction active',
+      );
+    }
+    if (!executionReady()) {
+      return rejectArmedCommand(ws, msg, 'EXECUTION_DISABLED', 'account/order/position authority is not ready');
+    }
+    if (state?.phase !== ARMED_STATE_READY || state.account !== selectedAccount || state.expiry !== expiry) {
+      return rejectArmedCommand(ws, msg, 'AUTHORITY_MISMATCH', 'armed authority does not match the selected account and current expiry');
+    }
+    if (!Number.isFinite(homeMarket.displayPrice())) {
+      return rejectArmedCommand(ws, msg, 'NO_MARKET_PRICE', 'no current SPX-equivalent price is available');
+    }
+  } else if (operationType !== 'DISARM') {
+    return rejectArmedCommand(ws, msg, 'INVALID_OPERATION', 'unsupported armed operation');
+  }
+
+  const result = store.compareAndCommit(msg);
+  if (!result.ok) {
+    // Persistence failure changes the public phase to BLOCKED. Tell every tab
+    // immediately; only the requesting tab also receives command correlation.
+    if (result.state?.phase === ARMED_STATE_BLOCKED) broadcastArmedState();
+    return rejectArmedCommand(ws, msg, result.code || 'REJECTED', result.reason || 'armed command refused', result.state);
+  }
+
+  // A retarget moves the level; drop the crossing witness so the moved trigger
+  // establishes a fresh previous price on the next tick and can never fire
+  // retroactively off pre-move price history (same reset the reconnect/clear
+  // paths use).
+  if (operationType === 'RETARGET' && result.ok && !result.duplicate) armedPrevPrice = null;
+  broadcastArmedState({ appliedRequestId: msg.requestId });
+  const committed = result.state.orders;
+  console.log(`[ibkr] ⚔ authority r${result.state.revision}: ${committed.length ? committed.map((order) => `${order.qty}× ${order.strike}${order.right} @ ${order.level}${order.dir === 'up' ? '↑' : '↓'}`).join(' · ') : 'empty'}`);
+  // After the final disarm, an old-account empty state can safely move to the
+  // selected account/current expiry. Broadcast ordering lets the requesting
+  // client first prove its exact mutation, then adopt the re-anchor.
+  if (committed.length === 0) syncArmedAuthorityAnchor({ reason: 'empty authority re-anchored' });
+  return true;
+}
+
+function handleLegacyArmedCommand(ws, msg) {
+  const reason = 'armed protocol upgraded — re-arm explicitly from the current chart';
+  if (msg.type === 'armed' && Array.isArray(msg.orders)) {
+    for (const raw of msg.orders.slice(0, ARMED_MAX)) {
+      sendWs(ws, {
+        type: 'armedFailed',
+        id: raw?.id != null ? String(raw.id) : null,
+        strike: raw?.strike,
+        right: raw?.right,
+        reason,
+      });
+    }
+    sendWs(ws, { type: 'armedCleared', reason });
+  } else {
+    sendWs(ws, {
+      type: 'armedQtyRejected',
+      id: msg?.id ?? null,
+      delta: msg?.delta ?? null,
+      reason,
+    });
+  }
+  const state = publicArmedState();
+  if (state) sendWs(ws, { type: 'armedState', ...state });
+}
+
+function clearArmedAuthorityForKill() {
+  const account = portfolio.publicSnapshot().account;
+  const expiry = currentArmedExpiry();
+  const store = ensureArmedStateStore(account);
+  if (!store || !account || !expiry) throw new Error('armed authority cannot be cleared without an exact account and expiry');
+  const before = publicArmedState();
+  const result = before.phase === ARMED_STATE_BLOCKED
+    ? store.recoverBlocked({ nextAccount: account, nextExpiry: expiry })
+    : store.clearInternal({
+      lineageId: before.lineageId,
+      account: before.account,
+      expiry: before.expiry,
+      baseRevision: before.revision,
+      baseDigest: before.digest,
+      nextAccount: account,
+      nextExpiry: expiry,
+    });
+  if (!result.ok) throw new Error(result.reason || 'armed authority clear could not be persisted');
+  armedPrevPrice = null;
+  broadcastArmedState();
+  broadcast({ type: 'armedCleared', reason: 'KILL transaction' });
+  return true;
 }
 
 function handleKill(ws, msg) {
@@ -1881,20 +2088,47 @@ function checkArmedOrders() {
   if (px == null) return;
   const prev = armedPrevPrice;
   armedPrevPrice = px;
+  const state = publicArmedState();
+  if (!state || state.phase !== ARMED_STATE_READY) return;
   if (killRoutingLocked || reverseRoutingLocked) return;
-  if (prev == null || prev === px || armedOrders.length === 0) return;
-  for (const a of [...armedOrders]) {
-    if (!armedTriggered(a, prev, px)) continue;
+  const selectedAccount = portfolio.publicSnapshot().account;
+  const expiry = currentArmedExpiry();
+  // Keep the crossing witness current through recovery/locks/account changes,
+  // but never consume a crossing from an authority that cannot route now.
+  if (!executionReady() || state.account !== selectedAccount || state.expiry !== expiry) return;
+  if (prev == null || prev === px || state.orders.length === 0) return;
+  for (const candidate of state.orders) {
+    if (!armedTriggered(candidate, prev, px)) continue;
+    const current = publicArmedState();
+    const live = current?.orders.find((order) => order.id === candidate.id);
+    if (!live || !armedTriggered(live, prev, px)) continue;
+    const removal = armedStateStore.removeInternal({
+      id: live.id,
+      lineageId: current.lineageId,
+      account: current.account,
+      expiry: current.expiry,
+      baseRevision: current.revision,
+      baseDigest: current.digest,
+    });
+    if (!removal.ok) {
+      broadcastArmedState();
+      broadcast({
+        type: 'armedFailed',
+        ...live,
+        reason: `authority persistence failed — trigger did not fire${removal.reason ? `: ${removal.reason}` : ''}`,
+      });
+      continue;
+    }
+    // Durable removal is the one-shot boundary. Route only the exact canonical
+    // row returned by that committed transition—not a pre-write snapshot.
+    const a = removal.removedOrder;
+    broadcastArmedState();
     let result;
     try {
       result = fireArmedOrder(a, px);
     } catch (error) {
       result = { accepted: false, reason: error?.message || String(error) };
     }
-    // One-shot means accepted or visibly failed once. Prune only after routing
-    // has returned a synchronous disposition, never before claiming FIRED.
-    armedOrders = armedOrders.filter((x) => x.id !== a.id);
-    armedFiredIds.add(a.id);
     if (result?.accepted === true) {
       broadcast({ type: 'armedFired', ...a, price: px, ask: result.ask, orderId: result.orderId });
     } else {
@@ -1903,9 +2137,10 @@ function checkArmedOrders() {
   }
 }
 
-// Fire = exactly an amber ⚡ at the moment of crossing: qty 1, marketable
-// limit at the live ask + tick, refuses without a fresh ask, and inherits the
-// quick auto-cancel (unfilled 10s → dead). Routed through the order gateway
+// Fire = exactly an amber ⚡ at the moment of crossing: canonical armed qty
+// with a marketable limit at the live ask + tick. It refuses without a fresh
+// ask and inherits the quick cancellation request for any live remainder after
+// 10 seconds. Routed through the order gateway
 // so every existing guard (executionEnabled, account gate, ack flow) applies;
 // the fake socket only mutes the direct reply — broadcasts still reach every
 // client.
@@ -1927,13 +2162,13 @@ function fireArmedOrder(a, px) {
   const limit = Math.round((entry.ask + tick) * 100) / 100;
   const disposition = orderGateway.placeOrderRequest({ readyState: 0 }, {
     clientRef: `armed:${a.id}`, intent: 'open', action: 'BUY',
-    strike: a.strike, right: a.right, qty: 1, expiry: a.expiry || currentExpiry,
+    strike: a.strike, right: a.right, qty: a.qty, expiry: a.expiry || currentExpiry,
     limit, quick: true, refAtSend: entry.ask
   });
   if (disposition?.accepted !== true) {
     return { accepted: false, reason: disposition?.reason || 'bridge refused the armed order' };
   }
-  console.log(`[ibkr] ⚔ FIRED ${a.strike}${a.right}: ${px.toFixed(2)} crossed ${a.level} → BUY 1 @ ≤${limit}`);
+  console.log(`[ibkr] ⚔ FIRED ${a.strike}${a.right}: ${px.toFixed(2)} crossed ${a.level} → BUY ${a.qty} @ ≤${limit}`);
   return { accepted: true, orderId: disposition.orderId, ask: entry.ask };
 }
 
@@ -1950,10 +2185,7 @@ function evaluateSession() {
   const { expiryRolled } = homeMarket.onSessionEvaluated();
 
   if (expiryRolled) {
-    // ⚔ armed orders die at the roll — their contract just expired. The client
-    // is told per order so its list (and chart lines) clear too.
-    for (const a of armedOrders) broadcast({ type: 'armedFailed', ...a, reason: 'expiry rolled — disarmed' });
-    armedOrders = [];
+    syncArmedAuthorityAnchor({ reason: 'session changed' });
   }
 
   if (next.source !== prevSource || next.expiry !== prevExpiry) {
@@ -2041,6 +2273,8 @@ function setAccount(id) {
   if (!portfolio.onManagedAccounts(id)) return false;
   const next = portfolio.publicSnapshot();
   if (next.account !== before) {
+    ensureArmedStateStore(next.account);
+    syncArmedAuthorityAnchor({ reason: 'selected account changed' });
     killOrderService.accountChanged(next.account);
     killCoordinator.accountChanged(next.account);
     reverseCoordinator.accountChanged(next.account);
@@ -2076,6 +2310,7 @@ function finishPortfolioRecoveryIfReady() {
 function executionReady() {
   return isPortfolioReady(connected, portfolio.isReady(), ordersReady)
     && orderIdNamespaceSafe
+    && publicArmedState()?.phase === ARMED_STATE_READY
     && !killRoutingLocked
     && !reverseRoutingLocked;
 }
@@ -2272,9 +2507,9 @@ function placeReverseOpen(plan, context = {}) {
 function onKillOrderServiceEvent(event) {
   if (!event || typeof event !== 'object') return;
   if (event.type === 'killOrderSnapshotComplete' && event.purpose === 'bridge-recovery') {
-    ordersReady = orderIdNamespaceSafe;
-    finishPortfolioRecoveryIfReady();
-    broadcastPortfolio();
+    // Snapshot completion alone is no longer the readiness boundary. The
+    // awaiting recovery pipeline must first resolve any expired/malformed TTQ1
+    // quick order and, when it cancels one, obtain a second fresh snapshot.
     return;
   }
   if (event.type === 'killOrderSnapshotDesynchronized') {
@@ -2299,7 +2534,39 @@ function requestOpenOrderRecovery() {
   if (ordersReady) return openOrderRecoveryPromise;
   if (openOrderRecoveryPromise) return openOrderRecoveryPromise;
   const owner = ib;
-  const pending = killOrderService.snapshotOpenOrders({ purpose: 'bridge-recovery' })
+  const account = portfolio.publicSnapshot().account;
+  const pending = killOrderService.snapshotOpenOrders({ purpose: 'bridge-recovery', account })
+    .then((rows) => recoverQuickOrders({
+      initialRows: rows,
+      account,
+      clientId: IBKR_CLIENT_ID,
+      isAuthorityCurrent: () => (
+        ib === owner
+        && connected
+        && portfolio.publicSnapshot().account === account
+      ),
+      cancelOrder: (orderId, context) => killOrderService.cancelOrder(orderId, context),
+      waitForCancellations: (orderIds, context) => killOrderService.waitForCancellations(orderIds, context),
+      snapshotOpenOrders: (context) => killOrderService.snapshotOpenOrders(context),
+      report: (event) => {
+        const ids = event?.orderIds ?? (event?.orderId != null ? [event.orderId] : []);
+        console.error(`[ibkr] quick recovery ${event?.type || 'warning'}${ids.length ? ` (${ids.join(', ')})` : ''}: ${event?.reason || 'broker hint unavailable'}`);
+      },
+    }))
+    .then((quickRecovery) => {
+      if (ib !== owner || !connected || portfolio.publicSnapshot().account !== account) {
+        throw new Error('open-order authority changed before readiness commit');
+      }
+      // The proof snapshot establishes only that these exact quick rows are no
+      // longer working, not whether they filled or cancelled. Retire the stale
+      // projection under its original identity; a late exact broker callback
+      // may still refine the neutral terminal status.
+      orderGateway.retireProvenQuickOrders(quickRecovery.provenAbsentRows);
+      ordersReady = orderIdNamespaceSafe;
+      finishPortfolioRecoveryIfReady();
+      broadcastPortfolio();
+      return true;
+    })
     .catch((error) => {
       if (ib === owner && connected) {
         console.error(`[ibkr] open-order recovery failed: ${error?.message || error}`);
@@ -2580,11 +2847,18 @@ function snapshotMsg() {
     positionAuthorityRevision: portfolioState.positionAuthorityRevision,
     killState: publicKillState(),
     reverseState: publicReverseState(),
+    armedState: publicArmedState(),
     // Capability handshake: the client must never send an order field this
     // bridge won't understand — an old bridge ignoring `trail` would route
     // the leg as naked MKT. New order-shaping fields get a flag here, and
     // the client hides the control until its bridge advertises it.
-    caps: { trail: true, guestRegistry: true, reverseTransaction: true },
+    caps: {
+      trail: true,
+      guestRegistry: true,
+      reverseTransaction: true,
+      armedStateV1: true,
+      armedQtyMax: ARMED_QTY_MAX,
+    },
     trades: tradeJournal.trades,
     positions: portfolioState.positions,
     orders: workingOrdersList(),

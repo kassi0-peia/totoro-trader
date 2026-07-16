@@ -29,7 +29,7 @@ const MOUSE = [
 
 const MARKS = [
   ['⏰ dashed line', 'price alert — one-shot, chimes and vanishes'],
-  ['⚔ solid line', 'armed order — fires 1 lot when crossed'],
+  ['⚔ axis label', 'armed order — hover for quantity; fires when crossed'],
   ['±EM dashed pair', 'expected move priced by the ATM straddle'],
   ['↗ TREND / ⇄ CHOP', 'regime meter (hidden when unsure)'],
   ['dimmed price', 'no ticks for 5s — feed may be stalled'],

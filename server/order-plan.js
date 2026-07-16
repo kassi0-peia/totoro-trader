@@ -148,6 +148,22 @@ export function planOrderRequest(msg, { currentExpiry, guest, account, routingLo
   const orderType = isLimit ? 'LMT' : isStop ? 'STP' : isTrail ? 'TRAIL' : 'MKT';
   const routePrice = isLimit ? limit : isStop ? stop : isTrail ? trail : null;
 
+  // `quick` opts an order into the ten-second broker deadline/recovery
+  // protocol. It is intentionally narrower than the general order route:
+  // only the two SPX BUY-to-open lightning shapes (market or positive limit)
+  // and server-fired armed entries may use it. Never let a forged flag alter
+  // close, bracket, guest, stop, or trailing-order semantics.
+  if (quick && (
+    guestSym
+    || intent !== 'open'
+    || action !== 'BUY'
+    || wantTp
+    || wantSl
+    || (orderType !== 'LMT' && orderType !== 'MKT')
+  )) {
+    return { ok: false, reason: 'quick is supported only for unbracketed SPX BUY-to-open orders' };
+  }
+
   const order = {
     action,
     orderType,

@@ -1,12 +1,20 @@
 import React from 'react';
 import { THEMES, THEME_KEYS } from './themes.js';
 
-export default function ThemePanel({ open, current, onPick, onClose, neutralChrome = false, onToggleNeutral, axisChain = false, onToggleAxisChain = null, rungButton = false, onToggleRungButton = null, showOvn = true, onToggleShowOvn = null, showPositions = true, onToggleShowPositions = null, showMarkers = true, onToggleShowMarkers = null }) {
+export default function ThemePanel({
+  open, current, onPick, onClose,
+  axisChain = false, onToggleAxisChain = null,
+  dayLevelsOn = false, onToggleDayLevels = null,
+  rungButton = false, onToggleRungButton = null,
+  showOvn = true, onToggleShowOvn = null,
+  showPositions = true, onToggleShowPositions = null,
+  showMarkers = true, onToggleShowMarkers = null,
+}) {
   if (!open) return null;
   return (
     <div className="theme-panel" onClick={(e) => e.stopPropagation()}>
       <div className="theme-panel-head">
-        <span>Theme</span>
+        <span>Settings</span>
         <button className="x-btn" onClick={onClose} aria-label="close">×</button>
       </div>
       <div className="theme-grid">
@@ -30,18 +38,20 @@ export default function ThemePanel({ open, current, onPick, onClose, neutralChro
           );
         })}
       </div>
-      <div className="theme-toggle-row">
-        <span>Neutral chrome</span>
-        <button
-          className={`toggle-switch${neutralChrome ? ' on' : ''}`}
-          role="switch"
-          aria-checked={neutralChrome}
-          onClick={onToggleNeutral}
-          aria-label="Toggle neutral grey chrome"
-        >
-          <span className="toggle-knob" />
-        </button>
-      </div>
+      {onToggleDayLevels && (
+        <div className="theme-toggle-row" data-tip="Prior-day high, low, and close plus today’s open — shown on the SPX chart only">
+          <span>Day levels</span>
+          <button
+            className={`toggle-switch${dayLevelsOn ? ' on' : ''}`}
+            role="switch"
+            aria-checked={dayLevelsOn}
+            onClick={onToggleDayLevels}
+            aria-label="Toggle day levels"
+          >
+            <span className="toggle-knob" />
+          </button>
+        </div>
+      )}
       {onToggleAxisChain && (
         <div className="theme-toggle-row" data-tip="Paint live call/put premiums beside each strike on the price axis — the chain lives on the chart">
           <span>Axis premiums</span>

@@ -13,6 +13,7 @@ import {
   canSendReplayRequest,
   createClientRefGenerator,
   getOrCreateTabClientId,
+  persistArmedCommandBeforeSend,
   sendWsJson,
 } from './feed.js';
 import { replayAccess } from './app/replayAccess.js';
@@ -69,6 +70,7 @@ test('createInitialSnapshot returns the complete fail-closed shape with isolated
   assert.equal(a.source, 'SPX');
   assert.equal(a.rth, false);
   assert.equal(a.portfolioReady, false);
+  assert.equal(a.armedState, null);
   assert.equal(a.positionsRevision, 0);
   assert.equal(a.positionAuthoritySourceRevision, null);
   assert.deepEqual(a.killState, { phase: 'IDLE', active: false, transactionId: null });
@@ -127,6 +129,17 @@ test('snapshot rebuilds bridge-owned payloads and keeps the expected public shap
   const orders = [{ orderId: 201, clientRef: 'c1', status: 'Submitted' }];
   const trades = [{ id: 301, execId: 'exec-1', price: 4.2 }];
   const funds = { availableFunds: 1000, buyingPower: 2000, netLiquidation: 3000 };
+  const armedState = {
+    protocol: 1,
+    phase: 'READY',
+    lineageId: 'lineage-1',
+    sessionId: 'session-1',
+    revision: 0,
+    digest: '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
+    account: 'DU123',
+    expiry: '20260714',
+    orders: [],
+  };
 
   const s1 = applyMessage(s0, {
     type: 'snapshot', connected: true, delayed: true,
@@ -138,6 +151,7 @@ test('snapshot rebuilds bridge-owned payloads and keeps the expected public shap
     caps: { trail: true }, trades, positions, orders, funds, spxClose: 7488,
     killState: { phase: 'VERIFYING_CANCELS', active: true, transactionId: 'k1' },
     reverseState: { phase: 'QUOTING_CLOSE', active: true, transactionId: 'r1', routingLocked: true },
+    armedState,
     positionAuthorityRevision: 17,
   });
 
@@ -159,9 +173,33 @@ test('snapshot rebuilds bridge-owned payloads and keeps the expected public shap
   assert.equal(s1.funds, funds);
   assert.deepEqual(s1.killState, { phase: 'VERIFYING_CANCELS', active: true, transactionId: 'k1' });
   assert.deepEqual(s1.reverseState, { phase: 'QUOTING_CLOSE', active: true, transactionId: 'r1', routingLocked: true });
+  assert.deepEqual(s1.armedState, armedState);
   // Client-owned/cache payloads are not part of a bridge snapshot replacement.
   assert.equal(s1.histSeries, s0.histSeries);
   assert.equal(s1.replayDays, s0.replayDays);
+});
+
+test('armed state is a current-socket raw witness and a null snapshot cannot retain an older one', () => {
+  const first = applyMessage(createInitialSnapshot(), {
+    type: 'armedState',
+    protocol: 1,
+    phase: 'BLOCKED',
+    lineageId: null,
+    sessionId: 'session-old',
+    revision: null,
+    digest: null,
+    account: null,
+    expiry: null,
+    orders: [],
+    error: 'corrupt',
+  });
+  assert.equal(first.armedState.type, undefined);
+  assert.equal(first.armedState.sessionId, 'session-old');
+
+  const newSocketSnapshot = applyMessage(first, {
+    type: 'snapshot', connected: true, armedState: null,
+  });
+  assert.equal(newSocketSnapshot.armedState, null);
 });
 
 test('canonical execId trade upgrades a same-ID legacy aggregate in place', () => {
@@ -687,9 +725,47 @@ test('WebSocket command helper reports only bytes successfully handed to an open
   const sent = [];
   const open = { readyState: 1, send: (value) => sent.push(value) };
   assert.equal(sendWsJson(open, { type: 'order', qty: 1 }), true);
-  assert.deepEqual(sent, ['{"type":"order","qty":1}']);
+  assert.equal(sendWsJson(open, {
+    type: 'armedCommand', protocol: 1, requestId: 'req-1', sessionId: 'session-1',
+    lineageId: 'lineage-1', baseRevision: 4, baseDigest: 'a'.repeat(64),
+    account: 'DU123', expiry: '20260715',
+    operation: { type: 'ADD_QTY', id: 'arm-1', delta: 5 },
+  }), true);
+  assert.deepEqual(sent, [
+    '{"type":"order","qty":1}',
+    `{"type":"armedCommand","protocol":1,"requestId":"req-1","sessionId":"session-1","lineageId":"lineage-1","baseRevision":4,"baseDigest":"${'a'.repeat(64)}","account":"DU123","expiry":"20260715","operation":{"type":"ADD_QTY","id":"arm-1","delta":5}}`,
+  ]);
   assert.equal(sendWsJson({ readyState: 0, send: () => assert.fail('must not send') }, { type: 'order' }), false);
   assert.equal(sendWsJson({ readyState: 1, send: () => { throw new Error('closing race'); } }, { type: 'order' }), false);
   assert.equal(sendWsJson(open, { type: 'order', value: 1n }), false, 'serialization failures are unsent');
   assert.equal(sendWsJson(null, { type: 'order' }), false);
+});
+
+test('armed pending state is synchronously persisted and published before any socket send', () => {
+  const calls = [];
+  const storage = { setItem: (key, value) => calls.push(['persist', key, value]) };
+  const result = persistArmedCommandBeforeSend({
+    storage,
+    key: 'tt.armedAuthority.v1',
+    serialized: '{"pending":true}',
+    onPersisted: () => calls.push(['publish']),
+    send: () => { calls.push(['send']); return true; },
+  });
+  assert.deepEqual(result, { persisted: true, sent: true });
+  assert.deepEqual(calls, [
+    ['persist', 'tt.armedAuthority.v1', '{"pending":true}'],
+    ['publish'],
+    ['send'],
+  ]);
+
+  let sent = false;
+  const failed = persistArmedCommandBeforeSend({
+    storage: { setItem: () => { throw new Error('quota'); } },
+    key: 'tt.armedAuthority.v1',
+    serialized: '{}',
+    onPersisted: () => assert.fail('must not publish'),
+    send: () => { sent = true; return true; },
+  });
+  assert.deepEqual(failed, { persisted: false, sent: false });
+  assert.equal(sent, false);
 });

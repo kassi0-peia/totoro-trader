@@ -77,6 +77,26 @@ test('stop and trail entries are refused as close-only exits', () => {
   assert.equal(planOrderRequest({ ...base, intent: 'close', action: 'SELL', trail: 0.5 }, context).ok, true);
 });
 
+test('quick lifetime metadata is restricted to unbracketed SPX BUY-to-open', () => {
+  assert.equal(planOrderRequest({ ...base, quick: true }, context).ok, true);
+  assert.equal(planOrderRequest({ ...base, quick: true, limit: 2.5 }, context).ok, true);
+
+  const guest = {
+    symbol: 'SPY', expiry: '20260717', strikes: [600],
+    expirations: ['20260717'], multiplier: '100', tradingClass: 'SPY',
+  };
+  for (const msg of [
+    { ...base, quick: true, action: 'SELL', limit: 2.5 },
+    { ...base, quick: true, intent: 'close', action: 'SELL', limit: 2.5 },
+    { ...base, quick: true, limit: 2.5, takeProfit: 4 },
+    { ...base, quick: true, symbol: 'SPY', strike: 600, expiry: '20260717', limit: 2.5 },
+  ]) {
+    const rejected = planOrderRequest(msg, msg.symbol ? { ...context, guest } : context);
+    assert.equal(rejected.ok, false);
+    assert.match(rejected.reason, /quick is supported only/);
+  }
+});
+
 test('bracket planning holds the parent and transmits the final child', () => {
   const plan = planOrderRequest({ ...base, limit: 2.5, takeProfit: 5, stopLoss: 1 }, context);
   assert.equal(plan.wantTp, true);

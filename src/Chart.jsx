@@ -33,6 +33,11 @@ import {
   chartViewportStorageKey,
   resolveChartViewportRestore
 } from './chart/viewportPersistence.js';
+import {
+  ARMED_AUTHORITY_MAX_QTY,
+  ARMED_AUTHORITY_QTY_DELTAS,
+  canAddArmedQty,
+} from './app/armedAuthority.js';
 import { resolveArmedTrigger } from './app/armedPlacement.js';
 
 function clearCanvasSurface(canvas, size, background) {
@@ -88,13 +93,16 @@ export default function Chart({
   onPlaceArmTrigger = null,
   onCancelArmPlacement = null,
   onDisarmArmed = null,
+  onAddArmedQty = null,
+  armedQtyMax = ARMED_AUTHORITY_MAX_QTY,
+  armedAuthorityStatus = 'WAITING FOR ARMED AUTHORITY',
+  armedCanDisarm = false,
+  armedCanAdd = false,
   onToggleAxisChain = null,
   alerts = [],
   armed = [],
   dayLevels = null,
   beLine = null,
-  dayLevelsOn = false,
-  onToggleDayLevels = null,
   onMenu = null,
   apiRef = null,
   fillFlash = null,
@@ -372,23 +380,32 @@ export default function Chart({
     clearCanvasSurface(canvasRef.current, size, theme.bg);
   }, [view, size, theme.bg, clearHitLists, resetHover]);
 
-  // Record a clip of the CHART CANVAS directly (canvas.captureStream) — no
-  // permission prompt at all. The old getDisplayMedia path died silently in the
-  // chromeless app window: Firefox anchors its screen-share doorhanger to the
-  // toolbox that userChrome.css collapses, so the prompt opened invisibly and
-  // the button "did nothing" (kisa, 2026-07-13 — recording last worked 06-11,
-  // the chromeless window shipped 06-25). Canvas capture starts instantly,
-  // records at full dpr resolution, and the chart IS the app; DOM overlays
-  // (hover cards, toasts) aren't in the clip — the tape and its lines are.
-  // Click again to finish (downloads a .webm); auto-stops at 90 s.
-  const toggleRecord = useCallback(() => {
+  // Record a clip of the WHOLE SCREEN (getDisplayMedia) — cursor, drawers,
+  // toasts, armed cards, everything (kisa, 2026-07-16: the 07-13 canvas-capture
+  // workaround silently lost all of that; the chart alone isn't the story).
+  // The original failure was never getDisplayMedia itself: Firefox anchors its
+  // screen-share doorhanger to the toolbox userChrome.css collapses, so the
+  // prompt opened invisibly and the button "did nothing". The dedicated totoro
+  // profile now sets media.navigator.permission.disabled (user.js) which
+  // removes the doorhanger entirely and auto-grants the primary screen — see
+  // deploy/launch-totoro.sh. If capture is denied (pref missing), the button
+  // stays idle. Click again to finish (downloads a .webm); auto-stops at 90 s,
+  // and ending the share from the OS side finalizes the clip too.
+  const toggleRecord = useCallback(async () => {
     if (recRef.current) {
       if (recRef.current.state === 'recording') recRef.current.stop();
       return;
     }
-    const canvas = canvasRef.current;
-    if (!canvas || typeof canvas.captureStream !== 'function') return;
-    const stream = canvas.captureStream(30);
+    if (typeof navigator.mediaDevices?.getDisplayMedia !== 'function') return;
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { displaySurface: 'monitor', frameRate: 30 },
+        audio: false,
+      });
+    } catch {
+      return; // denied / dismissed — leave the button idle
+    }
     const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp9') ? 'video/webm;codecs=vp9' : 'video/webm';
     const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 6_000_000 });
     const chunks = [];
@@ -405,6 +422,11 @@ export default function Chart({
       recRef.current = null;
       setRecording(false);
     };
+    // Ending the share from the OS/browser side (not our button) must also
+    // finalize and download the clip rather than leave a zombie recorder.
+    stream.getVideoTracks()[0]?.addEventListener?.('ended', () => {
+      if (recRef.current === rec && rec.state === 'recording') rec.stop();
+    });
     rec.start();
     recRef.current = rec;
     setRecording(true);
@@ -671,13 +693,17 @@ export default function Chart({
           }
           if (!quickMode && onMenu) {
             const near = alerts.find((a) => Math.abs(priceToY(a.price) - target.y) <= 8);
-            const nearArmed = armed.find((a) => Math.abs(priceToY(a.level) - target.y) <= 8);
+            const nearArmed = onDisarmArmed
+              ? armed.find((a) => a.liveAuthorization === true
+                && a.status === 'ARMED'
+                && Math.abs(priceToY(a.level) - target.y) <= 8)
+              : null;
             onMenu({
               x: e.clientX, y: e.clientY, price: target.price,
               marketPrice: price,
               alertId: near ? near.id : null, alertPrice: near ? near.price : null,
               armedId: nearArmed ? nearArmed.id : null,
-              armedLabel: nearArmed ? `${nearArmed.strike}${nearArmed.right} @ ${nearArmed.level}` : null
+              armedLabel: nearArmed ? `${nearArmed.strike}${nearArmed.right} ×${nearArmed.qty ?? 1} @ ${nearArmed.level}` : null
             });
           }
         }}
@@ -700,13 +726,19 @@ export default function Chart({
       />
       {armedAxisGroups.map((group) => {
         const controlTop = group.y - 8.5;
-        const cardHeight = 54 + group.items.length * 82;
+        const authorityReady = armedAuthorityStatus === 'READY';
+        const groupPending = group.items.some(({ arm }) => arm.status !== 'ARMED');
+        const authorityWarning = !authorityReady || groupPending;
+        const quantityControls = armedCanAdd && armedQtyMax != null && !!onAddArmedQty;
+        const cardHeight = 54 + (authorityReady ? 0 : 28)
+          + group.items.length * (quantityControls ? 114 : authorityWarning ? 102 : 82);
         const cardTop = Math.max(
           layout.priceTop + 4,
           Math.min(group.y - cardHeight / 2, layout.priceBot - cardHeight - 4),
         );
         const one = group.items.length === 1 ? group.items[0].arm : null;
-        const label = one ? `⚔ ${one.strike}${one.right}` : `⚔ ×${group.items.length}`;
+        const labelIcon = groupPending ? '…' : authorityReady ? '⚔' : '⚠';
+        const label = one ? `${labelIcon} ${one.strike}${one.right}` : `${labelIcon} ×${group.items.length}`;
         const rights = new Set(group.items.map(({ arm }) => arm.right));
         const onlyRight = rights.size === 1 ? group.items[0].arm.right : null;
         const labelColor = onlyRight === 'C'
@@ -727,13 +759,13 @@ export default function Chart({
           >
             <button
               type="button"
-              className="armed-axis-label"
-              aria-label={`${group.items.length} armed trigger${group.items.length === 1 ? '' : 's'} — show details`}
+              className={`armed-axis-label${authorityWarning ? ' withheld' : ''}`}
+              aria-label={`${group.items.length} armed trigger${group.items.length === 1 ? '' : 's'} · ${armedAuthorityStatus} — show details`}
               aria-haspopup="true"
             >
               {label}
             </button>
-            {group.items.map(({ arm, y }) => (
+            {group.items.filter(({ arm }) => arm.liveAuthorization === true).map(({ arm, y }) => (
               <span
                 key={`guide:${arm.id}`}
                 className="armed-axis-guide"
@@ -747,34 +779,65 @@ export default function Chart({
             ))}
             <div className="armed-axis-popover" role="dialog" aria-label="Armed triggers">
               <div className="armed-axis-head">
-                <b>ARMED</b>
-                <span>ONE-SHOT</span>
+                <b>{authorityReady && !groupPending ? 'ARMED' : groupPending ? 'PENDING' : 'AUTHORITY'}</b>
+                <span>{authorityReady && !groupPending ? 'ONE-SHOT' : 'SERVER TRUTH'}</span>
               </div>
-              {group.items.map(({ arm }) => (
-                <div className="armed-axis-item" key={arm.id}>
-                  <div className="armed-axis-contract">
-                    <b style={{ color: arm.right === 'C' ? theme.callLine : theme.putLine }}>{arm.strike}{arm.right}</b>
-                    <span>{String(arm.expiry).replace(/^(\d{4})(\d{2})(\d{2})$/, '$1-$2-$3')}</span>
+              {!authorityReady && (
+                <div className="armed-axis-sync-warning">{armedAuthorityStatus}</div>
+              )}
+              {group.items.map(({ arm }) => {
+                const qty = Number.isSafeInteger(arm.qty) ? arm.qty : 1;
+                const rowStatus = arm.status || 'ARMED';
+                const actionable = arm.liveAuthorization === true && rowStatus === 'ARMED';
+                const showQuantityControls = quantityControls && actionable;
+                return (
+                  <div className="armed-axis-item" key={arm.id}>
+                    <div className="armed-axis-contract">
+                      <b style={{ color: arm.right === 'C' ? theme.callLine : theme.putLine }}>{arm.strike}{arm.right}</b>
+                      <span>{String(arm.expiry).replace(/^(\d{4})(\d{2})(\d{2})$/, '$1-$2-$3')}</span>
+                    </div>
+                    <div className="armed-axis-route">
+                      SPX {arm.dir === 'up' ? '↑' : '↓'} {Number(arm.level).toFixed(2)}
+                    </div>
+                    <div className="armed-axis-order">BUY ×{arm.qtyDisplay ?? qty} · ASK + 1 TICK · LMT</div>
+                    {rowStatus !== 'ARMED' && (
+                      <div className="armed-axis-sync-warning">{rowStatus}</div>
+                    )}
+                    {showQuantityControls && (
+                      <div className="armed-axis-qty" aria-label={`Armed quantity ${qty}`}>
+                        <span>QTY <b>{arm.qtyDisplay ?? qty}</b></span>
+                        <div className="armed-axis-qty-actions">
+                          {ARMED_AUTHORITY_QTY_DELTAS.map((delta) => (
+                            <button
+                              type="button"
+                              key={delta}
+                              disabled={!canAddArmedQty({ qty }, delta, armedQtyMax)}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                onAddArmedQty(arm.id, delta);
+                              }}
+                              aria-label={`Add ${delta} contract${delta === 1 ? '' : 's'} to ${arm.strike}${arm.right}`}
+                            >+{delta}</button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {armedCanDisarm && actionable && onDisarmArmed && (
+                      <button
+                        type="button"
+                        className="armed-axis-disarm"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onDisarmArmed(arm.id);
+                        }}
+                      >
+                        DISARM
+                      </button>
+                    )}
                   </div>
-                  <div className="armed-axis-route">
-                    SPX {arm.dir === 'up' ? '↑' : '↓'} {Number(arm.level).toFixed(2)}
-                  </div>
-                  <div className="armed-axis-order">BUY 1 · ASK + 1 TICK · LMT</div>
-                  {onDisarmArmed && (
-                    <button
-                      type="button"
-                      className="armed-axis-disarm"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        onDisarmArmed(arm.id);
-                      }}
-                    >
-                      DISARM
-                    </button>
-                  )}
-                </div>
-              ))}
-              {armed.length < 3 && <div className="armed-axis-hint">RIGHT-CLICK A STRIKE TO ADD ANOTHER</div>}
+                );
+              })}
+              {armedCanAdd && armed.length < 3 && <div className="armed-axis-hint">RIGHT-CLICK A STRIKE TO ADD ANOTHER</div>}
             </div>
           </div>
         );
@@ -800,7 +863,7 @@ export default function Chart({
             }}
           >
             {armPreview?.ok
-              ? `CLICK · SPX ${armPreviewLevel.toFixed(2)} ${armPreview.armed.dir === 'up' ? '↑' : '↓'} → BUY ${armPlacement.strike}${armPlacement.right}`
+              ? `CLICK · SPX ${armPreviewLevel.toFixed(2)} ${armPreview.armed.dir === 'up' ? '↑' : '↓'} → BUY ×1 ${armPlacement.strike}${armPlacement.right}`
               : armPreview?.reason}
           </div>
         </>
@@ -831,18 +894,6 @@ export default function Chart({
           <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
             <path d="M20.5 13.4 11 3.9H4V11l9.5 9.5z" />
             <circle cx="7.6" cy="7.6" r="1.1" />
-          </svg>
-        </button>
-      )}
-      {onToggleDayLevels && (
-        <button
-          className={`daylevels-btn${dayLevelsOn ? ' active' : ''}`}
-          onClick={onToggleDayLevels}
-          aria-label="Toggle day levels"
-          data-tip={dayLevelsOn ? 'Hide day levels' : 'Day levels: prior high/low/close + today’s open'}
-        >
-          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
-            <path d="M3 7h18M3 12h18M3 17h18" strokeDasharray="3 3" />
           </svg>
         </button>
       )}

@@ -1,6 +1,9 @@
 import { snapStrike } from '../options.js';
 import { mapYToPrice } from './coords.js';
 import { markerHitContains } from './markerGeometry.js';
+import { resolveArmedTrigger } from '../app/armedPlacement.js';
+
+const GUIDE_GRAB_THRESHOLD = 8;
 
 const boxContains = (box, x, y) => (
   x >= box.x0 && x <= box.x1 && y >= box.y0 && y <= box.y1
@@ -85,6 +88,60 @@ export function buildArmedAxisGroups({
     }
   }
   return groups.map(({ y, items: groupedItems }) => ({ y, items: groupedItems }));
+}
+
+// Snap a dragged trigger to the SPX 5-point grid the armed system speaks.
+export function snapArmedTrigger(price, step = 5) {
+  if (!(typeof price === 'number' && Number.isFinite(price))
+    || !(typeof step === 'number' && Number.isFinite(step) && step > 0)) return null;
+  return Math.round(price / step) * step;
+}
+
+// A pointer-down over a live ARMED guide line begins an EXCLUSIVE retarget
+// drag. Only a confirmed, currently-firing arm (liveAuthorization + ARMED —
+// never a pending/blocked/creating row) is grabbable, and only inside the price
+// pane, so the gesture can never leak into pan, a ticket, or lightning. The
+// nearest eligible guide within the grab threshold wins.
+export function resolveArmedGuideGrab({
+  x,
+  y,
+  armed = [],
+  layout,
+  priceToY,
+  threshold = GUIDE_GRAB_THRESHOLD,
+} = {}) {
+  if (!pointInPricePane(x, y, layout) || typeof priceToY !== 'function' || !Array.isArray(armed)) return null;
+  let best = null;
+  for (const arm of armed) {
+    if (arm?.liveAuthorization !== true || arm?.status !== 'ARMED' || !Number.isFinite(arm?.level)) continue;
+    const gy = priceToY(arm.level);
+    if (!Number.isFinite(gy)) continue;
+    const dist = Math.abs(gy - y);
+    if (dist <= threshold && (best == null || dist < best.dist)) best = { arm, dist };
+  }
+  return best ? { kind: 'grab-armed-guide', arm: best.arm } : null;
+}
+
+// Resolve where a retarget drag would land: snap to the grid, then run the SAME
+// fence/OTM/direction geometry that arming uses (resolveArmedTrigger). Out of
+// the ±10% fence, pushed ITM, or an unmoved level all yield ok:false so the
+// drop simply cancels and no command is sent.
+export function resolveArmedRetargetDrop({
+  arm,
+  level,
+  marketPrice,
+  strikeStep = 5,
+} = {}) {
+  if (!arm) return { ok: false, reason: 'No armed trigger under the cursor' };
+  const snapped = snapArmedTrigger(level, strikeStep);
+  if (snapped == null) return { ok: false, reason: 'Off the trigger grid' };
+  const resolved = resolveArmedTrigger(
+    { strike: arm.strike, right: arm.right, expiry: arm.expiry },
+    { level: snapped, marketPrice },
+  );
+  if (!resolved.ok) return { ok: false, level: snapped, reason: resolved.reason };
+  if (snapped === arm.level) return { ok: false, level: snapped, reason: 'The trigger did not move' };
+  return { ok: true, level: snapped, dir: resolved.armed.dir };
 }
 
 // Trigger placement temporarily owns every canvas click. A valid price-pane

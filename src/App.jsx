@@ -17,7 +17,7 @@ import useWatchlist from './useWatchlist.js';
 import useBottomDrawer from './useBottomDrawer.js';
 import ChartMenu from './ChartMenu.jsx';
 import HelpOverlay from './HelpOverlay.jsx';
-import { useIbkrFeed, liveGreeks, liveQuote } from './feed.js';
+import { useIbkrFeed, liveGreeks, liveQuote, persistArmedCommandBeforeSend } from './feed.js';
 import { greeks as bsGreeks, nearestOtmStrike, replayVolAt } from './options.js';
 import { classifyRegime } from './regime.js';
 import { expiryCutoffMs, suggestTimetable, displayRows, scanTouch } from './busstop.js';
@@ -31,11 +31,25 @@ import useCockpitSettings from './app/useCockpitSettings.js';
 import useOrderActions from './app/useOrderActions.js';
 import {
   armedPlacementReducer,
-  armedPlacementStrikeOnGrid,
   armedQuoteIsMonitored,
   beginArmedPlacement,
   completeArmedPlacement,
 } from './app/armedPlacement.js';
+import {
+  ARMED_AUTHORITY_MAX_ORDERS,
+  ARMED_AUTHORITY_MAX_QTY,
+  ARMED_AUTHORITY_READY,
+  armedAuthorityDisplay,
+  buildArmedCreate,
+  buildArmedDisarm,
+  buildArmedQtyAdd,
+  createArmedAuthorityModel,
+  disconnectArmedAuthority,
+  parseArmedAuthorityCache,
+  reconcileArmedPublicState,
+  reconcileArmedRejection,
+  serializeArmedAuthorityCache,
+} from './app/armedAuthority.js';
 import { killBannerFor } from './app/killDisplay.js';
 import { freshQuoteMid } from './order-payload.js';
 import {
@@ -78,12 +92,38 @@ function browserViewport() {
   return { width: window.innerWidth, height: window.innerHeight };
 }
 
+const ARMED_AUTHORITY_CACHE_KEY = 'tt.armedAuthority.v1';
+const LEGACY_ARMED_CACHE_KEY = 'tt.armed';
+
+function loadArmedAuthorityModel() {
+  if (typeof localStorage === 'undefined') return createArmedAuthorityModel();
+  let cached = null;
+  try {
+    const serialized = localStorage.getItem(ARMED_AUTHORITY_CACHE_KEY);
+    if (serialized != null) {
+      cached = parseArmedAuthorityCache(serialized);
+      if (cached.confirmed || cached.pending) return cached;
+    }
+    const legacy = localStorage.getItem(LEGACY_ARMED_CACHE_KEY);
+    if (legacy != null) return parseArmedAuthorityCache(legacy);
+  } catch {
+    return createArmedAuthorityModel({ cacheWarning: 'STORAGE_UNAVAILABLE' });
+  }
+  return cached ?? createArmedAuthorityModel();
+}
+
+function createArmedOrderId() {
+  try {
+    const uuid = globalThis.crypto?.randomUUID?.();
+    if (uuid) return `a:${uuid}`;
+  } catch { /* fall through to bounded best-effort entropy */ }
+  return `a:${Date.now().toString(36)}:${Math.random().toString(36).slice(2)}`;
+}
+
 export default function App() {
   const {
     themeKey,
     setThemeKey,
-    neutralChrome,
-    setNeutralChrome,
     theme,
     chartTheme,
     axisChain,
@@ -168,6 +208,11 @@ export default function App() {
   const hoverOpenRef = useRef(null); // 2s left-edge hover-to-open timer
   const openTrades = useCallback(() => { clearTimeout(hoverOpenRef.current); setDrawerMounted(true); setTradesPeek(true); }, []);
   const closeTrades = useCallback(() => { clearTimeout(hoverOpenRef.current); setTradesPeek(false); }, []);
+  const dismissTradesBackdrop = useCallback((event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    closeTrades();
+  }, [closeTrades]);
   // Hover the chart's left edge for 1.5s to peek the drawer open.
   const armHoverOpen = useCallback(() => {
     if (tradesPeek) return;
@@ -186,9 +231,14 @@ export default function App() {
   // ── Bottom drawer (kisa 2026-07-10: "hide everything below the chart") ──
   // Invisible bottom band + footer: hover 1.5s or click to reveal the panel;
   // clicks-off/Esc close it. Order fills never open it; the chart stays put
-  // unless the user deliberately reveals the drawer. Click-away and dwell
-  // handlers live in useBottomDrawer.
-  const { bottomOpen, setBottomOpen, bottomShown, armBottom, disarmBottom, toggleBottom, bottomZoneRef, footerRef } = useBottomDrawer();
+  // unless the user deliberately reveals the drawer. Dwell state lives in
+  // useBottomDrawer; App's dismiss layer owns click-away routing.
+  const { bottomOpen, setBottomOpen, bottomShown, armBottom, disarmBottom, toggleBottom } = useBottomDrawer();
+  const dismissBottomBackdrop = useCallback((event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setBottomOpen(false);
+  }, [setBottomOpen]);
   // ── Trades-drawer view: today's blotter ↔ multi-day journal (history) ──
   // The history view (equity curve + daily P/L) renders INSIDE the drawer;
   // the toggle lives in the drawer header — zero new cockpit chrome.
@@ -245,6 +295,28 @@ export default function App() {
     toastTimer.current = setTimeout(() => setToast(null), 4500);
   }, []);
 
+  // ⚔ The bridge owns the armed book. This client retains one normalized
+  // public state plus at most one revision-bound pending command; localStorage
+  // is crash recovery only, never something we wholesale send back.
+  const [armedAuthority, setArmedAuthority] = useState(loadArmedAuthorityModel);
+  const armedAuthorityRef = useRef(armedAuthority);
+  const commitArmedAuthority = useCallback((next, { persist = true } = {}) => {
+    let stored = true;
+    if (persist) {
+      try {
+        localStorage.setItem(ARMED_AUTHORITY_CACHE_KEY, serializeArmedAuthorityCache(next));
+      } catch {
+        stored = false;
+      }
+    }
+    armedAuthorityRef.current = next;
+    setArmedAuthority(next);
+    if (stored && next?.confirmed) {
+      try { localStorage.removeItem(LEGACY_ARMED_CACHE_KEY); } catch {}
+    }
+    return stored;
+  }, []);
+
   // Sounds live in src/sounds.js now: chimeFill (the original two-note fill
   // chime, moved verbatim) here, and chimeAlert (a single soft blip for ⏰
   // alerts) inside useAlerts.
@@ -286,26 +358,39 @@ export default function App() {
       return;
     }
     if (msg.type === 'orderAutoCancel') {
-      // A ⚡ order outlived its moment (unfilled past the bridge's window) and
-      // was cancelled server-side. The IBKR Cancelled status follows and does
-      // the position cleanup; this toast carries the WHY.
-      showToast(`⚡ ${msg.strike}${msg.right} auto-cancelled — ${msg.reason}`, 'err');
+      // A ⚡ order outlived its moment and the bridge asked IBKR to cancel its
+      // live remainder. Only the later IBKR status proves cancellation and
+      // performs position cleanup; this toast reports the request honestly.
+      showToast(`⚡ ${msg.strike}${msg.right} — ${msg.reason}`, 'err');
       return;
     }
-    // ⚔ armed-order lifecycle (setArmed referenced at call time — declared
-    // below, deliberately NOT in this callback's deps: setters are stable).
-    if (msg.type === 'armedCleared') {
-      setArmed((list) => (list.length ? [] : list));
+    if (msg.type === 'armedCommandRejected') {
+      const previous = armedAuthorityRef.current;
+      const reconciled = reconcileArmedRejection(previous, msg);
+      if (reconciled.state && reconciled.state !== previous) {
+        commitArmedAuthority(reconciled.state);
+      }
+      showToast(`⚔ unchanged — ${msg.reason || 'bridge refused the command'}`, 'err');
+      return;
+    }
+    // Legacy bridge events are notification-only. Only armedState may change
+    // the displayed/persisted authority; never reconstruct truth from a toast.
+    if (msg.type === 'armedCleared' || msg.type === 'armedQtyUpdated') {
+      return;
+    }
+    if (msg.type === 'armedQtyRejected') {
+      showToast(`⚔ quantity unchanged — ${msg.reason || 'bridge refused the update'}`, 'err');
       return;
     }
     if (msg.type === 'armedFired') {
-      setArmed((l) => l.filter((a) => a.id !== msg.id));
       chimeAlert();
-      showToast(`⚔ FIRED — SPX crossed ${msg.level}: buying 1 ${msg.strike}${msg.right} at the ask`, 'ok');
+      const qty = Number.isSafeInteger(msg.qty) && msg.qty >= 1 && msg.qty <= ARMED_AUTHORITY_MAX_QTY
+        ? msg.qty
+        : 1;
+      showToast(`⚔ FIRED — SPX crossed ${msg.level}: submitted BUY ×${qty} ${msg.strike}${msg.right} as a marketable LMT`, 'ok');
       return;
     }
     if (msg.type === 'armedFailed' || msg.type === 'armedRejected') {
-      if (msg.id != null) setArmed((l) => l.filter((a) => a.id !== msg.id));
       showToast(`⚔ ${msg.strike ?? ''}${msg.right ?? ''} disarmed — ${msg.reason}`, 'err');
       return;
     }
@@ -375,10 +460,27 @@ export default function App() {
       chimeFill();
       markFillFlash(msg);
     }
-  }, [showToast, markFillFlash]);
+  }, [showToast, markFillFlash, commitArmedAuthority]);
 
   const [guestEvent, setGuestEvent] = useState(null);
   const feed = useIbkrFeed({ onOrderEvent: handleOrderEvent, onGuestEvent: setGuestEvent });
+
+  useEffect(() => {
+    if (!feed.socketOpen || !feed.armedState) return;
+    const reconciled = reconcileArmedPublicState(armedAuthorityRef.current, feed.armedState);
+    if (reconciled.ok) {
+      commitArmedAuthority(reconciled.state);
+      return;
+    }
+    if (['INVALID_AUTHORITY', 'SESSION_MISMATCH', 'LINEAGE_MISMATCH', 'REVISION_DIGEST_CONFLICT'].includes(reconciled.code)) {
+      commitArmedAuthority(disconnectArmedAuthority(armedAuthorityRef.current));
+    }
+  }, [feed.socketOpen, feed.armedState, commitArmedAuthority]);
+
+  useEffect(() => {
+    if (feed.socketOpen || !armedAuthorityRef.current.connected) return;
+    commitArmedAuthority(disconnectArmedAuthority(armedAuthorityRef.current));
+  }, [feed.socketOpen, commitArmedAuthority]);
 
   // Replay owns its tape clock and simulated book in a controller that receives
   // only replay/journal bridge operations—never sendOrder.
@@ -456,55 +558,131 @@ export default function App() {
   // ⏰ price alerts: state + persistence + the live-crossing effect (see useAlerts).
   const [alerts, setAlerts] = useAlerts({ feedPrice: feed.price, guestPrice: guest?.price, guestActive, activeSymbol, showToast });
 
-  // ⚔ armed orders (design B — kisa 2026-07-11): the client owns the list
-  // (persisted, re-sent on every reconnect — the watchlist pattern); the
-  // bridge re-validates, watches the displayed price, and fires one-shot.
-  // Fired/failed/rejected events prune this list so a stale entry can never
-  // be re-armed (the bridge's firedIds set guards the app-was-closed case).
-  const ARMED_MAX_CLIENT = 3;
-  const [armed, setArmed] = useState(() => {
+  const armedDisplay = useMemo(() => armedAuthorityDisplay(armedAuthority), [armedAuthority]);
+  const armed = armedDisplay.rows;
+  const armedQtyMax = ARMED_AUTHORITY_MAX_QTY;
+  const armedAuthorityReady = armedDisplay.confirmed?.phase === ARMED_AUTHORITY_READY;
+  // DISARM is a durable state mutation, not an order: it remains available
+  // while IBKR is offline as long as this WebSocket still has READY authority.
+  const armedCanDisarm = feed.socketOpen
+    && armedAuthority.connected
+    && armedAuthorityReady
+    && !armedAuthority.pending;
+  // CREATE/ADD can increase broker exposure and therefore keep the full
+  // execution-readiness gate in addition to authority readiness.
+  const armedCanExecuteMutation = armedCanDisarm && feed.executionEnabled;
+
+  const issueArmedCommand = useCallback((build) => {
+    let requestId;
+    try { requestId = feed.createRequestId(); } catch {
+      showToast('⚔ command not sent — could not create a request identity', 'err');
+      return false;
+    }
+    const prepared = build(armedAuthorityRef.current, requestId);
+    if (!prepared?.ok) {
+      showToast(`⚔ unchanged — ${prepared?.reason || 'armed authority unavailable'}`, 'err');
+      return false;
+    }
+    let storage = null;
+    let serialized = null;
     try {
-      const v = JSON.parse(localStorage.getItem('tt.armed') || '[]');
-      if (Array.isArray(v)) {
-        return v.filter((a) => a
-          && typeof a.id === 'string'
-          && Number.isFinite(a.level) && a.level > 0
-          && armedPlacementStrikeOnGrid(a.strike, 5)
-          && (a.right === 'C' || a.right === 'P')
-          && (a.dir === 'up' || a.dir === 'down')
-          && /^\d{8}$/.test(a.expiry)
-        ).slice(0, ARMED_MAX_CLIENT);
+      storage = localStorage;
+      serialized = serializeArmedAuthorityCache(prepared.state);
+    } catch { /* handled by the persist-before-send result */ }
+    const outcome = persistArmedCommandBeforeSend({
+      storage,
+      key: ARMED_AUTHORITY_CACHE_KEY,
+      serialized,
+      onPersisted: () => commitArmedAuthority(prepared.state, { persist: false }),
+      send: () => feed.sendArmedCommand(prepared.command),
+    });
+    if (!outcome.persisted) {
+      if (prepared.command.operation?.type === 'DISARM') {
+        // Storage is crash-safety for commands that can increase exposure. It
+        // must never prevent an operator from reducing an already-live watcher.
+        commitArmedAuthority(prepared.state, { persist: false });
+        if (feed.sendArmedCommand(prepared.command)) return 'uncached';
+        const rejected = reconcileArmedRejection(prepared.state, {
+          requestId,
+          reason: 'command was not handed to the bridge',
+          currentState: prepared.state.confirmed,
+        });
+        commitArmedAuthority(disconnectArmedAuthority(rejected.state));
+        showToast('⚔ command not sent — bridge connection unavailable', 'err');
+        return false;
       }
-    } catch {}
-    return [];
-  });
-  useEffect(() => {
-    try { localStorage.setItem('tt.armed', JSON.stringify(armed)); } catch {}
-  }, [armed]);
-  useEffect(() => {
-    if (feed.socketOpen) feed.sendArmed(armed);
-  }, [feed.socketOpen, armed]); // eslint-disable-line react-hooks/exhaustive-deps
+      showToast('⚔ command not sent — browser storage is unavailable', 'err');
+      return false;
+    }
+    if (!outcome.sent) {
+      // sendWsJson returning false proves no bytes were handed to the socket.
+      // Clear this one pending command rather than leaving a permanent wedge.
+      const rejected = reconcileArmedRejection(prepared.state, {
+        requestId,
+        reason: 'command was not handed to the bridge',
+        currentState: prepared.state.confirmed,
+      });
+      commitArmedAuthority(disconnectArmedAuthority(rejected.state));
+      showToast('⚔ command not sent — bridge connection unavailable', 'err');
+      return false;
+    }
+    return 'sent';
+  }, [feed.createRequestId, feed.sendArmedCommand, commitArmedAuthority, showToast]);
+
   const disarmArmed = useCallback((id) => {
-    setArmed((list) => list.filter((arm) => arm.id !== id));
     setChartMenu(null);
-    showToast('⚔ disarmed', 'ok');
-  }, [showToast]);
+    const sent = issueArmedCommand((model, requestId) => (
+      buildArmedDisarm(model, { requestId, id, createdAt: Date.now() })
+    ));
+    if (sent === 'uncached') {
+      showToast('⚔ DISARMING · MAY STILL FIRE — browser cache unavailable', 'warn');
+    } else if (sent) {
+      showToast('⚔ DISARMING · MAY STILL FIRE until confirmed', 'warn');
+    }
+    return !!sent;
+  }, [issueArmedCommand, showToast]);
+  const addArmedQty = useCallback((id, delta) => {
+    if (!armedCanExecuteMutation) {
+      showToast(`⚔ quantity unchanged — ${armedDisplay.status}`, 'err');
+      return false;
+    }
+    const sent = issueArmedCommand((model, requestId) => (
+      buildArmedQtyAdd(model, { requestId, id, delta, createdAt: Date.now() })
+    ));
+    if (sent) showToast(`⚔ quantity +${delta} pending bridge confirmation`, 'warn');
+    return !!sent;
+  }, [armedCanExecuteMutation, armedDisplay.status, issueArmedCommand, showToast]);
+
+  // KILL clears armed authority on the server as its first durable stage. The
+  // client deliberately does nothing optimistic and waits for armedState.
+  const awaitServerArmedClear = useCallback(() => {}, []);
 
   // Replay replaces the live book on screen, so it is available only after
   // IBKR has explicitly finished recovering both positions and working orders,
   // and only while that confirmed book (plus local send races/arms) is empty.
   // RTH is stronger: hide the entry entirely while SPX cash is trading.
-  const replayGate = useMemo(() => replayAccess({
-    rth: feed.rth,
-    portfolioReady: feed.portfolioReady,
-    positions: feed.positions,
-    positionsRevision: feed.positionsRevision,
-    orders: feed.orders,
-    localPositions: positions,
-    armed,
-    killState: feed.killState,
-    reverseState: feed.reverseState,
-  }), [feed.rth, feed.portfolioReady, feed.positions, feed.positionsRevision, feed.orders, feed.killState, feed.reverseState, positions, armed]);
+  const replayGate = useMemo(() => {
+    const base = replayAccess({
+      rth: feed.rth,
+      portfolioReady: feed.portfolioReady,
+      positions: feed.positions,
+      positionsRevision: feed.positionsRevision,
+      orders: feed.orders,
+      localPositions: positions,
+      armed,
+      killState: feed.killState,
+      reverseState: feed.reverseState,
+    });
+    if (!base.allowed) return base;
+    if (!armedAuthority.connected || !armedAuthorityReady || armedAuthority.pending) {
+      return {
+        allowed: false,
+        code: 'ARMED_AUTHORITY',
+        reason: `Replay waits for confirmed empty armed authority — ${armedDisplay.status}`,
+      };
+    }
+    return base;
+  }, [feed.rth, feed.portfolioReady, feed.positions, feed.positionsRevision, feed.orders, feed.killState, feed.reverseState, positions, armed, armedAuthority.connected, armedAuthority.pending, armedAuthorityReady, armedDisplay.status]);
 
   const clearReplayTransient = useCallback(() => {
     // Never let an unsent live ticket/menu turn into a replay ticket (or a
@@ -1290,7 +1468,7 @@ export default function App() {
     replayTransitionBlocked,
     replayNow,
     resolveGreeks,
-    setArmed,
+    setArmed: awaitServerArmedClear,
     setBusStops,
     setPending,
     dispatchPositionLifecycle,
@@ -1312,6 +1490,11 @@ export default function App() {
   }, [activeSymbol, guestActive, cockpitExpiry, feed.expiry, feed.greeksMap]);
 
   const beginArmTriggerPlacement = useCallback((contract) => {
+    if (!armedCanExecuteMutation) {
+      const blocked = { ok: false, reason: `Armed entry unavailable — ${armedDisplay.status}` };
+      showToast(blocked.reason, 'err');
+      return blocked;
+    }
     const exact = { ...contract, expiry: cockpitExpiry };
     const available = exactArmContractAvailable(exact.strike, exact.right);
     const result = beginArmedPlacement(exact, {
@@ -1322,7 +1505,7 @@ export default function App() {
       executionEnabled: !replayTransitionBlocked && feed.executionEnabled,
       currentExpiry: cockpitExpiry,
       armedCount: armed.length,
-      maxArmed: ARMED_MAX_CLIENT,
+      maxArmed: ARMED_AUTHORITY_MAX_ORDERS,
       contractAvailable: available,
       strikeStep,
     });
@@ -1335,10 +1518,14 @@ export default function App() {
     setBusArmed(false);
     dispatchArmPlacement({ type: 'begin', placement: result.placement });
     return result;
-  }, [activeSymbol, guestActive, replaySurfaceOpen, feed.live, feed.executionEnabled, replayTransitionBlocked, cockpitExpiry, armed.length, strikeStep, exactArmContractAvailable, showToast]);
+  }, [armedCanExecuteMutation, armedDisplay.status, activeSymbol, guestActive, replaySurfaceOpen, feed.live, feed.executionEnabled, replayTransitionBlocked, cockpitExpiry, armed.length, strikeStep, exactArmContractAvailable, showToast]);
 
   const placeArmTrigger = useCallback((rawLevel) => {
     if (!armPlacement) return false;
+    if (!armedCanExecuteMutation) {
+      showToast(`⚔ not armed — ${armedDisplay.status}`, 'err');
+      return false;
+    }
     const level = Math.round(Number(rawLevel) * 100) / 100;
     const result = completeArmedPlacement(armPlacement, {
       activeSymbol,
@@ -1348,7 +1535,7 @@ export default function App() {
       executionEnabled: !replayTransitionBlocked && feed.executionEnabled,
       currentExpiry: cockpitExpiry,
       armedCount: armed.length,
-      maxArmed: ARMED_MAX_CLIENT,
+      maxArmed: ARMED_AUTHORITY_MAX_ORDERS,
       contractAvailable: exactArmContractAvailable(armPlacement.strike, armPlacement.right),
       strikeStep,
       level,
@@ -1358,15 +1545,18 @@ export default function App() {
       showToast(result.reason, 'err');
       return false;
     }
-    const armedOrder = { id: String(Date.now()), ...result.armed };
-    setArmed((list) => (list.length >= ARMED_MAX_CLIENT ? list : [...list, armedOrder]));
+    const armedOrder = { id: createArmedOrderId(), ...result.armed, qty: 1 };
+    const sent = issueArmedCommand((model, requestId) => (
+      buildArmedCreate(model, { requestId, order: armedOrder, createdAt: Date.now() })
+    ));
+    if (!sent) return false;
     dispatchArmPlacement({ type: 'complete' });
     showToast(
-      `⚔ armed: SPX ${armedOrder.dir === 'up' ? '↑' : '↓'} ${armedOrder.level.toFixed(2)} → BUY 1 ${armedOrder.strike}${armedOrder.right} LMT`,
-      'ok',
+      `⚔ ARMING · NOT YET ARMED — SPX ${armedOrder.dir === 'up' ? '↑' : '↓'} ${armedOrder.level.toFixed(2)} → BUY ×${armedOrder.qty} ${armedOrder.strike}${armedOrder.right} LMT`,
+      'warn',
     );
     return true;
-  }, [armPlacement, activeSymbol, guestActive, replaySurfaceOpen, feed.live, feed.executionEnabled, replayTransitionBlocked, cockpitExpiry, armed.length, strikeStep, cockpitPrice, exactArmContractAvailable, showToast]);
+  }, [armPlacement, armedCanExecuteMutation, armedDisplay.status, activeSymbol, guestActive, replaySurfaceOpen, feed.live, feed.executionEnabled, replayTransitionBlocked, cockpitExpiry, armed.length, strikeStep, cockpitPrice, exactArmContractAvailable, issueArmedCommand, showToast]);
 
   const cancelArmPlacement = useCallback(() => {
     dispatchArmPlacement({ type: 'cancel' });
@@ -1377,11 +1567,11 @@ export default function App() {
   useEffect(() => {
     if (!armPlacement) return;
     if (activeSymbol !== 'SPX' || guestActive || replaySurfaceOpen || !feed.live
-      || !feed.executionEnabled || replayTransitionBlocked
-      || armPlacement.expiry !== cockpitExpiry || armed.length >= ARMED_MAX_CLIENT) {
+      || !feed.executionEnabled || !armedCanExecuteMutation || replayTransitionBlocked
+      || armPlacement.expiry !== cockpitExpiry || armed.length >= ARMED_AUTHORITY_MAX_ORDERS) {
       dispatchArmPlacement({ type: 'cancel' });
     }
-  }, [armPlacement, activeSymbol, guestActive, replaySurfaceOpen, feed.live, feed.executionEnabled, replayTransitionBlocked, cockpitExpiry, armed.length]);
+  }, [armPlacement, activeSymbol, guestActive, replaySurfaceOpen, feed.live, feed.executionEnabled, armedCanExecuteMutation, replayTransitionBlocked, cockpitExpiry, armed.length]);
 
   // ── Keyboard layer (invisible cockpit controls — src/useHotkeys.js) ──
   // 1..N timeframes · Esc closes the top-most transient · Space snaps the
@@ -1537,7 +1727,7 @@ export default function App() {
     && (!reverseBanner.dismissible || dismissedReverseKey !== reverseBanner.key);
 
   return (
-    <div className="app" style={{ background: theme.bg, color: theme.text }}>
+    <div className="app" style={{ background: 'var(--c-bg)', color: theme.text }}>
       {banner && (
         <div className={`safety-banner safety-${banner.kind}`} role="alert">{banner.text}</div>
       )}
@@ -1600,8 +1790,8 @@ export default function App() {
             current={themeKey}
             onPick={(k) => { setThemeKey(k); setSettingsOpen(false); }}
             onClose={() => setSettingsOpen(false)}
-            neutralChrome={neutralChrome}
-            onToggleNeutral={() => setNeutralChrome((v) => !v)}
+            dayLevelsOn={dayLevelsOn}
+            onToggleDayLevels={() => setDayLevelsOn((v) => !v)}
             rungButton={rungButton}
             onToggleRungButton={() => setRungButton((v) => !v)}
             showOvn={showOvn}
@@ -1756,8 +1946,6 @@ export default function App() {
               onToggleAxisChain={() => setAxisChain((v) => !v)}
               dayLevels={dayLevels}
               beLine={beLine}
-              dayLevelsOn={dayLevelsOn}
-              onToggleDayLevels={replayActive || guestActive ? null : () => setDayLevelsOn((v) => !v)}
               onRung={rungButton && !replayTransitionBlocked && (replayActive || (activeSymbol === 'SPX' && !guestActive)) ? buyNextRung : null}
               showOvn={guestActive ? false : showOvn}
               showPositions={showPositions}
@@ -1766,7 +1954,12 @@ export default function App() {
               armPlacement={armPlacement}
               onPlaceArmTrigger={placeArmTrigger}
               onCancelArmPlacement={cancelArmPlacement}
-              onDisarmArmed={disarmArmed}
+              onDisarmArmed={armedCanDisarm ? disarmArmed : null}
+              onAddArmedQty={armedCanExecuteMutation ? addArmedQty : null}
+              armedQtyMax={armedQtyMax}
+              armedAuthorityStatus={armedDisplay.status}
+              armedCanDisarm={armedCanDisarm}
+              armedCanAdd={armedCanExecuteMutation}
               alerts={chartAlerts}
               armed={replayActive || activeSymbol !== 'SPX' ? EMPTY_ARR : armed}
               onMenu={replayTransitionBlocked ? null : setChartMenu}
@@ -1808,7 +2001,11 @@ export default function App() {
             </button>
             {drawerMounted && (
               <div className="trades-peek-layer">
-                <div className={`trades-scrim${tradesPeek ? '' : ' closing'}`} onClick={closeTrades} />
+                <div
+                  className={`trades-scrim${tradesPeek ? '' : ' closing'}`}
+                  onClick={dismissTradesBackdrop}
+                  onContextMenu={dismissTradesBackdrop}
+                />
                 <div
                   className={`trades-drawer${tradesPeek ? '' : ' closing'}`}
                   style={{ borderColor: theme.accent }}
@@ -1828,11 +2025,20 @@ export default function App() {
               </div>
             )}
           </div>
+          {bottomShown && (
+            <button
+              type="button"
+              className="bottom-dismiss-layer"
+              onClick={dismissBottomBackdrop}
+              onContextMenu={dismissBottomBackdrop}
+              aria-label="Close positions and timeframes"
+              tabIndex={-1}
+            />
+          )}
           {/* Bottom drawer: everything below the chart, folded (kisa 2026-07-10).
               The band is invisible chrome — hover peeks and click pins.
               Order fills never open it. Mobile: statically open. */}
           <div
-            ref={bottomZoneRef}
             className={`bottom-zone${bottomShown ? ' open' : ''}${armPlacement ? ' interaction-blocked' : ''}`}
           >
             <button
@@ -1891,9 +2097,9 @@ export default function App() {
               showToast(`⏰ alert armed at ${p.toFixed(2)}`, 'ok');
             }}
             onRemoveAlert={(id) => { setAlerts((l) => l.filter((a) => a.id !== id)); setChartMenu(null); }}
-            canArm={!replaySurfaceOpen && activeSymbol === 'SPX' && !guestActive && feed.live && feed.executionEnabled && armed.length < ARMED_MAX_CLIENT}
+            canArm={armedCanExecuteMutation && !replaySurfaceOpen && activeSymbol === 'SPX' && !guestActive && feed.live && armed.length < ARMED_AUTHORITY_MAX_ORDERS}
             onArm={beginArmTriggerPlacement}
-            onDisarm={disarmArmed}
+            onDisarm={armedCanDisarm ? disarmArmed : null}
             onClose={() => setChartMenu(null)}
           />
         );
@@ -2001,10 +2207,9 @@ export default function App() {
       )}
 
       {/* The footer doubles as the bottom-drawer trigger — same dwell/click
-          as the band, and the click-away listener treats it as inside. */}
+          as the band. */}
       <footer
         className="footer"
-        ref={footerRef}
         onMouseEnter={armPlacement ? undefined : armBottom}
         onMouseLeave={armPlacement ? undefined : disarmBottom}
         onClick={armPlacement ? undefined : toggleBottom}
