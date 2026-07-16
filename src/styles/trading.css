@@ -307,9 +307,10 @@
 }
 
 /* ── Multi-symbol Phase A: symbol search under the ATM quote strip ──
-   A thin right-aligned row (kisa's placement, 2026-07-07): collapsed to a bare
-   🔍 that expands to the input on click. Guest/SPX chips appear only when a
-   guest is active. Desktop-first — hidden on mobile. */
+   A thin right-aligned row (kisa's placement, 2026-07-07): the collapsed 🔍 /
+   watchlist control leads the symbol group, then guest/open-position tabs flow
+   to its right. Guest/SPX chips appear only when needed. Desktop-first —
+   hidden on mobile. */
 .symbol-search-row {
   display: flex;
   justify-content: flex-end;
@@ -319,10 +320,15 @@
   min-height: 0;
 }
 .symbol-search {
-  position: relative;
+  order: 1;
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+.sym-search-control {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
 }
 .sym-glass {
   display: inline-flex;
@@ -339,9 +345,6 @@
   transition: color 160ms, border-color 160ms;
 }
 .sym-glass:hover { color: var(--c-accent); border-color: var(--c-accent); }
-/* Edge-anchor the 🔍 tooltip so it can't clip the right viewport edge. */
-.sym-glass[data-tip]::after { left: auto; right: -1px; transform: translateX(0) translateY(3px); }
-.sym-glass[data-tip]:hover::after { transform: translateX(0) translateY(0); }
 .sym-chip {
   font-size: 10px;
   font-weight: 700;
