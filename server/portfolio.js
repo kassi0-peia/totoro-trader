@@ -103,6 +103,15 @@ function normalizeOptionPosition(accountValue, contractValue, qtyValue, avgCostV
   if (String(contract.secType).toUpperCase() !== 'OPT') {
     return { kind: 'ignored' };
   }
+  // IBKR position callbacks deliver the contract WITHOUT an exchange (the
+  // position itself is exchange-agnostic). Every downstream consumer of this
+  // stored contract needs a routable one: quote marks for inactive-guest legs
+  // failed at the broker with "Please enter exchange", and staged KILL's
+  // hasExactContractIdentity refused the leg outright (fail-closed PARTIAL —
+  // it could not flatten a guest position at all). The conId pins the exact
+  // contract; SMART is only the routing instruction and matches the app's own
+  // option contract builders. Never overwrite a real exchange.
+  if (!String(contract.exchange ?? '').trim()) contract.exchange = 'SMART';
   const contractKey = exactOptionContractKey(contract);
   const routeKey = optionRouteKey(contract);
   const qty = typeof qtyValue === 'number' ? qtyValue : NaN;
