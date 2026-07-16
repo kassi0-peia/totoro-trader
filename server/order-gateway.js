@@ -197,6 +197,8 @@ export function createOrderGateway({
       reason: assessment.reason,
       authoritative: assessment.authoritative,
       brokerDeadlineMs: assessment.brokerDeadlineMs ?? null,
+      expectedGoodTillDate: assessment.expectedGoodTillDate ?? null,
+      receivedGoodTillDate: assessment.receivedGoodTillDate ?? record.goodTillDate ?? null,
     };
     try {
       onQuickRecoveryHazard(hazard);

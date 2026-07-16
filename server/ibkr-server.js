@@ -288,7 +288,10 @@ const orderGateway = createOrderGateway({
     // the only code allowed to cancel it; this callback only drops readiness.
     ordersReady = false;
     if (!portfolioRecoveryStartedAt) portfolioRecoveryStartedAt = Date.now();
-    console.error(`[ibkr] quick-order recovery hazard ${hazard?.orderId ?? '?'}: ${hazard?.code || 'UNKNOWN'} — ${hazard?.reason || 'unsafe TTQ1 metadata'}`);
+    const gtdDetail = hazard?.code === 'GTD_MISMATCH'
+      ? ` (broker echoed '${hazard?.receivedGoodTillDate ?? ''}', deadline is '${hazard?.expectedGoodTillDate ?? ''}' UTC)`
+      : '';
+    console.error(`[ibkr] quick-order recovery hazard ${hazard?.orderId ?? '?'}: ${hazard?.code || 'UNKNOWN'} — ${hazard?.reason || 'unsafe TTQ1 metadata'}${gtdDetail}`);
     try { broadcastPortfolio(); } catch { /* startup/event reporting only */ }
     // Start the exact snapshot/cancel/proof path immediately. If this callback
     // arose inside an already-running recovery snapshot, the existing promise
