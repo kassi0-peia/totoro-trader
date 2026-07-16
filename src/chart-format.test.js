@@ -4,7 +4,7 @@ import { selectTimeAxisLabels } from './chart/format.js';
 
 const at = (day, hour, minute = 0) => new Date(2026, 6, day, hour, minute).getTime();
 
-test('time-axis labels anchor each visible day with a date and keep intermediate times sparse', () => {
+test('hourly time axes show only day anchors with no intermediate clock labels', () => {
   const slots = [
     { t: at(15, 20) },
     { t: at(15, 21) },
@@ -16,10 +16,30 @@ test('time-axis labels anchor each visible day with a date and keep intermediate
   assert.deepEqual(
     selectTimeAxisLabels(slots, { timeframe: 60, candleW: 25, targetPx: 100 }),
     [
-      { index: 0, kind: 'date', label: 'Jul 15' },
-      { index: 3, kind: 'date', label: 'Jul 16' },
+      { index: 0, kind: 'date', label: '15' },
+      { index: 3, kind: 'date', label: '16' },
     ],
   );
+});
+
+test('1h and 4h axes write the month only when a new month begins', () => {
+  const slots = [
+    { t: new Date(2026, 6, 31, 20).getTime() },
+    { t: new Date(2026, 6, 31, 23).getTime() },
+    { t: new Date(2026, 7, 3, 9, 30).getTime() },
+    { t: new Date(2026, 7, 3, 13, 30).getTime() },
+    { t: new Date(2026, 7, 4, 9, 30).getTime() },
+  ];
+  for (const timeframe of [60, 240]) {
+    assert.deepEqual(
+      selectTimeAxisLabels(slots, { timeframe, candleW: 40, targetPx: 80 }),
+      [
+        { index: 0, kind: 'date', label: '31' },
+        { index: 2, kind: 'month', label: 'Aug' },
+        { index: 4, kind: 'date', label: '4' },
+      ],
+    );
+  }
 });
 
 test('time-axis density adapts to candle pixels while day boundaries always win', () => {

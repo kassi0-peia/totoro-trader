@@ -173,6 +173,15 @@
   .chart-area { flex: 1; min-height: 0; display: flex; flex-direction: column; }
   .chart-wrap { height: auto; flex: 1; min-height: 0; }
   .footer { cursor: pointer; } /* the footer is the drawer's big trigger */
+  /* Desktop timeframes live in the footer. Keep only the position/action
+     controls in the revealed drawer; mobile restores the full bar below. */
+  .bottom-panel .tf-label,
+  .bottom-panel .tf-group { display: none; }
+  .bottom-panel .tf-actions {
+    width: 100%;
+    margin-left: 0;
+    justify-content: flex-end;
+  }
 }
 
 .snap-now-btn,

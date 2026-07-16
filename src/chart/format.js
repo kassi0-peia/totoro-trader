@@ -29,6 +29,11 @@ const localDayKey = (t) => {
   return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
 };
 
+const localMonthKey = (t) => {
+  const d = new Date(t);
+  return `${d.getFullYear()}-${d.getMonth()}`;
+};
+
 export function selectTimeAxisLabels(slots, {
   timeframe,
   candleW,
@@ -38,14 +43,18 @@ export function selectTimeAxisLabels(slots, {
   const minBars = Math.max(1, Math.round(targetPx / candleW));
   const labels = [];
   let previousDay = null;
+  let previousMonth = null;
   let lastLabelIndex = -Infinity;
   for (let i = 0; i < slots.length; i++) {
     const candle = slots[i];
     if (!candle || !Number.isFinite(candle.t)) continue;
     const day = localDayKey(candle.t);
+    const month = localMonthKey(candle.t);
     const dayBoundary = previousDay !== null && day !== previousDay;
     const firstVisible = previousDay === null;
+    const monthBoundary = previousMonth !== null && month !== previousMonth;
     previousDay = day;
+    previousMonth = month;
     if (timeframe >= 1440) {
       if (firstVisible || i - lastLabelIndex >= minBars) {
         labels.push({
@@ -55,6 +64,20 @@ export function selectTimeAxisLabels(slots, {
         });
         lastLabelIndex = i;
       }
+      continue;
+    }
+    if (timeframe >= 60) {
+      if (!firstVisible && !dayBoundary) continue;
+      const date = new Date(candle.t);
+      const showMonth = monthBoundary || (firstVisible && date.getDate() === 1);
+      labels.push({
+        index: i,
+        kind: showMonth ? 'month' : 'date',
+        label: showMonth
+          ? date.toLocaleDateString([], { month: 'short' })
+          : String(date.getDate()),
+      });
+      lastLabelIndex = i;
       continue;
     }
     if (dayBoundary || firstVisible) {

@@ -171,9 +171,9 @@
   height: 28px;
   background: var(--c-surface);
   border-top: 1px solid var(--c-border);
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
-  justify-content: space-between;
   /* keep text above the iOS home indicator */
   padding: 0 max(16px, env(safe-area-inset-right)) env(safe-area-inset-bottom)
     max(16px, env(safe-area-inset-left));
@@ -181,6 +181,25 @@
   color: var(--c-muted);
   letter-spacing: 0.18em;
   z-index: 10;
+}
+.footer-status { justify-self: start; }
+.footer-version { justify-self: end; }
+.footer-timeframes {
+  justify-self: center;
+  display: flex;
+  align-items: center;
+}
+.footer-tf-group {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+.footer .tf-btn {
+  height: 22px;
+  min-width: 34px;
+  padding: 0 8px;
+  border-radius: 4px;
+  font-size: 9px;
 }
 
 /* ============ EXECUTION / ACCOUNT SAFETY ============ */

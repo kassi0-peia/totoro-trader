@@ -8,7 +8,7 @@ import PositionModal from './PositionModal.jsx';
 import PinnedPositionCards from './PinnedPositionCards.jsx';
 import ReplayBar from './ReplayBar.jsx';
 import ThemePanel from './ThemePanel.jsx';
-import TimeframeBar, { TF_OPTIONS } from './TimeframeBar.jsx';
+import TimeframeBar, { TF_OPTIONS, TimeframeButtons } from './TimeframeBar.jsx';
 import QuoteStrip from './QuoteStrip.jsx';
 import SymbolSearch, { searchPopover } from './SymbolSearch.jsx';
 import useHotkeys from './useHotkeys.js';
@@ -2250,8 +2250,16 @@ export default function App() {
         onMouseLeave={armPlacement ? undefined : disarmBottom}
         onClick={armPlacement ? undefined : toggleBottom}
       >
-        <span>{feed.live ? 'IBKR LIVE DATA' : 'OFFLINE — NO CONNECTION'}</span>
-        <span>TotoroTrader v0.5</span>
+        <span className="footer-status">{feed.live ? 'IBKR LIVE DATA' : 'OFFLINE — NO CONNECTION'}</span>
+        <div className="footer-timeframes" onClick={(event) => event.stopPropagation()}>
+          <TimeframeButtons
+            value={timeframe}
+            onChange={setTimeframe}
+            theme={theme}
+            className="footer-tf-group"
+          />
+        </div>
+        <span className="footer-version">TotoroTrader v0.5</span>
       </footer>
     </div>
   );
