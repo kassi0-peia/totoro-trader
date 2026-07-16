@@ -139,6 +139,8 @@ export default function App() {
     setShowMarkers,
     dayLevelsOn,
     setDayLevelsOn,
+    showGridlines,
+    setShowGridlines,
   } = useCockpitSettings();
   // Timeframe — restored per symbol (tt.tf:SPX here; guests restore in the
   // layout-memory effect below). First-ever visit keeps the 1m default.
@@ -1810,6 +1812,8 @@ export default function App() {
             onClose={() => setSettingsOpen(false)}
             dayLevelsOn={dayLevelsOn}
             onToggleDayLevels={() => setDayLevelsOn((v) => !v)}
+            showGridlines={showGridlines}
+            onToggleGridlines={() => setShowGridlines((v) => !v)}
             rungButton={rungButton}
             onToggleRungButton={() => setRungButton((v) => !v)}
             showOvn={showOvn}
@@ -1963,6 +1967,7 @@ export default function App() {
               axisChain={axisChain}
               onToggleAxisChain={() => setAxisChain((v) => !v)}
               dayLevels={dayLevels}
+              showGridlines={showGridlines}
               beLine={beLine}
               onRung={rungButton && !replayTransitionBlocked && (replayActive || (activeSymbol === 'SPX' && !guestActive)) ? buyNextRung : null}
               showOvn={guestActive ? false : showOvn}
