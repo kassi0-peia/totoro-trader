@@ -69,7 +69,7 @@ export function drawGrid(ctx, { view, layout, theme, priceToY, indexToX, timefra
       ctx.stroke();
     }
     ctx.fillStyle = theme.muted;
-    ctx.font = tick.kind === 'date'
+    ctx.font = tick.kind !== 'time'
       ? '600 11px "JetBrains Mono", monospace'
       : '11px "JetBrains Mono", monospace';
     ctx.fillText(tick.label, x, layout.h - 8);

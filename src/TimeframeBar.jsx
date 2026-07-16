@@ -13,25 +13,31 @@ const OPTIONS = [
 // these) and for validating persisted timeframe values.
 export const TF_OPTIONS = OPTIONS;
 
+export function TimeframeButtons({ value, onChange, theme, className = 'tf-group' }) {
+  return (
+    <div className={className}>
+      {OPTIONS.map((o) => {
+        const active = o.value === value;
+        return (
+          <button
+            key={o.value}
+            className={`tf-btn${active ? ' active' : ''}`}
+            onClick={() => onChange(o.value)}
+            style={active ? { background: theme.accent, color: '#0a0c12', borderColor: theme.accent } : undefined}
+          >
+            {o.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function TimeframeBar({ value, onChange, theme, onCloseAll, canCloseAll, onReplay = null, replayOn = false }) {
   return (
     <div className="tf-bar">
       <span className="tf-label">TIMEFRAME</span>
-      <div className="tf-group">
-        {OPTIONS.map((o) => {
-          const active = o.value === value;
-          return (
-            <button
-              key={o.value}
-              className={`tf-btn${active ? ' active' : ''}`}
-              onClick={() => onChange(o.value)}
-              style={active ? { background: theme.accent, color: '#0a0c12', borderColor: theme.accent } : undefined}
-            >
-              {o.label}
-            </button>
-          );
-        })}
-      </div>
+      <TimeframeButtons value={value} onChange={onChange} theme={theme} />
       <div className="tf-actions">
         {onReplay && (
           <button
