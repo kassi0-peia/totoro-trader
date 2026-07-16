@@ -426,7 +426,9 @@
 .sym-dropdown {
   position: absolute;
   top: 100%;
-  right: 0;
+  /* The 🔍 control is pinned to the row's LEFT edge now — anchor the popover
+     to its left side so it opens rightward into the page, not off-screen. */
+  left: 0;
   margin-top: 4px;
   min-width: 220px;
   max-height: 300px;
