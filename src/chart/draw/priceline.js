@@ -5,7 +5,7 @@ import { fmtPrice } from '../format.js';
 // chip's font/align/baseline are the last state set and are re-established by
 // later painters — kept verbatim from the original inline block).
 export function drawPriceLine(ctx, { layout, theme, priceToY, price, expectedMove, alerts, rightAxis, dayLevels, beLine }) {
-  // Day levels (kisa 2026-07-13, opt-in toggle): PDH/PDL/PDC + today's open
+  // Day levels (the owner 2026-07-13, opt-in toggle): PDH/PDL/PDC + today's open
   // as the faintest lines here — context, not signals — drawn FIRST so every
   // other mark sits above them. Labels at the left edge, EM-style.
   if (dayLevels && dayLevels.length) {
@@ -81,7 +81,7 @@ export function drawPriceLine(ctx, { layout, theme, priceToY, price, expectedMov
     ctx.restore();
   }
 
-  // ⏰ armed price alerts (kisa, 2026-07-09): a fine dashed line + an outlined
+  // ⏰ armed price alerts (the owner 2026-07-09): a fine dashed line + an outlined
   // axis tag per alert — visible only while armed (the line IS the chrome).
   // One-shot: App removes the alert the moment the live tape crosses it.
   if (alerts && alerts.length) {
@@ -116,7 +116,7 @@ export function drawPriceLine(ctx, { layout, theme, priceToY, price, expectedMov
     }
   }
 
-  // Breakeven, hover-only (kisa 2026-07-13: "breakeven only showing on
+  // Breakeven, hover-only (the owner 2026-07-13: "breakeven only showing on
   // hover"): while a position is hovered, its at-expiry breakeven — strike ±
   // the real entry premium — as a dotted line in the leg's own color, with an
   // axis tag. Drawn last: a hover is a question being asked right now, it

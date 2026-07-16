@@ -34,7 +34,7 @@ import {
 } from './quick-order-deadline.js';
 import { assessReduceOnlyOrder, isTerminalOrderStatus, optionRouteKey } from './reduce-only.js';
 
-export const QUICK_CANCEL_MS = 10_000; // ⚡ unfilled-order lifetime before auto-cancel (kisa 2026-07-11)
+export const QUICK_CANCEL_MS = 10_000; // ⚡ unfilled-order lifetime before auto-cancel (the owner 2026-07-11)
 
 // Hard order rejections (everything else on the order error channel is a warning).
 // 161 means a cancellation was not accepted in the order's current state. It

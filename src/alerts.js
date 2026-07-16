@@ -1,4 +1,4 @@
-// ⏰ price alerts — the pure core (kisa, 2026-07-09).
+// ⏰ price alerts — the pure core (the owner 2026-07-09).
 //
 // One-shot crossing: an alert fires when the tape moves from one side of the
 // target to the other, or lands exactly on it. The first tick after (re)load

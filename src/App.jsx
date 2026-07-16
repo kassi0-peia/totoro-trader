@@ -231,7 +231,7 @@ export default function App() {
     const t = setTimeout(() => setDrawerMounted(false), 300);
     return () => clearTimeout(t);
   }, [tradesPeek, drawerMounted]);
-  // ── Bottom drawer (kisa 2026-07-10: "hide everything below the chart") ──
+  // ── Bottom drawer (the owner 2026-07-10: "hide everything below the chart") ──
   // Invisible bottom band + footer: hover 1.5s or click to reveal the panel;
   // clicks-off/Esc close it. Order fills never open it; the chart stays put
   // unless the user deliberately reveals the drawer. Dwell state lives in
@@ -252,7 +252,7 @@ export default function App() {
   // that row's note editor focused (the "note to self" moment, right after a
   // fill). The nonce re-triggers even for the same fill id.
   const [noteReq, setNoteReq] = useState(null);
-  // ? overlay — keys/gestures/marks reference (kisa 2026-07-13: "it's falling
+  // ? overlay — keys/gestures/marks reference (the owner 2026-07-13: "it's falling
   // out of my head"). Toggled by ?, closed by Esc/click-away; zero resting UI.
   const [helpOpen, setHelpOpen] = useState(false);
   useEffect(() => {
@@ -1005,7 +1005,7 @@ export default function App() {
   // Time-to-expiry, quantized to 30s buckets: T drifts ~2e-6 per tick —
   // invisible in any premium — but a per-tick T is a draw-effect dependency,
   // so it forced the WHOLE canvas to repaint every 800ms even with nothing
-  // else changing (the idle-cockpit CPU tax kisa felt as sticky hover).
+  // else changing (the idle-cockpit CPU tax the owner felt as sticky hover).
   // Replay keeps exact time — the tape drives it, not the clock.
   const tSlow = Math.floor(now / 30_000) * 30_000;
   const modelNow = replayActive ? replayNow : tSlow;
@@ -1027,7 +1027,7 @@ export default function App() {
     return classifyRegime(src);
   }, [tSlow, replayActive, replay?.idx, cockpitCandles.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Model sigma, vol-aware (kisa's weekend pick, 2026-07-11): the flat 18%
+  // Model sigma, vol-aware (the owner's weekend pick, 2026-07-11): the flat 18%
   // guess overpriced everything when real vol sat near 11% (mark-audit).
   // Live: VIX is the market's own 30-day sigma → vix/100. Replay samples only
   // the bars revealed through replay.idx; future bars and today's VIX are both
@@ -1300,7 +1300,7 @@ export default function App() {
     return lv.length ? lv : null;
   }, [dayLevelsOn, replayActive, guestActive, feed.histSeries, feed.expiry, feed.spxClose]);
 
-  // Breakeven line, hover-only (kisa 2026-07-13): the hovered leg's at-expiry
+  // Breakeven line, hover-only (the owner 2026-07-13): the hovered leg's at-expiry
   // breakeven — strike ± its real entry premium (same line for shorts). Only
   // for the active chart symbol; pending legs (no entryPremium) get no line.
   const beLine = useMemo(() => {
@@ -1313,7 +1313,7 @@ export default function App() {
   }, [hoverPos, positionsLive, activeSymbol]);
 
   // Symbols (beyond SPX) currently holding an open/in-flight position keep a
-  // one-click tab in the control line (kisa 2026-07-10: a TSLA position must
+  // one-click tab in the control line (the owner 2026-07-10: a TSLA position must
   // never strand its cockpit behind a fresh search).
   const openGuestSymbols = useMemo(() => {
     const s = new Set();
@@ -1854,7 +1854,7 @@ export default function App() {
             // risk leaves it visible-but-disabled with an exact explanation.
             onReplay={activeSymbol === 'SPX' && !replayGate.hidden ? toggleReplaySafe : null}
           />
-          {/* One control line (kisa, 2026-07-09): acct · 🚏 · ⚡ · 🔍, right-aligned
+          {/* One control line (the owner 2026-07-09): acct · 🚏 · ⚡ · 🔍, right-aligned
               under the ATM strip. The acct cluster moved up from its old float
               over the chart, so the chart's top-right corner is clean. The row
               renders in replay too (the badge stays); only the search hides. */}
@@ -2070,7 +2070,7 @@ export default function App() {
               tabIndex={-1}
             />
           )}
-          {/* Bottom drawer: everything below the chart, folded (kisa 2026-07-10).
+          {/* Bottom drawer: everything below the chart, folded (the owner 2026-07-10).
               The band is invisible chrome — hover peeks and click pins.
               Order fills never open it. Mobile: statically open. */}
           <div

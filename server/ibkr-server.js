@@ -163,7 +163,7 @@ function newGuestSeries() {
 // ── Watchlist layer (multi-symbol Phase B) ───────────────────────────────────
 // A client-owned list of US stock tickers polled for QUOTES ONLY — no chart, no
 // chain, no orders. The bridge never streams these: it fires one-shot snapshot
-// reqMktData on a slow, staggered cycle, because kisa's market-data line budget
+// reqMktData on a slow, staggered cycle, because the owner's market-data line budget
 // is already spent on the SPXW (or guest) chain. The client is the source of
 // truth for the list and re-sends it on (re)connect; the bridge does NOT persist
 // it. SPX is excluded (home instrument, already streaming — the client pins it
@@ -2228,7 +2228,7 @@ setInterval(evaluateSession, 5000);
 setInterval(() => homeMarket.backfillTick(), 300_000);
 
 // Poll the watchlist with one-shot snapshots on a slow cycle. No-op when the
-// list is empty or disconnected, so it costs nothing until kisa stars a symbol.
+// list is empty or disconnected, so it costs nothing until the owner stars a symbol.
 setInterval(pollWatchlist, WATCH_POLL_MS);
 
 // While DELAYED, re-subscribe SPX every 2 min: TWS only re-evaluates the data
@@ -2780,7 +2780,7 @@ function handleQuoteRequest(ws, msg) {
   const strike = Number(msg.strike);
   const right = msg.right === 'P' ? 'P' : 'C';
   if (!Number.isFinite(strike) || !ib || !connected) return;
-  // A guest-symbol quote (read-only; kisa 2026-07-10): the position poller
+  // A guest-symbol quote (read-only; the owner 2026-07-10): the position poller
   // marks open legs on symbols whose cockpit ISN'T active. There's no
   // discovered secdef here, so the OPT contract is built directly — SMART
   // resolves stock weeklies fine, and a failed resolution just means no

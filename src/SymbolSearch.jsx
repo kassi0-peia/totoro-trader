@@ -166,7 +166,7 @@ export default function SymbolSearch({
         )}
       </div>
       {/* Chips only earn their space when a guest is active — collapsed-on-SPX
-          is just the bare 🔍 (kisa's ask). */}
+          is just the bare 🔍 (the owner's ask). */}
       {guestOn && (
         <>
           <button
@@ -182,7 +182,7 @@ export default function SymbolSearch({
           </span>
         </>
       )}
-      {/* Tabs for symbols holding an open position (kisa 2026-07-10): a TSLA
+      {/* Tabs for symbols holding an open position (the owner 2026-07-10): a TSLA
           leg must never strand its cockpit behind a fresh search — one click
           returns to it, and its marks only stream while it's active. */}
       {openGuestSymbols.filter((s) => s !== activeSymbol).map((s) => (

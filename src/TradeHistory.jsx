@@ -32,7 +32,7 @@ function etToday() {
 
 // One blotter fill row — shared by the today list and an expanded history day.
 // Guest rows carry a symbol (absent = SPXW) and show it before the strike.
-// Notes (kisa 2026-07-10: "the journal had numbers, not whys"): a ✎ appears on
+// Notes (the owner 2026-07-10: "the journal had numbers, not whys"): a ✎ appears on
 // hover (accent-lit when a note exists); the note itself is a quiet italic line
 // under the fill, click-to-edit. Enter saves (empty clears), Esc/blur cancels.
 function TradeRow({ t, theme, editing = false, onEdit = null, onSave = null }) {
@@ -250,7 +250,7 @@ export default function TradeHistory({ trades = [], theme, view = 'today', onSet
     <div className="trade-history">
       <div className="th-head">
         <span>{history ? 'JOURNAL' : "TODAY'S TRADES"}</span>
-        {/* No count / net-cash chips (kisa 2026-07-10): the rows say it all. */}
+        {/* No count / net-cash chips (the owner 2026-07-10): the rows say it all. */}
         {onSetView && (
           <button
             className={`th-hist${history ? ' on' : ''}`}

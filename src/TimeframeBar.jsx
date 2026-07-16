@@ -1,7 +1,7 @@
 import React from 'react';
 
 const OPTIONS = [
-  // Minute buttons are bare numbers (kisa, 2026-07-16); only 4h/1D keep a unit.
+  // Minute buttons are bare numbers (the owner 2026-07-16); only 4h/1D keep a unit.
   { label: '1', value: 1 },
   { label: '5', value: 5 },
   { label: '15', value: 15 },
