@@ -276,7 +276,7 @@ export function createOrderGateway({
     } = plan;
 
     if (!marketOrderHasFreshAsk(plan, {
-      streamed: getStreamedQuote(plan) ?? null,
+      streamed: getStreamedQuote(plan, { ws, guestContext, guest: ownedGuest }) ?? null,
       snapshot: peekQuote(contract, { maxAgeMs: 60_000 }),
     })) {
       return reject(`MKT refused: no fresh ask for ${strike}${right} ${expiry}`);

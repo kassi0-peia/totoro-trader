@@ -244,8 +244,8 @@ const portfolio = createPortfolioController({
 const quoteService = createQuoteService({
   getBroker: () => ib,
   allocateReqId: nextRequestId,
-  publish: (target, message) => {
-    if (target?.readyState === 1) target.send(JSON.stringify(message));
+  publish: (target, message, context) => {
+    if (target?.readyState === 1) target.send(JSON.stringify(context ? { ...message, ...context } : message));
   },
 });
 
@@ -261,7 +261,13 @@ const orderGateway = createOrderGateway({
   getAccount: () => portfolio.publicSnapshot().account,
   getPositionAuthority: (account, contract) => portfolio.positionAuthorityForContract(account, contract),
   peekQuote: (contract, options) => quoteService.peekQuote(contract, options),
-  getStreamedQuote: (plan) => homeMarket.getChainEntry(`${plan.strike}${plan.right}`),
+  getStreamedQuote: (plan, context = {}) => {
+    if (plan.orderSymbol === 'SPX') return homeMarket.getChainEntry(`${plan.strike}${plan.right}`);
+    const resource = context.guest;
+    if (!resource || resource.symbol !== plan.orderSymbol) return null;
+    const entry = resource.chain.get(`${plan.strike}${plan.right}`);
+    return entry ? { ...entry, symbol: resource.symbol } : null;
+  },
   getCurrentExpiry: () => homeMarket.getCurrentExpiry(),
   getGuestContext: (ws) => guestRegistry.getClientContext(ws),
   isExecutionReady: () => executionReady(),
@@ -1499,6 +1505,7 @@ function guestMsg(resource) {
       greeks,
       expiry: resource.expiry,
       strikeStep: resource.strikeStep,
+      strikes: resource.strikes,
       expirations: resource.expirations,
       secType: 'STK',
       settlement: 'physical',
@@ -2780,6 +2787,38 @@ function handleQuoteRequest(ws, msg) {
     ? msg.symbol.toUpperCase() : null;
   let expiry, symbol, contract;
   if (guestSym) {
+    const context = guestRegistry.getClientContext(ws);
+    const activeGuestRequest = msg.underlyingConId != null
+      || msg.resourceKey != null
+      || msg.resourceGeneration != null;
+    if (activeGuestRequest) {
+      if (!context
+          || context.symbol !== guestSym
+          || Number(msg.underlyingConId) !== context.conId
+          || msg.resourceKey !== context.key
+          || Number(msg.resourceGeneration) !== context.resourceGeneration
+          || !context.resource) return;
+      expiry = String(msg.expiry || context.resource.expiry || '');
+      if (expiry !== context.resource.expiry) return;
+      const valid = validateGuestOrder(
+        { strike, right, expiry },
+        { strikes: context.resource.strikes, expirations: context.resource.expirations },
+      );
+      if (!valid.ok) return;
+      symbol = guestSym;
+      contract = guestOptionContract(context.resource, strike, right, expiry);
+      quoteService.requestQuote(contract, {
+        target: ws,
+        context: {
+          guestResourceKey: context.key,
+          guestResourceGeneration: context.resourceGeneration,
+          guestUnderlyingConId: context.conId,
+        },
+      }).catch((error) => {
+        console.log(`[ibkr] active guest quote ${symbol} ${strike}${right} failed:`, error.message);
+      });
+      return;
+    }
     if (!/^\d{8}$/.test(String(msg.expiry || ''))) return;
     const requestedConId = Number(msg.conId);
     if (!Number.isSafeInteger(requestedConId) || requestedConId <= 0) return;
@@ -2870,6 +2909,9 @@ function snapshotMsg() {
       reverseTransaction: true,
       armedStateV1: true,
       armedQtyMax: ARMED_QTY_MAX,
+      guestMarket: true,
+      guestQuick: true,
+      guestRung: true,
     },
     trades: tradeJournal.trades,
     positions: portfolioState.positions,

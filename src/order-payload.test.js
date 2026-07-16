@@ -106,12 +106,18 @@ test('SELL with a limit: action SELL, and it NEVER carries takeProfit/stopLoss',
   assert.equal('stopLoss' in r.payload, false);
 });
 
-test('guest order requires a limit — rejected with the guest reason (checked before sell)', () => {
-  const r = buildOpenOrder({ side: 'buy', strike: 500, type: 'call', qty: 1, ...GUEST });
-  assert.deepEqual(r, { ok: false, reason: 'Guest orders need a limit price' });
-  // guest guard wins over the sell guard when both would fire
+test('guest BUY MKT carries exact symbol and brackets while guest SELL remains limit-only', () => {
+  const r = buildOpenOrder({
+    side: 'buy', strike: 500, type: 'call', qty: 1,
+    quote: freshQuote(2), takeProfit: 4, stopLoss: 1, ...GUEST,
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.payload.symbol, 'SPY');
+  assert.equal('limit' in r.payload, false);
+  assert.equal(r.payload.takeProfit, 4);
+  assert.equal(r.payload.stopLoss, 1);
   const rs = buildOpenOrder({ side: 'sell', strike: 500, type: 'call', qty: 1, ...GUEST });
-  assert.deepEqual(rs, { ok: false, reason: 'Guest orders need a limit price' });
+  assert.deepEqual(rs, { ok: false, reason: 'Sell orders need a limit price' });
 });
 
 test('guest order carries the symbol; SPX does not', () => {
@@ -211,13 +217,14 @@ test('quick red: MKT omits the limit field', () => {
   assert.equal(r.payload.right, 'P');
 });
 
-test('quick red degrades to a limit in guest mode (never a guest MKT)', () => {
+test('quick red remains a real MKT in guest mode and keeps the exact symbol', () => {
   const r = buildQuickOrder({ strike: 500, type: 'call', quote: freshQuote(2.00), quickMode: 'market', ...GUEST });
   assert.equal(r.ok, true);
-  assert.equal(r.market, false);       // market suppressed under guest
-  assert.equal(r.limit, 2.05);
-  assert.equal(r.payload.limit, 2.05);
+  assert.equal(r.market, true);
+  assert.equal(r.limit, null);
+  assert.equal('limit' in r.payload, false);
   assert.equal(r.payload.symbol, 'SPY');
+  assert.equal(r.payload.quick, true);
 });
 
 test('quick: missing or stale asks are rejected with the hover reason', () => {

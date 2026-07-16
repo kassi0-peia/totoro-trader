@@ -539,6 +539,17 @@ export default function App() {
     && Number(feed.guest.conId) === Number(activeConIdRef.current);
   const guestPending = activeSymbol !== 'SPX' && !guestActive;
   const guest = guestActive ? feed.guest : null;
+  const requestCockpitQuote = useCallback((request) => {
+    if (!guestActive) return feed.requestQuote(request);
+    return feed.requestQuote({
+      ...request,
+      symbol: activeSymbol,
+      expiry: request?.expiry ?? guest?.expiry,
+      underlyingConId: guest?.conId,
+      resourceKey: guest?.resourceKey,
+      resourceGeneration: guest?.resourceGeneration,
+    });
+  }, [guestActive, activeSymbol, guest?.expiry, guest?.conId, guest?.resourceKey, guest?.resourceGeneration, feed.requestQuote]);
 
   // SPX history is globally resolvable. A guest history request is valid only
   // while this tab owns that guest's exact registry context; inactive cards keep
@@ -1867,24 +1878,19 @@ export default function App() {
               )}
               {!replaySurfaceOpen && (
                 <button
-                  className={`acct-quick-btn${quickMode ? ' active' : ''}${quickMode === 'market' && !guestActive ? ' market' : ''}`}
-                  disabled={guestPending}
-                  // In guest mode the red MKT arm is unreachable. This QUICK-mode
-                  // cycle is off ↔ amber marketable limit; an ordinary guest ticket
-                  // may use any positive limit and rest on the book.
-                  onClick={() => !guestPending && setQuickMode((v) => (guestActive
-                    ? (v ? false : 'limit')
-                    : (v === 'limit' ? 'market' : v === 'market' ? false : 'limit')))}
+                  className={`acct-quick-btn${quickMode ? ' active' : ''}${quickMode === 'market' ? ' market' : ''}`}
+                  disabled={guestPending || (guestActive && !feed.caps?.guestQuick)}
+                  onClick={() => !guestPending
+                    && (!guestActive || feed.caps?.guestQuick)
+                    && setQuickMode((v) => (v === 'limit' ? 'market' : v === 'market' ? false : 'limit'))}
                   aria-label="Toggle quick trade mode"
                   data-tip={
                     guestPending
                       ? `${activeSymbol} options are still loading — quick trade is locked`
-                      : guestActive
-                      ? (quickMode
-                        ? 'Quick mode ARMED — right-click a strike = 1-lot marketable limit (ask + 1 tick). The ⚡ red MKT arm is SPX-only. Click to disarm.'
-                        : 'Quick mode: right-click a strike = 1-lot marketable limit. (Red MKT is SPX-only in guest mode.) Click to arm.')
+                      : guestActive && !feed.caps?.guestQuick
+                      ? 'Guest lightning needs the updated bridge'
                       : quickMode === 'market'
-                      ? '⚡ MARKET mode ARMED (red) — right-click a strike = 1-lot MKT. Instant fill but UNCAPPED slippage, and outside RTH it\'s held until ~00:10. Click to disarm.'
+                      ? '⚡ MARKET mode ARMED (red) — right-click a strike = 1-lot MKT with UNCAPPED slippage. If unfilled, its quick deadline expires it after ~10 seconds. Click to disarm.'
                       : quickMode === 'limit'
                       ? 'Quick mode ARMED — right-click a strike = 1-lot marketable limit (ask + 1 tick). Click again for MARKET (red) mode.'
                       : 'Quick mode: right-click a strike = instant 1-lot buy. Click to arm (limit → red market → off).'
@@ -1961,7 +1967,7 @@ export default function App() {
               onDropBusStop={handleDropBusStop}
               onSelectBusStop={(s) => setBusPanelId(s.id)}
               greeksMap={replayActive ? EMPTY_GREEKS : cockpitGreeksMap}
-              requestQuote={!replayActive && !guestActive && feed.live ? feed.requestQuote : null}
+              requestQuote={!replayActive && feed.live ? requestCockpitQuote : null}
               expectedMove={expectedMove}
               histCandles={replayActive || guestActive ? null : feed.histSeries[timeframe] || null}
               axisChain={axisChain}
@@ -1969,11 +1975,16 @@ export default function App() {
               dayLevels={dayLevels}
               showGridlines={showGridlines}
               beLine={beLine}
-              onRung={rungButton && !replayTransitionBlocked && (replayActive || (activeSymbol === 'SPX' && !guestActive)) ? buyNextRung : null}
+              onRung={rungButton && !replayTransitionBlocked
+                && (replayActive
+                  || activeSymbol === 'SPX'
+                  || (guestActive && feed.caps?.guestRung))
+                ? buyNextRung
+                : null}
               showOvn={guestActive ? false : showOvn}
               showPositions={showPositions}
               showMarkers={showMarkers}
-              quickMode={guestPending ? false : guestActive && quickMode === 'market' ? 'limit' : quickMode}
+              quickMode={guestPending || (guestActive && !feed.caps?.guestQuick) ? false : quickMode}
               armPlacement={armPlacement}
               onPlaceArmTrigger={placeArmTrigger}
               onCancelArmPlacement={cancelArmPlacement}
@@ -2143,6 +2154,7 @@ export default function App() {
         executionEnabled={orderSurfaceExecutionEnabled}
         accountType={feed.accountType}
         guest={(pending?.symbol ?? 'SPX') !== 'SPX'}
+        guestMarket={!!feed.caps?.guestMarket}
       />
 
       <PinnedPositionCards

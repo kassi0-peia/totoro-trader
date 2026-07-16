@@ -20,7 +20,7 @@ overlay and replay-mode practice fills.
   arm a **⏰ price alert**, or choose an exact CALL/PUT and then click a separate
   SPX trigger level for a two-step **⚔ entry**. Sells are limit-only by design.
 - **⚡ quick mode** (right-click a strike, armed) — instant 1-lot: **amber** =
-  marketable limit at ask + 1 tick; **red** = a real MKT (opt-in, SPX-only,
+  marketable limit at ask + 1 tick; **red** = a real MKT (opt-in, SPX or guest,
   uncapped slippage). Both have a restart-safe ~10-second lifetime; an ordinary
   EXECUTE-ticket MKT remains separate and may be held until ~00:10 outside RTH.
 - **Alerts** — dashed line + axis tag only while armed; one-shot on crossing
@@ -31,8 +31,9 @@ overlay and replay-mode practice fills.
 - **Brackets & exits** — optional TP (`LMT`) / SL (`STP`) at entry; an existing
   position can attach TP, SL, and/or an IBKR-native `TRAIL` in one OCA group.
 - **Multi-symbol** — 🔍 choose an exact US-stock contract → a guest cockpit with
-  its near-ATM chain and nearest listed option expiry; guest tickets are LMT-only
-  (the limit may rest). ★ watchlist snapshots live inside the same popover.
+  its near-ATM chain and nearest listed option expiry; exact guest BUY tickets
+  support MKT/LMT while SELL stays LMT-only. ★ watchlist snapshots live inside
+  the same popover.
 - **Journal** — the trades drawer holds today's blotter and the multi-day
   history: equity curve, win rate, per-day P/L with expandable fills.
 - **Replay** — off-hours SPX practice against a past 1-min tape, with separate
@@ -138,18 +139,18 @@ so the chart shows front-month ES shifted to an SPX-equivalent scale
 
 ## Orders & account safety
 
-- There are exactly **two naked-MKT paths**. The **EXECUTE ticket** for an SPX
-  **BUY-to-open** opens with **MKT** selected
+- There are exactly **two naked-MKT path classes**. The **EXECUTE ticket** for a
+  **BUY-to-open** opens with **MKT** selected on SPX and an exact active guest
   (kisa's confirmed choice, 2026-07-13 — instant fill, uncapped slippage, IBKR-
   simulated/held until ~00:10 outside RTH); a marketable limit prefilled at the
-  ask is one toggle away. **Sell-to-open and guest-symbol tickets are limit-only**
-  (a market sell into a thin book is a blank check; the bridge rejects a guest
-  MKT). The red ⚡ arm is the other deliberate MKT path (SPX-only), but unlike
+  ask is one toggle away. **Sell-to-open is limit-only on every symbol**
+  (a market sell into a thin book is a blank check). The red ⚡ arm is the other
+  deliberate MKT path for SPX or an exact active guest, but unlike
   the ordinary DAY EXECUTE order it carries the same restart-safe quick deadline
   as amber. Both MKT paths require a fresh ask witness before the bridge routes.
 - **CLOSE / REVERSE / add / rung / staged KILL / amber ⚡** use side-aware
-  marketable limits (BUY crosses a fresh ask; SELL crosses a fresh bid). Guest
-  and SELL-to-open tickets require a positive `LMT` but may intentionally rest.
+  marketable limits (BUY crosses a fresh ask; SELL crosses a fresh bid).
+  SELL-to-open tickets require a positive `LMT` but may intentionally rest.
   Attached exits keep their native types: TP=`LMT`, SL=`STP`, TRAIL=`TRAIL`.
 - Positions and fills are **IBKR-authoritative**: real `avgFillPrice`, dedupe
   by `execId`, and a reconnect backfills anything missed via `reqExecutions`.

@@ -106,7 +106,11 @@ function harness({
       });
     },
     peekQuote: () => state.snapshotQuote,
-    getStreamedQuote: () => state.streamedQuote,
+    getStreamedQuote: (plan, context) => (
+      typeof state.streamedQuote === 'function'
+        ? state.streamedQuote(plan, context)
+        : state.streamedQuote
+    ),
     getCurrentExpiry: () => EXPIRY,
     getGuestContext: () => state.guestContext,
     isExecutionReady: () => state.executionReady,
@@ -213,7 +217,7 @@ test('SELL-to-open with a positive limit routes a resting LMT', () => {
   assert.equal(order.lmtPrice, 3.2);
 });
 
-test('a guest order may not be MKT and must carry a positive limit', () => {
+test('an exact active guest may route BUY MKT or LMT, but only from its own fresh quote', () => {
   const guestContext = {
     symbol: 'AAPL',
     resource: {
@@ -227,16 +231,42 @@ test('a guest order may not be MKT and must carry a positive limit', () => {
       expirations: [EXPIRY],
     },
   };
-  const h = harness({ guestContext });
-  const refused = h.gateway.placeOrderRequest(h.ws, openBuy({ symbol: 'AAPL', strike: 200 }));
-  assert.equal(refused.accepted, false);
-  assert.equal(refused.reason, 'guest orders require a positive limit (no MKT)');
-  assert.equal(h.calls.places.length, 0);
+  const h = harness({
+    guestContext,
+    streamedQuote: (plan, context) => ({
+      symbol: context.guest.symbol,
+      strike: plan.strike,
+      right: plan.right,
+      expiry: plan.expiry,
+      bid: 4,
+      ask: 4.1,
+      askTs: Date.now(),
+    }),
+  });
+  const market = h.gateway.placeOrderRequest(h.ws, openBuy({ symbol: 'AAPL', strike: 200 }));
+  assert.equal(market.accepted, true);
+  assert.equal(h.calls.places[0].order.orderType, 'MKT');
+  assert.equal(h.calls.places[0].contract.symbol, 'AAPL');
 
   const accepted = h.gateway.placeOrderRequest(h.ws, openBuy({ clientRef: 'ref-2', symbol: 'AAPL', strike: 200, limit: 4.1 }));
   assert.equal(accepted.accepted, true);
-  assert.equal(h.calls.places[0].order.orderType, 'LMT');
-  assert.equal(h.calls.places[0].contract.symbol, 'AAPL');
+  assert.equal(h.calls.places[1].order.orderType, 'LMT');
+
+  const crossedSymbol = harness({
+    guestContext,
+    streamedQuote: {
+      symbol: 'SPX', strike: 200, right: 'C', expiry: EXPIRY,
+      bid: 4, ask: 4.1, askTs: Date.now(),
+    },
+  });
+  const refused = crossedSymbol.gateway.placeOrderRequest(
+    crossedSymbol.ws,
+    openBuy({ symbol: 'AAPL', strike: 200 }),
+  );
+  assert.equal(refused.accepted, false);
+  assert.match(refused.reason, /^MKT refused/);
+  assert.equal(crossedSymbol.calls.places.length, 0);
+  assert.equal(crossedSymbol.registry.lookup('ref-1'), null);
 });
 
 test('stop and trail entries are refused on open (close-only exits)', () => {
@@ -412,6 +442,40 @@ test('quick MKT remains a real market order but carries the same restart-safe GT
   assert.equal(parseQuickOrderRef(order.orderRef, { orderId: 10 }).ok, true);
   assert.equal(h.activeTimers().length, 1);
   assert.equal(h.activeTimers()[0].ms, 10_000);
+});
+
+test('guest amber and red lightning share the exact TTQ1 deadline policy', () => {
+  const guestContext = {
+    symbol: 'AAPL',
+    resource: {
+      symbol: 'AAPL',
+      expiry: EXPIRY,
+      multiplier: '100',
+      tradingClass: 'AAPL',
+      strikes: [200],
+      expirations: [EXPIRY],
+    },
+  };
+  const h = harness({
+    guestContext,
+    orderIds: [10, 11],
+    streamedQuote: {
+      symbol: 'AAPL', strike: 200, right: 'C', expiry: EXPIRY,
+      bid: 4, ask: 4.1, askTs: Date.now(),
+    },
+  });
+  assert.equal(h.gateway.placeOrderRequest(h.ws, openBuy({
+    symbol: 'AAPL', strike: 200, limit: 4.2, quick: true,
+  })).accepted, true);
+  assert.equal(h.gateway.placeOrderRequest(h.ws, openBuy({
+    clientRef: 'ref-2', symbol: 'AAPL', strike: 200, quick: true,
+  })).accepted, true);
+  assert.deepEqual(h.calls.places.map(({ order }) => order.orderType), ['LMT', 'MKT']);
+  for (const { order } of h.calls.places) {
+    assert.equal(order.tif, 'GTD');
+    assert.match(order.orderRef, /^TTQ1:/);
+  }
+  assert.equal(h.activeTimers().length, 2);
 });
 
 test('an ordinary LMT remains DAY and receives no quick metadata or timer', () => {

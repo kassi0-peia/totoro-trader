@@ -142,6 +142,69 @@ test('rung follows the latest leg direction, requires a fresh ask, and stays LMT
   });
 });
 
+test('guest rung chooses the next discovered strike and carries exact quote authority', () => {
+  const positions = [
+    position({ symbol: 'SPY', expiry: '20260717', strike: 600, openedAt: 10 }),
+    position({ symbol: 'SPY', expiry: '20260717', strike: 602.5, openedAt: 20 }),
+  ];
+  const guestContext = {
+    symbol: 'SPY',
+    underlyingConId: 756733,
+    resourceKey: 'SPY|756733',
+    resourceGeneration: 9,
+  };
+  const common = {
+    positions,
+    activeSymbol: 'SPY',
+    guestActive: true,
+    cockpitExpiry: '20260717',
+    listedStrikes: [595, 597.5, 600, 602.5, 607.5],
+    guestContext,
+    now: NOW,
+  };
+  const missing = planNextRung({ ...common, greeksMap: new Map() });
+  assert.deepEqual(missing.quoteRequest, {
+    strike: 607.5,
+    right: 'C',
+    expiry: '20260717',
+    symbol: 'SPY',
+    underlyingConId: 756733,
+    resourceKey: 'SPY|756733',
+    resourceGeneration: 9,
+  });
+  const plan = planNextRung({
+    ...common,
+    greeksMap: new Map([['607.5C', fresh({ ask: 1.2, bid: 1.1 })]]),
+  });
+  assert.deepEqual(plan.payload, {
+    intent: 'open', action: 'BUY', strike: 607.5, right: 'C', qty: 1,
+    expiry: '20260717', limit: 1.25, symbol: 'SPY',
+  });
+});
+
+test('guest close and native exits preserve the guest symbol', () => {
+  const guestPosition = position({
+    symbol: 'SPY', expiry: '20260717', strike: 600, qty: 3,
+  });
+  const guestContext = {
+    activeSymbol: 'SPY', guestActive: true, cockpitExpiry: '20260717', now: NOW,
+  };
+  assert.equal(planClosePosition({ position: guestPosition, ...guestContext }).payload.symbol, 'SPY');
+  const exits = planAttachedExits({
+    position: guestPosition,
+    tp: 6,
+    sl: 2,
+    trail: 0.5,
+    trailSupported: true,
+    ocaToken: 'guest',
+    ...guestContext,
+  });
+  assert.ok(exits.legs.every(({ payload }) => payload.symbol === 'SPY'));
+  assert.deepEqual(exits.legs.map(({ payload }) => (
+    payload.limit != null ? 'LMT' : payload.stop != null ? 'STP' : 'TRAIL'
+  )), ['LMT', 'STP', 'TRAIL']);
+});
+
 test('reverse keeps exact source identity and plans one opposite OTM target request', () => {
   const plan = planReversePosition({
     position: position(),
@@ -157,6 +220,24 @@ test('reverse keeps exact source identity and plans one opposite OTM target requ
     position: position(), activeSymbol: 'SPX', cockpitExpiry: EXPIRY,
     cockpitPrice: 7588, reverseSupported: false,
   }).code, 'reverse-unsupported');
+});
+
+test('guest reverse targets an actually listed OTM strike on an irregular grid', () => {
+  const plan = planReversePosition({
+    position: position({
+      symbol: 'SPY', expiry: '20260717', strike: 605, type: 'call',
+    }),
+    activeSymbol: 'SPY',
+    cockpitExpiry: '20260717',
+    cockpitPrice: 601.2,
+    strikeStep: 2.5,
+    listedStrikes: [590, 595, 600, 602.5, 607.5],
+    reverseSupported: true,
+  });
+  assert.equal(plan.ok, true);
+  assert.deepEqual(plan.payload.target, {
+    symbol: 'SPY', strike: 600, right: 'P', expiry: '20260717',
+  });
 });
 
 test('working exits block every competing position route and malformed contracts fail closed', () => {

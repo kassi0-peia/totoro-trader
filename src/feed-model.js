@@ -124,6 +124,14 @@ function guestEnvelopeMatches(state, msg) {
     && Number(state.guest.conId) === Number(msg.conId);
 }
 
+function guestQuoteEnvelopeMatches(state, msg) {
+  return !!state?.guest
+    && state.guestResourceKey === msg?.guestResourceKey
+    && state.guestResourceGeneration === msg?.guestResourceGeneration
+    && state.guest.symbol === msg?.symbol
+    && Number(state.guest.conId) === Number(msg?.guestUnderlyingConId);
+}
+
 function invalidateQuoteTimestamps(greeksMap) {
   const next = new Map();
   for (const [key, row] of greeksMap || []) {
@@ -410,6 +418,35 @@ export function applyMessage(s, msg, clock = Date.now) {
   // One-shot snapshot quote for a strike outside the streamed chain — merge it
   // into the greeks map so tooltips/modals find it via the normal lookup.
   if (msg.type === 'quoteResult') {
+    // An exact active-guest snapshot (used by far strikes/rung) rejoins that
+    // guest's generation-fenced chain map. It must never fall into posQuotes or
+    // repaint a replacement resource that happens to share the same ticker.
+    if (msg.symbol && msg.symbol !== 'SPX' && msg.guestResourceKey != null) {
+      if (!guestQuoteEnvelopeMatches(s, msg)) return s;
+      const type = msg.right === 'C' ? 'call' : 'put';
+      const key = optionKey(msg.strike, type);
+      const prev = s.guestGreeksMap.get(key);
+      const next = new Map(s.guestGreeksMap);
+      next.set(key, {
+        strike: msg.strike,
+        type,
+        premium: msg.premium ?? prev?.premium ?? msg.last ?? null,
+        delta: msg.delta ?? prev?.delta,
+        gamma: msg.gamma ?? prev?.gamma,
+        theta: msg.theta ?? prev?.theta,
+        vega: msg.vega ?? prev?.vega,
+        iv: msg.iv ?? prev?.iv,
+        bid: msg.bid ?? null,
+        ask: msg.ask ?? null,
+        bidTs: msg.bidTs ?? null,
+        askTs: msg.askTs ?? null,
+        dayHigh: msg.dayHigh ?? prev?.dayHigh,
+        dayLow: msg.dayLow ?? prev?.dayLow,
+        tickTs: msg.tickTs ?? null,
+        snapshotTs: msg.snapshotTs ?? msg.ts,
+      });
+      return { ...s, guestGreeksMap: next };
+    }
     // A guest-position snapshot quote lives in its own map, keyed by the full
     // contract — never merged into the SPX greeks map (a TSLA 315C must not
     // collide with SPX strikes, and the expiry guard below is SPX-specific).

@@ -200,15 +200,18 @@ export function planNextRung({
   guestActive = false,
   cockpitExpiry = null,
   greeksMap = null,
+  strikeStep = 5,
+  listedStrikes = [],
+  guestContext = null,
   now = Date.now(),
 } = {}) {
-  if (normalizePositionSymbol(activeSymbol) !== 'SPX' || guestActive) {
-    return fail('rung-not-spx', 'RUNG is SPX-only — return to SPX first');
-  }
+  const symbol = normalizePositionSymbol(activeSymbol);
+  const guest = symbol !== 'SPX';
+  if (guest && !guestActive) return fail('inactive-contract', `Open ${symbol} before adding a rung`);
   const open = (Array.isArray(positions) ? positions : []).filter((position) => (
     position?.status === 'open'
     && position.side === 'long'
-    && positionSymbol(position) === 'SPX'
+    && positionSymbol(position) === symbol
     && position.expiry === cockpitExpiry
   ));
   if (!open.length) return fail('no-ladder', 'No ladder yet — open the first rung manually');
@@ -218,14 +221,51 @@ export function planNextRung({
   const type = last.type;
   if (type !== 'call' && type !== 'put') return fail('invalid-position', 'Ladder contract is invalid');
   const strikes = open.filter((position) => position.type === type).map((position) => position.strike);
-  const strike = type === 'put' ? Math.min(...strikes) - 25 : Math.max(...strikes) + 25;
+  let strike;
+  if (guest) {
+    const discovered = [...new Set((Array.isArray(listedStrikes) ? listedStrikes : [])
+      .map(Number)
+      .filter((value) => Number.isFinite(value) && value > 0))]
+      .sort((a, b) => a - b);
+    strike = type === 'put'
+      ? [...discovered].reverse().find((candidate) => candidate < Math.min(...strikes))
+      : discovered.find((candidate) => candidate > Math.max(...strikes));
+    if (!positivePrice(strike)) {
+      return fail('no-listed-rung', `No further listed ${type.toUpperCase()} strike is available`);
+    }
+    if (!guestContext
+        || guestContext.symbol !== symbol
+        || !Number.isSafeInteger(Number(guestContext.underlyingConId))
+        || !guestContext.resourceKey
+        || !Number.isSafeInteger(Number(guestContext.resourceGeneration))) {
+      return fail('guest-context', 'Exact guest quote authority is unavailable');
+    }
+  } else {
+    if (!positivePrice(strikeStep)) return fail('invalid-grid', 'Strike grid is unavailable');
+    const rungStep = 5 * strikeStep;
+    strike = type === 'put' ? Math.min(...strikes) - rungStep : Math.max(...strikes) + rungStep;
+  }
   const quote = greeksMap instanceof Map ? liveQuote(greeksMap, strike, type) : null;
   const limit = marketableLimitForAction(quote, 'BUY', now);
   if (limit == null) {
     return fail(
       'quote-needed',
       `No quote yet for ${strike}${rightOf(type)} — fetching, tap again in a second`,
-      { strike, type, quoteRequest: { strike, right: rightOf(type), expiry: cockpitExpiry } },
+      {
+        strike,
+        type,
+        quoteRequest: {
+          strike,
+          right: rightOf(type),
+          expiry: cockpitExpiry,
+          ...(guest ? {
+            symbol,
+            underlyingConId: guestContext.underlyingConId,
+            resourceKey: guestContext.resourceKey,
+            resourceGeneration: guestContext.resourceGeneration,
+          } : {}),
+        },
+      },
     );
   }
   return {
@@ -237,6 +277,7 @@ export function planNextRung({
     payload: {
       intent: 'open', action: 'BUY', strike, right: rightOf(type), qty: 1,
       expiry: cockpitExpiry, limit,
+      ...(guest ? { symbol } : {}),
     },
   };
 }
@@ -248,6 +289,7 @@ export function planReversePosition({
   cockpitExpiry = null,
   cockpitPrice = null,
   strikeStep = 5,
+  listedStrikes = [],
   reverseSupported = false,
 } = {}) {
   const positionFailure = requireOpenPosition(position);
@@ -268,7 +310,22 @@ export function planReversePosition({
   if (!positivePrice(cockpitPrice) || !positivePrice(strikeStep)) {
     return fail('invalid-cockpit', 'Current chart price is unavailable');
   }
-  const targetStrike = nearestOtmStrike(cockpitPrice, targetType, strikeStep);
+  const symbol = positionSymbol(position);
+  let targetStrike;
+  if (symbol === 'SPX') {
+    targetStrike = nearestOtmStrike(cockpitPrice, targetType, strikeStep);
+  } else {
+    const discovered = [...new Set((Array.isArray(listedStrikes) ? listedStrikes : [])
+      .map(Number)
+      .filter((value) => Number.isFinite(value) && value > 0))]
+      .sort((a, b) => a - b);
+    targetStrike = targetType === 'call'
+      ? discovered.find((candidate) => candidate > cockpitPrice)
+      : [...discovered].reverse().find((candidate) => candidate < cockpitPrice);
+    if (!positivePrice(targetStrike)) {
+      return fail('no-listed-target', `No listed OTM ${targetType.toUpperCase()} strike is available`);
+    }
+  }
   return {
     ok: true,
     kind: 'reverse',
@@ -276,13 +333,13 @@ export function planReversePosition({
     targetStrike,
     payload: {
       source: {
-        symbol: positionSymbol(position),
+        symbol,
         strike: position.strike,
         right: rightOf(position.type),
         expiry: position.expiry,
       },
       target: {
-        symbol: positionSymbol(position),
+        symbol,
         strike: targetStrike,
         right: rightOf(targetType),
         expiry: cockpitExpiry,

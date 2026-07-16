@@ -25,7 +25,7 @@ function writeLastQty(q) {
   } catch { /* localStorage unavailable — memory is best-effort */ }
 }
 
-export default function TradeModal({ pending, theme, series, onRefresh, onCancel, onExecute, executionEnabled = false, accountType = null, guest = false }) {
+export default function TradeModal({ pending, theme, series, onRefresh, onCancel, onExecute, executionEnabled = false, accountType = null, guest = false, guestMarket = false }) {
   const canvasRef = useRef(null);
   const [cursor, setCursor] = useState(null); // {x,y} over the premium graph
   const [qty, setQty] = useState(readLastQty);
@@ -33,24 +33,24 @@ export default function TradeModal({ pending, theme, series, onRefresh, onCancel
   // no limit the bridge routes a real MKT, and a market sell into the thin
   // overnight book is a blank check in the worst direction.
   const sell = pending?.side === 'sell';
-  // Guest tickets are positive-limit-only (the bridge rejects a guest MKT), so
-  // the ticket opens on LMT and the MKT arm is disabled. The chosen limit may
-  // rest; only amber lightning deliberately crosses the ask. SPX defaults to MKT.
-  const [orderKind, setOrderKind] = useState(guest || sell ? 'LMT' : 'MKT');
+  const marketAllowed = !guest || guestMarket;
+  // BUY-to-open defaults MKT for SPX and exact guests on an updated bridge.
+  // SELL-to-open remains limit-only for every symbol.
+  const [orderKind, setOrderKind] = useState(sell || !marketAllowed ? 'LMT' : 'MKT');
   const [limitStr, setLimitStr] = useState('');
   const [tpStr, setTpStr] = useState('');  // optional bracket take-profit (SELL LMT, native — works overnight)
   const [slStr, setSlStr] = useState('');  // optional bracket stop (IBKR-simulated; unreliable pre-midnight)
 
   useEffect(() => {
     setQty(readLastQty());
-    setOrderKind(guest || sell ? 'LMT' : 'MKT');
+    setOrderKind(sell || !marketAllowed ? 'LMT' : 'MKT');
     // Prefill the limit with the side you cross to: BUY lifts the ask, a SELL
     // hits the bid — so the pre-filled ticket is already marketable.
     const px = sell ? pending?.bid : pending?.ask;
     setLimitStr(px != null ? px.toFixed(2) : '');
     setTpStr('');
     setSlStr('');
-  }, [pending?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [pending?.id, marketAllowed]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const limit = orderKind === 'LMT' ? parseFloat(limitStr) : null;
   const limitOk = orderKind === 'MKT' || (Number.isFinite(limit) && limit > 0);
@@ -298,9 +298,13 @@ export default function TradeModal({ pending, theme, series, onRefresh, onCancel
           <div className="order-kind">
             <button
               className={`kind-btn${orderKind === 'MKT' ? ' active' : ''}`}
-              onClick={() => !guest && !sell && setOrderKind('MKT')}
-              disabled={guest || sell}
-              data-tip={sell ? 'Sells are limit-only — a market sell into a thin book is a blank check' : guest ? 'Guest orders require a positive limit and may rest — MKT is SPX-only' : undefined}
+              onClick={() => marketAllowed && !sell && setOrderKind('MKT')}
+              disabled={!marketAllowed || sell}
+              data-tip={sell
+                ? 'Sells are limit-only — a market sell into a thin book is a blank check'
+                : guest && !guestMarket
+                  ? 'Guest MKT needs the updated bridge'
+                  : undefined}
             >MKT</button>
             <button
               className={`kind-btn${orderKind === 'LMT' ? ' active' : ''}`}

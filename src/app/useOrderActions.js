@@ -442,6 +442,14 @@ export default function useOrderActions({
       guestActive,
       cockpitExpiry,
       greeksMap: cockpitGreeksMap,
+      strikeStep,
+      listedStrikes: guestActive ? guest?.strikes : null,
+      guestContext: guestActive ? {
+        symbol: activeSymbol,
+        underlyingConId: guest?.conId,
+        resourceKey: guest?.resourceKey,
+        resourceGeneration: guest?.resourceGeneration,
+      } : null,
     });
     if (!plan.ok) {
       if (plan.quoteRequest) feed.requestQuote(plan.quoteRequest);
@@ -454,7 +462,7 @@ export default function useOrderActions({
     dispatchPositionLifecycle({
       type: POSITION_LIFECYCLE.OPEN_SUBMITTED,
       row: {
-        symbol: 'SPX', type: plan.type, side: 'long', strike: plan.strike, qty: 1, expiry: cockpitExpiry,
+        symbol: activeSymbol, type: plan.type, side: 'long', strike: plan.strike, qty: 1, expiry: cockpitExpiry,
         status: 'pending', openRef: ref, entryPremium: null, estPremium: plan.limit,
         entryPrice: cockpitPrice, openedAt: Date.now(), greeksLive: g,
       },
@@ -488,6 +496,7 @@ export default function useOrderActions({
       cockpitExpiry,
       cockpitPrice,
       strikeStep,
+      listedStrikes: guestActive ? guest?.strikes : null,
       reverseSupported: !!feed.caps?.reverseTransaction,
     });
     if (!plan.ok) { showToast(plan.reason, 'err'); return; }
