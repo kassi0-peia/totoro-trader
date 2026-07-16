@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import { createOrderGateway } from './order-gateway.js';
 import { createOrderRequestRegistry } from './order-request-registry.js';
+import { parseQuickOrderRef } from './quick-order-deadline.js';
 import { optionRouteKey } from './reduce-only.js';
 
 const ACCOUNT = 'DU111';
@@ -52,8 +53,17 @@ function harness({
   guestContext = null,
   positions = [],           // authoritative rows: { account, qty, contract }
   placeOrderFails = null,   // (orderId) => boolean — throw from ib.placeOrder
+  nowMs = Date.UTC(2026, 6, 14, 14, 30, 0, 125),
 } = {}) {
-  const calls = { places: [], cancels: [], published: [], broadcasts: [], logs: [], fills: [] };
+  const calls = {
+    places: [],
+    cancels: [],
+    published: [],
+    broadcasts: [],
+    logs: [],
+    fills: [],
+    quickHazards: [],
+  };
   const timers = [];
   const broker = {
     placeOrder(orderId, contract, order) {
@@ -62,7 +72,17 @@ function harness({
     },
     cancelOrder(orderId, manualCancelTime) { calls.cancels.push({ orderId, manualCancelTime }); },
   };
-  const state = { connected, executionReady, routingLock, account, streamedQuote, snapshotQuote, guestContext, positions };
+  const state = {
+    connected,
+    executionReady,
+    routingLock,
+    account,
+    streamedQuote,
+    snapshotQuote,
+    guestContext,
+    positions,
+    nowMs,
+  };
   const registry = createOrderRequestRegistry();
   const gateway = createOrderGateway({
     getBroker: () => (state.connected ? broker : null),
@@ -94,9 +114,19 @@ function harness({
     broadcast: (message) => calls.broadcasts.push(message),
     publish: (target, message) => { if (target?.readyState === 1) calls.published.push(message); },
     onOrderFilled: (event) => calls.fills.push(event),
+    onQuickRecoveryHazard: (hazard) => calls.quickHazards.push(hazard),
     log: (message) => calls.logs.push(message),
     quickCancelMs: 10_000,
-    scheduleTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
+    clock: () => state.nowMs,
+    scheduleTimeout: (fn, ms) => {
+      const timer = { id: timers.length + 1, fn, ms, cleared: false };
+      timers.push(timer);
+      return timer.id;
+    },
+    clearScheduledTimeout: (id) => {
+      const timer = timers.find((candidate) => candidate.id === id);
+      if (timer) timer.cleared = true;
+    },
   });
   return {
     gateway,
@@ -105,7 +135,12 @@ function harness({
     state,
     timers,
     ws: { readyState: 1 },
-    fireTimers() { for (const t of timers.splice(0)) t.fn(); },
+    fireTimers() {
+      for (const timer of timers.splice(0)) {
+        if (!timer.cleared) timer.fn();
+      }
+    },
+    activeTimers: () => timers.filter((timer) => !timer.cleared),
     broadcastsOfType: (type) => calls.broadcasts.filter((m) => m.type === type),
   };
 }
@@ -137,6 +172,9 @@ test('SPX BUY-to-open with no limit routes a real MKT when a fresh ask witnesses
   assert.equal(order.transmit, true);
   assert.equal(order.outsideRth, true);
   assert.equal(order.totalQuantity, 1);
+  assert.equal(order.tif, 'DAY');
+  assert.equal('goodTillDate' in order, false);
+  assert.equal('orderRef' in order, false);
   assert.equal(contract.tradingClass, 'SPXW');
 });
 
@@ -339,6 +377,222 @@ test('an openOrder echo with an empty broker ocaGroup does not wipe the bracket 
 
 // ── Quick orders ────────────────────────────────────────────────────────────
 
+test('a quick LMT carries a broker-owned UTC GTD tied to its order id', () => {
+  const h = harness();
+  const ack = h.gateway.placeOrderRequest(h.ws, openBuy({ limit: 2.55, quick: true }));
+  assert.equal(ack.accepted, true);
+
+  const { order } = h.calls.places[0];
+  assert.equal(order.orderType, 'LMT');
+  assert.equal(order.tif, 'GTD');
+  assert.equal(order.goodTillDate, '20260714-14:30:11');
+  const parsed = parseQuickOrderRef(order.orderRef, { orderId: 10 });
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.brokerDeadlineMs, Date.UTC(2026, 6, 14, 14, 30, 11));
+
+  const record = h.gateway.getOwnOrder(10);
+  assert.equal(record.quick, true);
+  assert.equal(record.orderRef, order.orderRef);
+  assert.equal(record.tif, 'GTD');
+  assert.equal(record.goodTillDate, order.goodTillDate);
+  assert.equal(record.quickCancelAtMs, h.state.nowMs + 10_000);
+  assert.equal(record.quickBrokerDeadlineMs, parsed.brokerDeadlineMs);
+  assert.equal(h.activeTimers().length, 1);
+  assert.equal(h.activeTimers()[0].ms, 10_000); // exact local timer, not rounded GTD
+});
+
+test('quick MKT remains a real market order but carries the same restart-safe GTD', () => {
+  const h = harness();
+  const ack = h.gateway.placeOrderRequest(h.ws, openBuy({ quick: true }));
+  assert.equal(ack.accepted, true);
+  const { order } = h.calls.places[0];
+  assert.equal(order.orderType, 'MKT');
+  assert.equal(order.tif, 'GTD');
+  assert.equal(order.goodTillDate, '20260714-14:30:11');
+  assert.equal(parseQuickOrderRef(order.orderRef, { orderId: 10 }).ok, true);
+  assert.equal(h.activeTimers().length, 1);
+  assert.equal(h.activeTimers()[0].ms, 10_000);
+});
+
+test('an ordinary LMT remains DAY and receives no quick metadata or timer', () => {
+  const h = harness();
+  h.gateway.placeOrderRequest(h.ws, openBuy({ limit: 2.55 }));
+  const { order } = h.calls.places[0];
+  assert.equal(order.tif, 'DAY');
+  assert.equal('goodTillDate' in order, false);
+  assert.equal('orderRef' in order, false);
+  assert.equal(h.activeTimers().length, 0);
+});
+
+test('a placement openOrder echo preserves the earlier exact timer and deduplicates scheduling', () => {
+  const h = harness();
+  h.gateway.placeOrderRequest(h.ws, openBuy({ limit: 2.55, quick: true }));
+  const placed = h.calls.places[0];
+  const echo = {
+    ...placed.order,
+    clientId: CLIENT_ID,
+    permId: 700,
+  };
+  h.gateway.onOpenOrder(10, placed.contract, echo, { status: 'Submitted' });
+  h.gateway.onOpenOrder(10, placed.contract, echo, { status: 'Submitted' });
+
+  assert.equal(h.activeTimers().length, 1);
+  assert.equal(h.activeTimers()[0].ms, 10_000);
+  assert.equal(h.calls.quickHazards.length, 0);
+});
+
+test('a restarted gateway records TTQ1 metadata but never revives a local timer', () => {
+  const first = harness();
+  first.gateway.placeOrderRequest(first.ws, openBuy({ limit: 2.55, quick: true }));
+  const placed = first.calls.places[0];
+  const recovered = harness({ nowMs: first.state.nowMs + 5_000 });
+  const echo = {
+    ...placed.order,
+    clientId: CLIENT_ID,
+    permId: 701,
+  };
+
+  const result = recovered.gateway.onOpenOrder(10, placed.contract, echo, { status: 'Submitted' });
+  recovered.gateway.onOpenOrder(10, placed.contract, echo, { status: 'Submitted' });
+  assert.equal(result.quickRecovery.code, 'RECOVERABLE');
+  assert.equal(recovered.activeTimers().length, 0);
+  assert.equal(recovered.gateway.getOwnOrder(10).quick, true);
+  assert.equal(recovered.gateway.getOwnOrder(10).orderRef, placed.order.orderRef);
+});
+
+test('a fresh recovery proof retires only the still-matching exact TTQ1 record', () => {
+  const first = harness();
+  first.gateway.placeOrderRequest(first.ws, openBuy({ limit: 2.55, quick: true }));
+  const placed = first.calls.places[0];
+  const recovered = harness({ nowMs: first.state.nowMs + 5_000 });
+  const echo = { ...placed.order, clientId: CLIENT_ID, permId: 713 };
+  recovered.gateway.onOpenOrder(10, placed.contract, echo, { status: 'Submitted' });
+  const row = {
+    orderId: 10,
+    order: echo,
+    killOrderIdentity: {
+      cancellable: true,
+      ambiguous: false,
+      account: ACCOUNT,
+      clientId: CLIENT_ID,
+      orderId: 10,
+      permId: 713,
+    },
+  };
+
+  assert.equal(recovered.gateway.retireProvenQuickOrders([{ ...row,
+    killOrderIdentity: { ...row.killOrderIdentity, permId: 999 },
+  }]), 0);
+  assert.equal(recovered.gateway.workingOrdersList().length, 1);
+  assert.equal(recovered.gateway.retireProvenQuickOrders([row]), 1);
+  assert.equal(recovered.gateway.getOwnOrder(10).status, 'RecoveredTerminal');
+  assert.equal(recovered.gateway.workingOrdersList().length, 0);
+
+  // A late exact status still refines the neutral proof result and records the
+  // fill rather than being lost because recovery hid the row from the UI.
+  recovered.gateway.onOrderStatus(10, 'Filled', 1, 0, 2.55, 713, 0, 2.55, CLIENT_ID);
+  assert.equal(recovered.gateway.getOwnOrder(10).status, 'Filled');
+  assert.equal(recovered.calls.fills.length, 1);
+});
+
+test('expired own TTQ1 metadata is surfaced once but never locally cancelled by recovery', () => {
+  const first = harness();
+  first.gateway.placeOrderRequest(first.ws, openBuy({ limit: 2.55, quick: true }));
+  const placed = first.calls.places[0];
+  const parsed = parseQuickOrderRef(placed.order.orderRef, { orderId: 10 });
+  const recovered = harness({ nowMs: parsed.brokerDeadlineMs });
+  const echo = { ...placed.order, clientId: CLIENT_ID, permId: 702 };
+
+  const result = recovered.gateway.onOpenOrder(10, placed.contract, echo, { status: 'Submitted' });
+  recovered.gateway.onOpenOrder(10, placed.contract, echo, { status: 'Submitted' });
+  assert.equal(result.quickRecovery.code, 'DEADLINE_EXPIRED');
+  assert.equal(recovered.calls.quickHazards.length, 1);
+  assert.equal(recovered.calls.quickHazards[0].authoritative, true);
+  assert.equal(recovered.activeTimers().length, 0);
+  assert.equal(recovered.calls.cancels.length, 0);
+});
+
+test('malformed or mismatched own TTQ1 metadata surfaces a non-authoritative hazard', () => {
+  const malformed = harness();
+  malformed.gateway.onOpenOrder(10, spxwContract(6300, 'C'), {
+    account: ACCOUNT,
+    clientId: CLIENT_ID,
+    permId: 703,
+    action: 'BUY',
+    totalQuantity: 1,
+    orderType: 'LMT',
+    tif: 'GTD',
+    goodTillDate: '20260714-14:30:11',
+    orderRef: 'TTQ1:bad',
+  }, { status: 'Submitted' });
+  assert.equal(malformed.calls.quickHazards.length, 1);
+  assert.equal(malformed.calls.quickHazards[0].code, 'MALFORMED_ORDER_REF');
+  assert.equal(malformed.calls.quickHazards[0].authoritative, false);
+  assert.equal(malformed.activeTimers().length, 0);
+
+  const first = harness();
+  first.gateway.placeOrderRequest(first.ws, openBuy({ limit: 2.55, quick: true }));
+  const placed = first.calls.places[0];
+  const mismatch = harness();
+  mismatch.gateway.onOpenOrder(11, placed.contract, {
+    ...placed.order,
+    clientId: CLIENT_ID,
+    permId: 704,
+  }, { status: 'Submitted' });
+  assert.equal(mismatch.calls.quickHazards.length, 1);
+  assert.equal(mismatch.calls.quickHazards[0].code, 'ORDER_ID_MISMATCH');
+  assert.equal(mismatch.calls.quickHazards[0].authoritative, false);
+  assert.equal(mismatch.activeTimers().length, 0);
+});
+
+test('foreign TTQ1 metadata stays read-only and cannot schedule or surface a cancellation hazard', () => {
+  const first = harness();
+  first.gateway.placeOrderRequest(first.ws, openBuy({ limit: 2.55, quick: true }));
+  const placed = first.calls.places[0];
+  const recovered = harness();
+  const result = recovered.gateway.onOpenOrder(10, placed.contract, {
+    ...placed.order,
+    clientId: 99,
+    permId: 705,
+  }, { status: 'Submitted' });
+
+  assert.equal(result.own, false);
+  assert.equal(result.quickRecovery.code, 'FOREIGN_ORDER');
+  assert.equal(recovered.activeTimers().length, 0);
+  assert.equal(recovered.calls.quickHazards.length, 0);
+  assert.equal(recovered.gateway.workingOrdersList()[0].cancellable, false);
+});
+
+test('same-client TTQ1 rows from another or unknown account never schedule or surface cancellation', () => {
+  const first = harness();
+  first.gateway.placeOrderRequest(first.ws, openBuy({ limit: 2.55, quick: true }));
+  const placed = first.calls.places[0];
+
+  for (const rowAccount of ['DU999', '']) {
+    const recovered = harness();
+    const result = recovered.gateway.onOpenOrder(10, placed.contract, {
+      ...placed.order,
+      account: rowAccount,
+      clientId: CLIENT_ID,
+      permId: rowAccount ? 706 : 707,
+    }, { status: 'Submitted' });
+    assert.equal(result.own, true, 'API client ownership alone may still be recorded');
+    assert.equal(result.quickRecovery.code, 'FOREIGN_ORDER');
+    assert.equal(recovered.activeTimers().length, 0);
+    assert.equal(recovered.calls.quickHazards.length, 0);
+  }
+});
+
+test('a selected-account change prevents an already-scheduled quick timer from cancelling', () => {
+  const h = harness();
+  h.gateway.placeOrderRequest(h.ws, openBuy({ limit: 2.55, quick: true }));
+  assert.equal(h.activeTimers().length, 1);
+  h.state.account = 'DU999';
+  h.fireTimers();
+  assert.equal(h.calls.cancels.length, 0);
+  assert.match(h.calls.logs.at(-1), /selected account no longer matches/);
+});
+
 test('an unfilled quick order auto-cancels when its window expires', () => {
   const h = harness();
   const ack = h.gateway.placeOrderRequest(h.ws, openBuy({ limit: 2.55, quick: true }));
@@ -351,6 +605,40 @@ test('an unfilled quick order auto-cancels when its window expires', () => {
   const [autoCancel] = h.broadcastsOfType('orderAutoCancel');
   assert.equal(autoCancel.orderId, 10);
   assert.equal(autoCancel.clientRef, 'ref-1');
+  assert.match(autoCancel.reason, /cancel requested/);
+
+  // A late openOrder echo before broker GTD must not create a second local
+  // cancel timer after the exact timer already requested cancellation.
+  const placed = h.calls.places[0];
+  h.gateway.onOpenOrder(10, placed.contract, {
+    ...placed.order,
+    clientId: CLIENT_ID,
+    permId: 706,
+  }, { status: 'PendingCancel' });
+  assert.equal(h.activeTimers().length, 0);
+});
+
+test('a partially filled multi-lot quick order auto-cancels every live remainder', () => {
+  const h = harness();
+  const ack = h.gateway.placeOrderRequest(h.ws, openBuy({ qty: 5, limit: 2.55, quick: true }));
+  assert.equal(ack.accepted, true);
+  assert.equal(h.calls.places[0].order.totalQuantity, 5);
+
+  h.gateway.onOrderStatus(10, 'Submitted', 1, 4, 2.55, 700, 0, 2.55, CLIENT_ID);
+  h.fireTimers();
+
+  assert.deepEqual(h.calls.cancels.map((c) => c.orderId), [10]);
+  const [autoCancel] = h.broadcastsOfType('orderAutoCancel');
+  assert.equal(autoCancel.orderId, 10);
+  assert.match(autoCancel.reason, /4 remaining/);
+});
+
+test('a terminal multi-lot quick order is not cancelled even with a stale remaining witness', () => {
+  const h = harness();
+  h.gateway.placeOrderRequest(h.ws, openBuy({ qty: 5, limit: 2.55, quick: true }));
+  h.gateway.onOrderStatus(10, 'Cancelled', 1, 4, 2.55, 700, 0, 2.55, CLIENT_ID);
+  h.fireTimers();
+  assert.equal(h.calls.cancels.length, 0);
 });
 
 test('a filled quick order is never auto-cancelled', () => {
@@ -362,6 +650,29 @@ test('a filled quick order is never auto-cancelled', () => {
   assert.equal(h.calls.fills.length, 1);
   assert.equal(h.calls.fills[0].orderId, 10);
   assert.equal(h.broadcastsOfType('fill').length, 1);
+});
+
+test('terminal status, hard rejection, and disconnect each invalidate a quick timer', () => {
+  const terminal = harness();
+  terminal.gateway.placeOrderRequest(terminal.ws, openBuy({ limit: 2.55, quick: true }));
+  terminal.gateway.onOrderStatus(10, 'Cancelled', 0, 1, 0, 700, 0, 0, CLIENT_ID);
+  assert.equal(terminal.activeTimers().length, 0);
+  terminal.fireTimers();
+  assert.equal(terminal.calls.cancels.length, 0);
+
+  const rejected = harness();
+  rejected.gateway.placeOrderRequest(rejected.ws, openBuy({ limit: 2.55, quick: true }));
+  rejected.gateway.onOrderError(10, 201, new Error('rejected'));
+  assert.equal(rejected.activeTimers().length, 0);
+  rejected.fireTimers();
+  assert.equal(rejected.calls.cancels.length, 0);
+
+  const disconnected = harness();
+  disconnected.gateway.placeOrderRequest(disconnected.ws, openBuy({ limit: 2.55, quick: true }));
+  disconnected.gateway.disconnect();
+  assert.equal(disconnected.activeTimers().length, 0);
+  disconnected.fireTimers();
+  assert.equal(disconnected.calls.cancels.length, 0);
 });
 
 // ── Cancel identity ─────────────────────────────────────────────────────────
@@ -468,6 +779,18 @@ test('a hard reject fails the order; a warning leaves it live', () => {
   assert.equal(h.gateway.onOrderError(11, 399, new Error('held until the open')), true);
   assert.equal(h.gateway.getOwnOrder(11).status, 'submitted');
   assert.equal(h.broadcastsOfType('orderWarning').length, 1);
+});
+
+test('GTD and time-in-force validation errors are hard order rejections', () => {
+  for (const code of [111, 334, 336, 337]) {
+    const h = harness();
+    h.gateway.placeOrderRequest(h.ws, openBuy({ quick: true }));
+    assert.equal(h.activeTimers().length, 1);
+    assert.equal(h.gateway.onOrderError(10, code, new Error(`reject ${code}`)), true);
+    assert.equal(h.gateway.getOwnOrder(10).status, 'error');
+    assert.equal(h.activeTimers().length, 0);
+    assert.equal(h.broadcastsOfType('orderError').length, 1);
+  }
 });
 
 test('a terminal foreign fill is stamped with the contract authority revision', () => {

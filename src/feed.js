@@ -111,6 +111,41 @@ export function sendWsJson(ws, message) {
   }
 }
 
+// A revisioned armed command must survive a tab crash that happens after the
+// socket send but before React/localStorage effects run. Persist the pending
+// model first, publish it to the caller's synchronous ref second, and only then
+// hand bytes to the WebSocket. Nothing in this helper retries a failed send.
+export function persistArmedCommandBeforeSend({
+  storage,
+  key,
+  serialized,
+  onPersisted,
+  send,
+} = {}) {
+  if (!storage || typeof storage.setItem !== 'function'
+      || typeof key !== 'string' || !key
+      || typeof serialized !== 'string'
+      || typeof onPersisted !== 'function'
+      || typeof send !== 'function') {
+    return { persisted: false, sent: false };
+  }
+  try {
+    storage.setItem(key, serialized);
+  } catch {
+    return { persisted: false, sent: false };
+  }
+  try {
+    onPersisted();
+  } catch {
+    return { persisted: true, sent: false };
+  }
+  try {
+    return { persisted: true, sent: send() === true };
+  } catch {
+    return { persisted: true, sent: false };
+  }
+}
+
 export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent, onGuestEvent } = {}) {
   const [snapshot, setSnapshot] = useState(createInitialSnapshot);
 
@@ -172,7 +207,10 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent, onGuestEvent }
       socket.onopen = () => {
         if (socketRef.current !== socket) return;
         guestClientReadyRef.current = false;
-        setSnapshot((s) => ({ ...s, socketOpen: true, guestClientReady: false }));
+        // Raw armedState is a witness from one exact socket/session. App keeps
+        // its own offline confirmed cache; the transport must not relabel an
+        // older process's raw packet as fresh while this socket awaits snapshot.
+        setSnapshot((s) => ({ ...s, socketOpen: true, guestClientReady: false, armedState: null }));
         sendHello();
       };
 
@@ -207,7 +245,8 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent, onGuestEvent }
         }
         // Order lifecycle events are transient — hand them to the callback.
         if (msg.type === 'orderAck' || msg.type === 'fill' || msg.type === 'orderError' || msg.type === 'orderWarning' || msg.type === 'orderAutoCancel' || msg.type === 'cancelAck' ||
-            msg.type === 'armedFired' || msg.type === 'armedFailed' || msg.type === 'armedRejected' || msg.type === 'armedCleared') {
+            msg.type === 'armedFired' || msg.type === 'armedFailed' || msg.type === 'armedRejected' || msg.type === 'armedCleared' ||
+            msg.type === 'armedQtyUpdated' || msg.type === 'armedQtyRejected' || msg.type === 'armedCommandRejected') {
           onOrderEventRef.current?.(msg, {
             positionsRevision: positionsAuthorityRef.current.positionsRevision,
           });
@@ -246,7 +285,11 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent, onGuestEvent }
           ...applyMessage(s, { type: 'status', connected: false }),
           socketOpen: false,
           guestClientReady: false,
+          armedState: null,
           positionAuthoritySourceRevision: null,
+          // Capabilities belong to this exact bridge process. Never let a
+          // reconnect briefly expose an order-shaping control from the old one.
+          caps: {},
         }));
         if (!cancelled) scheduleRetry();
       };
@@ -304,6 +347,10 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent, onGuestEvent }
     return requestId;
   }, []);
 
+  // Revision-bound commands need their request id before the pending state is
+  // persisted. Reuse the same per-tab/runtime namespace as normal orders.
+  const createRequestId = useCallback(() => clientRefGeneratorRef.current(), []);
+
   // Ask the bridge for a one-shot snapshot quote (far strikes outside the chain).
   const requestQuote = useCallback((payload) => {
     return sendWsJson(socketRef.current, { type: 'quote', ...payload });
@@ -344,10 +391,11 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent, onGuestEvent }
     return sendWsJson(socketRef.current, { type: 'journal' });
   }, []);
 
-  // ⚔ armed orders: wholesale-set the bridge's list (watchlist pattern — the
-  // client owns it and re-sends on reconnect; the bridge re-validates each).
-  const sendArmed = useCallback((orders) => {
-    return sendWsJson(socketRef.current, { type: 'armed', orders });
+  // One exact compare-and-commit command. App owns pending-state persistence;
+  // this transport never rebuilds or re-sends it on reconnect.
+  const sendArmedCommand = useCallback((command) => {
+    if (command?.type !== 'armedCommand' || command?.protocol !== 1) return false;
+    return sendWsJson(socketRef.current, command);
   }, []);
 
   // Attach/edit/clear a one-line note on a fill row (today or any journal day).
@@ -391,5 +439,5 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent, onGuestEvent }
     return sendWsJson(socketRef.current, { type: 'watchlist', symbols });
   }, []);
 
-  return { ...snapshot, sendOrder, sendCancel, sendKill, sendReverse, requestQuote, requestHistory, requestOptHistory, requestReplayDay, requestJournal, sendFillNote, sendFillShot, sendArmed, searchSymbols, activateSymbol, deactivateSymbol, setWatchlist };
+  return { ...snapshot, createRequestId, sendOrder, sendCancel, sendKill, sendReverse, sendArmedCommand, requestQuote, requestHistory, requestOptHistory, requestReplayDay, requestJournal, sendFillNote, sendFillShot, searchSymbols, activateSymbol, deactivateSymbol, setWatchlist };
 }

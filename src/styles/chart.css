@@ -27,9 +27,18 @@
   left: 0;
   right: 0;
   bottom: 0;
-  z-index: 20;
+  z-index: 24;
   display: flex;
   flex-direction: column;
+}
+.bottom-dismiss-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 23;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: default;
 }
 .bottom-grab {
   display: block;
@@ -70,6 +79,7 @@
   /* Touch has no hover, and positions must never hide behind a gesture on
      the phone — the drawer is statically open, exactly the old layout. */
   .bottom-zone { position: static; }
+  .bottom-dismiss-layer { display: none; }
   .bottom-grab { display: none; }
   .bottom-panel {
     height: auto;
@@ -172,8 +182,7 @@
 .rec-btn,
 .quick-btn,
 .cw-btn,
-.rung-btn,
-.daylevels-btn {
+.rung-btn {
   position: absolute;
   bottom: 30px;
   width: 34px;
@@ -201,15 +210,12 @@
 .cw-btn:hover { color: var(--c-accent); border-color: var(--c-accent); }
 .rung-btn { right: 264px; }                 /* one-click ladder rung (toggle in gear panel) */
 .rung-btn:hover { color: var(--c-accent); border-color: var(--c-accent); }
-.daylevels-btn { right: 306px; }            /* day-levels overlay (SPX-only, opt-in) */
 .snap-now-btn:hover,
 .fs-btn:hover,
 .axis-prem-btn:hover,
 .axis-prem-btn.active,
 .vol-btn:hover,
 .vol-btn.active,
-.daylevels-btn:hover,
-.daylevels-btn.active,
 .rec-btn:hover {
   color: var(--c-accent);
   border-color: var(--c-accent);
@@ -438,6 +444,11 @@
   outline: none;
 }
 
+.armed-axis-label.withheld {
+  border-style: dashed;
+  opacity: 0.72;
+}
+
 .armed-axis-guide {
   position: absolute;
   right: 100%;
@@ -519,6 +530,63 @@
   padding-top: 3px;
   font-size: 9px;
   letter-spacing: 0.03em;
+}
+
+.armed-axis-sync-warning {
+  padding-top: 6px;
+  color: var(--c-loss);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.armed-axis-qty {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--c-border);
+  color: var(--c-muted);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+}
+
+.armed-axis-qty > span b {
+  color: var(--c-text);
+  font-size: 11px;
+}
+
+.armed-axis-qty-actions {
+  display: flex;
+  gap: 3px;
+}
+
+.armed-axis-qty-actions button {
+  min-width: 32px;
+  height: 23px;
+  padding: 0 5px;
+  border: 1px solid var(--c-border);
+  border-radius: 4px;
+  background: var(--c-surfaceAlt);
+  color: var(--c-text);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 9px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.armed-axis-qty-actions button:hover:not(:disabled),
+.armed-axis-qty-actions button:focus-visible {
+  border-color: var(--armed-axis-color, var(--c-accent));
+  color: var(--armed-axis-color, var(--c-accent));
+  outline: none;
+}
+
+.armed-axis-qty-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.28;
 }
 
 .armed-axis-disarm {

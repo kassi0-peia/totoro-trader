@@ -65,6 +65,7 @@
   transition: left 280ms cubic-bezier(0.4, 0, 0.2, 1), opacity 140ms;
 }
 .trades-pull:hover { opacity: 1; }
+.trades-pull.open { z-index: 26; }
 
 /* Invisible left-edge strip — hover 2s (or click) to peek the drawer open. */
 .trades-hotzone {
@@ -81,7 +82,10 @@
 .trades-peek-layer {
   position: absolute;
   inset: 0;
-  z-index: 15;
+  /* An open side drawer is the top surface; its scrim must swallow the bottom
+     grab just as the open bottom drawer's z23 scrim swallows this drawer's
+     closed pull/hotzone. One outside click therefore dismisses only. */
+  z-index: 25;
   overflow: hidden;
 }
 .trades-scrim {
@@ -336,6 +340,13 @@
 /* ============ MOBILE ============ */
 
 @media (max-width: 720px) {
+  /* The header's feed dot already carries connection safety on a phone. The
+     desktop account/search row and fixed footer repeat that information and
+     consume scarce vertical space, so mobile keeps only the real cockpit. */
+  .symbol-search-row,
+  .footer { display: none; }
+  .app { padding-bottom: env(safe-area-inset-bottom); }
+
   .header {
     padding: 10px 12px;
   }
@@ -381,11 +392,6 @@
   .cw-btn, .rec-btn, .axis-prem-btn { display: none; }
   .tf-label { display: none; }
   .tf-panic:not(.tf-replay) { display: none; }
-  .symbol-search-row { padding: 0 10px; }
-  /* The control line slims to just the acct badge on mobile: multi-symbol
-     search is desktop-first (Phase A), quick/bus hidden above. */
-  .symbol-search-row .symbol-search { display: none; }
-
   /* Move Close-all / IBKR to a full-width row under the timeframe buttons. */
   .tf-bar { flex-wrap: wrap; }
   .tf-actions { margin-left: 0; flex-basis: 100%; gap: 10px; }

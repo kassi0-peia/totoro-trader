@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 
 // ── Bottom drawer (kisa 2026-07-10: "hide everything below the chart") ──
 // At rest the chart runs edge-to-edge. The invisible band along the bottom
@@ -10,23 +10,12 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 // not hide behind a gesture on the phone).
 //
 // Self-contained: no feed/props. Returns the open state + setter (the keyboard
-// layer's Esc handler closes it), the derived bottomShown, the band/footer
-// dwell handlers, and the refs the band/footer/click-away use.
+// layer's Esc handler closes it), the derived bottomShown, and the band/footer
+// dwell handlers. App renders a real dismiss layer while open so an outside
+// click cannot fall through into the chart.
 export default function useBottomDrawer() {
   const [bottomOpen, setBottomOpen] = useState(false);
-  const bottomZoneRef = useRef(null);
   const bottomHoverTimer = useRef(null);
-  const footerRef = useRef(null); // the whole footer is a trigger too (kisa: the 14px band was "v small")
-  useEffect(() => {
-    if (!bottomOpen) return;
-    const onDoc = (e) => {
-      if (bottomZoneRef.current?.contains(e.target)) return;
-      if (footerRef.current?.contains(e.target)) return; // footer clicks toggle, not close-then-reopen
-      setBottomOpen(false);
-    };
-    document.addEventListener('mousedown', onDoc);
-    return () => document.removeEventListener('mousedown', onDoc);
-  }, [bottomOpen]);
   // Shared by the band and the footer: dwell 1.5s to arm, click to toggle.
   const armBottom = useCallback(() => {
     clearTimeout(bottomHoverTimer.current);
@@ -38,5 +27,5 @@ export default function useBottomDrawer() {
     setBottomOpen((v) => !v);
   }, []);
   const bottomShown = bottomOpen;
-  return { bottomOpen, setBottomOpen, bottomShown, armBottom, disarmBottom, toggleBottom, bottomZoneRef, footerRef };
+  return { bottomOpen, setBottomOpen, bottomShown, armBottom, disarmBottom, toggleBottom };
 }

@@ -35,6 +35,9 @@ export function createInitialSnapshot() {
     // Server-owned close-then-reopen transaction. A partial/uncertain close
     // never becomes a browser-issued second order.
     reverseState: { phase: 'IDLE', active: false, transactionId: null, routingLocked: false },
+    // Server-authoritative, revisioned armed-entry state. Browser storage is a
+    // cache only; null means this bridge has not published authority yet.
+    armedState: null,
     caps: {},              // bridge capability flags (e.g. trail) — empty until the snapshot says
     trades: [],            // today's fills (blotter)
     positions: [],         // IBKR-authoritative open option positions
@@ -165,6 +168,12 @@ export function applyMessage(s, msg, clock = Date.now) {
       reverseState: msg.reverseState && typeof msg.reverseState === 'object'
         ? { ...msg.reverseState }
         : s.reverseState,
+      // A snapshot is the authority envelope for this exact socket. Explicitly
+      // missing/null armed state must not preserve a prior bridge process's raw
+      // witness; App retains its separately normalized offline cache.
+      armedState: msg.armedState && typeof msg.armedState === 'object'
+        ? { ...msg.armedState }
+        : null,
       // Bridge capability flags (absent on an old bridge = all false) — see
       // the snapshot builder's caps note. Gates order fields the bridge must
       // understand to route safely.
@@ -240,6 +249,11 @@ export function applyMessage(s, msg, clock = Date.now) {
       ...s,
       reverseState,
     };
+  }
+
+  if (msg.type === 'armedState') {
+    const { type: _messageType, ...armedState } = msg;
+    return { ...s, armedState };
   }
 
   if (msg.type === 'historyResult') {

@@ -193,16 +193,15 @@ export default function useOrderActions({
         entryPrice: cockpitPrice, openedAt: Date.now(), greeksLive: g,
       },
     });
-    // Routing is unchanged — red MKT still routes a real MKT. But IBKR holds an
-    // option MKT placed outside RTH until the overnight session opens (~00:10 ET),
-    // so the position will sit pending for a while. Say so, so the long pending
-    // reads as expected and doesn't invite a cancel-and-refire snowball.
-    const heldOvernight = market && feed.source === 'ES';
+    // Red remains a real MKT, but every lightning order is momentary: the
+    // bridge adds a restart-safe broker deadline and requests cancellation of
+    // any live remainder after ten seconds. Ordinary EXECUTE-ticket MKT orders
+    // remain DAY and can still be held outside RTH.
     showToast(
       market
-        ? `⚡ BUY 1 ${strike}${rightOf(type)} MKT${heldOvernight ? ' — held until ~00:10 overnight' : ''}`
+        ? `⚡ BUY 1 ${strike}${rightOf(type)} MKT · 10s lifetime`
         : `⚡ BUY 1 ${strike}${rightOf(type)} LMT ${limit.toFixed(2)}`,
-      heldOvernight ? 'warn' : 'ok'
+      'ok'
     );
     triggerPulse();
   };

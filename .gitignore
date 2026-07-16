@@ -12,6 +12,7 @@ server/.journal.json
 server/.journal-shots/
 server/.kill-lock.json
 server/.reverse-lock.json
+server/.armed-state.json
 
 # machine-local Claude Code settings
 .claude/settings.local.json
@@ -30,6 +31,8 @@ Screenshot from *.png
 
 # session recaps stay local (our little secret)
 RECAP-*.md
+*-HANDOFF-*.md
+totoro-handoff.md
 
 # Agent project instructions stay local (internal working docs)
 AGENTS.md

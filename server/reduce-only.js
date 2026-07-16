@@ -9,6 +9,10 @@ const TERMINAL_ORDER_STATUSES = new Set([
   'apicancelled',
   'inactive',
   'error',
+  // A complete fresh open-order snapshot proved a recovered quick order is no
+  // longer working, even when its final Filled/Cancelled status callback was
+  // lost during reconnect. A later exact callback may still refine this row.
+  'recoveredterminal',
 ]);
 
 function normalizedAccount(value) {

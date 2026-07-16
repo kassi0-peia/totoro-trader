@@ -27,6 +27,11 @@ import {
   orderIsCancellableByClient,
   ordersForAccount,
 } from './order-scope.js';
+import {
+  assessRecoveredQuickOrder,
+  createQuickOrderDeadline,
+  parseQuickOrderRef,
+} from './quick-order-deadline.js';
 import { assessReduceOnlyOrder, isTerminalOrderStatus, optionRouteKey } from './reduce-only.js';
 
 export const QUICK_CANCEL_MS = 10_000; // ⚡ unfilled-order lifetime before auto-cancel (kisa 2026-07-11)
@@ -35,11 +40,21 @@ export const QUICK_CANCEL_MS = 10_000; // ⚡ unfilled-order lifetime before aut
 // 161 means a cancellation was not accepted in the order's current state. It
 // is not proof that the order is terminal; keep it visible until a subsequent
 // openOrder/orderStatus snapshot establishes truth.
-const ORDER_REJECT_CODES = new Set([201, 202, 203, 321, 110, 463]);
+const ORDER_REJECT_CODES = new Set([
+  110, // price does not conform to the minimum price variation
+  111, // invalid time-in-force for this order type
+  201, 202, 203, 321,
+  334, // invalid Good Till Date order
+  336, // invalid time or time zone in Good Till Date
+  337, // invalid date in Good Till Date
+  463,
+]);
 
 // Working (unfilled, uncanceled) orders — shown on every device so a resting
 // order can always be seen and canceled, even after a page reload.
-const DEAD_ORDER_STATUSES = new Set(['Filled', 'Cancelled', 'ApiCancelled', 'Inactive', 'error']);
+const DEAD_ORDER_STATUSES = new Set([
+  'Filled', 'Cancelled', 'ApiCancelled', 'Inactive', 'error', 'RecoveredTerminal',
+]);
 
 export function createOrderGateway({
   // Broker port: returns the live IB API handle, or null when the bridge has no
@@ -62,9 +77,12 @@ export function createOrderGateway({
   broadcast = () => {},
   publish = () => {},
   onOrderFilled = () => {},
+  onQuickRecoveryHazard = () => {},
   log = () => {},
   quickCancelMs = QUICK_CANCEL_MS,
+  clock = () => Date.now(),
   scheduleTimeout = (fn, ms) => setTimeout(fn, ms),
+  clearScheduledTimeout = (handle) => clearTimeout(handle),
 } = {}) {
   // This bridge's own orders keep their numeric key because every placement/error
   // call made by this API client uses that namespace. reqAllOpenOrders also returns
@@ -73,6 +91,120 @@ export function createOrderGateway({
   // from our client id.
   const orders = new Map();        // own client orderId -> order record
   const foreignOrders = new Map(); // clientId+orderId (or permId fallback) -> read-only record
+  const quickTimers = new Map();   // own orderId -> one exact local/recovered timer
+  const surfacedQuickHazards = new Set();
+
+  function clearQuickTimer(orderId) {
+    const timer = quickTimers.get(orderId);
+    if (!timer) return false;
+    quickTimers.delete(orderId);
+    if (timer.handle != null) clearScheduledTimeout(timer.handle);
+    return true;
+  }
+
+  function clearQuickTimers() {
+    for (const orderId of [...quickTimers.keys()]) clearQuickTimer(orderId);
+  }
+
+  function scheduleQuickCancel(orderId, {
+    deadlineMs,
+    orderRef = null,
+    deadlineLabel = `after ${quickCancelMs / 1000}s`,
+  }) {
+    if (!Number.isSafeInteger(deadlineMs) || deadlineMs < 0) {
+      throw new TypeError('invalid quick cancel deadline');
+    }
+    const timerToken = orderRef ?? `local-mkt:${orderId}`;
+    const existing = quickTimers.get(orderId);
+    // The placement echo carries the later, whole-second broker GTD. Keep an
+    // already-scheduled exact local timer for the same TTQ1 identity; a restart
+    // has no such timer, so it schedules at the recovered broker deadline.
+    if (existing?.timerToken === timerToken && existing.deadlineMs <= deadlineMs) return false;
+    clearQuickTimer(orderId);
+
+    const entry = {
+      timerToken,
+      orderRef,
+      deadlineMs,
+      deadlineLabel,
+      handle: null,
+    };
+    quickTimers.set(orderId, entry);
+    const run = () => {
+      if (quickTimers.get(orderId) !== entry) return;
+      quickTimers.delete(orderId);
+      const o = orders.get(orderId);
+      if (!o || DEAD_ORDER_STATUSES.has(o.status)) return;
+      const selectedAccount = String(getAccount() ?? '').trim();
+      if (!selectedAccount || o.account !== selectedAccount) {
+        log(`[ibkr] ⚡ order ${orderId} cancel skipped: selected account no longer matches ${o.account || '(unknown)'}`);
+        return;
+      }
+      // An order id can be reused after reconnect. A durable quick-order timer is
+      // allowed to act only while the record still carries its exact TTQ1 ref.
+      if (entry.orderRef && o.orderRef !== entry.orderRef) return;
+      const remaining = Number(o.remaining);
+      if (Number.isFinite(remaining) && remaining <= 0) return;
+      const remainingLabel = Number.isFinite(remaining) && remaining > 0
+        ? `${remaining} remaining`
+        : 'live remainder';
+      try {
+        const ib = getBroker();
+        if (!ib) throw new Error('IBKR not connected');
+        ib.cancelOrder(orderId);
+        o.quickCancelRequested = true;
+        o.quickCancelRequestedAtMs = clock();
+        log(`[ibkr] ⚡ order ${orderId} (${o.strike}${o.right}) cancel requested: ${remainingLabel} ${entry.deadlineLabel}`);
+        broadcast({
+          type: 'orderAutoCancel',
+          clientRef: o.clientRef,
+          orderId,
+          strike: o.strike,
+          right: o.right,
+          reason: `cancel requested for ${remainingLabel} ${entry.deadlineLabel}, book moved`,
+        });
+      } catch (error) {
+        log(`[ibkr] ⚡ auto-cancel ${orderId} failed: ${error.message}`);
+      }
+    };
+    try {
+      entry.handle = scheduleTimeout(run, Math.max(0, deadlineMs - clock()));
+    } catch (error) {
+      if (quickTimers.get(orderId) === entry) quickTimers.delete(orderId);
+      throw error;
+    }
+    return true;
+  }
+
+  function surfaceQuickRecoveryHazard(stableKey, record, assessment) {
+    const key = [
+      stableKey,
+      assessment.code,
+      record.orderRef ?? '',
+      record.tif ?? '',
+      record.goodTillDate ?? '',
+    ].join('|');
+    if (surfacedQuickHazards.has(key)) return false;
+    surfacedQuickHazards.add(key);
+    const hazard = {
+      orderId: record.orderId,
+      orderKey: stableKey,
+      account: record.account,
+      clientId: record.clientId,
+      permId: record.permId,
+      orderRef: record.orderRef,
+      code: assessment.code,
+      reason: assessment.reason,
+      authoritative: assessment.authoritative,
+      brokerDeadlineMs: assessment.brokerDeadlineMs ?? null,
+    };
+    try {
+      onQuickRecoveryHazard(hazard);
+    } catch (error) {
+      log(`[ibkr] quick recovery hazard callback failed for ${stableKey}: ${error.message}`);
+    }
+    return true;
+  }
 
   function workingOrdersList() {
     const selectedAccount = getAccount();
@@ -192,6 +324,25 @@ export function createOrderGateway({
       registry.release(reservation.token);
       return reject(`order ID unavailable: ${error?.message || error}`);
     }
+    let quickDeadline = null;
+    if (quick) {
+      try {
+        quickDeadline = createQuickOrderDeadline({
+          nowMs: clock(),
+          timeoutMs: quickCancelMs,
+          orderId,
+        });
+        // Both lightning variants receive a broker-owned deadline. Red remains
+        // a real MKT; GTD changes only its lifetime, not its execution type.
+        // Ordinary EXECUTE-ticket MKT orders are not `quick` and stay DAY.
+        order.tif = 'GTD';
+        order.goodTillDate = quickDeadline.goodTillDate;
+        order.orderRef = quickDeadline.orderRef;
+      } catch (error) {
+        registry.release(reservation.token);
+        return reject(`quick deadline unavailable: ${error?.message || error}`);
+      }
+    }
     // Track every id before handing it to IBKR so a synchronous throw is treated
     // as submission-uncertain and receives a best-effort cancel too.
     // The parent goes out transmit:false when children exist; if a child placeOrder
@@ -200,30 +351,33 @@ export function createOrderGateway({
     const placedIds = [];
     let submissionAttempted = false;
     try {
-      orders.set(orderId, parentOrderRecord(plan, reduceOnly.applies ? reduceOnly.reduceOnly : null));
+      const parentRecord = parentOrderRecord(plan, reduceOnly.applies ? reduceOnly.reduceOnly : null);
+      if (quick) parentRecord.quick = true;
+      if (quickDeadline) {
+        Object.assign(parentRecord, {
+          quickCancelAtMs: quickDeadline.localDeadlineMs,
+          quickBrokerDeadlineMs: quickDeadline.brokerDeadlineMs,
+          orderRef: quickDeadline.orderRef,
+          tif: 'GTD',
+          goodTillDate: quickDeadline.goodTillDate,
+        });
+      }
+      orders.set(orderId, parentRecord);
       // Once the broker API call begins, a synchronous error is not proof that
       // nothing reached TWS. Consume the clientRef rather than let a retry create
       // a second real order with an uncertain first submission.
       submissionAttempted = true;
       placedIds.push(orderId);
       ib.placeOrder(orderId, contract, order);
-      // ⚡ auto-cancel: a quick order that hasn't filled inside its window has
-      // outlived its moment — cancel it rather than leave a zombie working at a
-      // price the book already left. Never fires on a filled/partial/cancelled
-      // order; quick orders are qty-1 with no bracket children.
+      // ⚡ auto-cancel: every live remainder that survives the quick window has
+      // outlived its moment. Multi-lot armed entries may fill partially, so cancel
+      // the remainder rather than leave it working at a price the book already
+      // left. Fully filled and otherwise-terminal orders remain untouched.
       if (quick) {
-        scheduleTimeout(() => {
-          const o = orders.get(orderId);
-          if (!o || (o.filled ?? 0) > 0) return;
-          if (['Filled', 'Cancelled', 'ApiCancelled', 'error'].includes(o.status)) return;
-          try {
-            getBroker().cancelOrder(orderId);
-            log(`[ibkr] ⚡ order ${orderId} (${o.strike}${o.right}) auto-cancelled: unfilled after ${quickCancelMs / 1000}s`);
-            broadcast({ type: 'orderAutoCancel', clientRef: o.clientRef, orderId, strike: o.strike, right: o.right, reason: `unfilled ${quickCancelMs / 1000}s, book moved` });
-          } catch (e) {
-            log(`[ibkr] ⚡ auto-cancel ${orderId} failed: ${e.message}`);
-          }
-        }, quickCancelMs);
+        scheduleQuickCancel(orderId, {
+          deadlineMs: quickDeadline.localDeadlineMs,
+          orderRef: quickDeadline.orderRef,
+        });
       }
       if (wantTp || wantSl) {
         if (wantTp) {
@@ -387,6 +541,15 @@ export function createOrderGateway({
       qty: order?.totalQuantity ?? existing?.qty,
       orderType: order?.orderType ?? existing?.orderType,
       limit: order?.lmtPrice ?? existing?.limit ?? null,
+      orderRef: (typeof order?.orderRef === 'string' && order.orderRef)
+        ? order.orderRef
+        : existing?.orderRef ?? null,
+      tif: (typeof order?.tif === 'string' && order.tif)
+        ? order.tif
+        : existing?.tif ?? null,
+      goodTillDate: (typeof order?.goodTillDate === 'string' && order.goodTillDate)
+        ? order.goodTillDate
+        : existing?.goodTillDate ?? null,
       // The ib decoder reads an unset broker group as '' and IBKR echoes
       // openOrder at placement; '' must not wipe a synthetic bracket group.
       ocaGroup: mergeBrokerOcaGroup(order?.ocaGroup, existing?.ocaGroup),
@@ -399,9 +562,36 @@ export function createOrderGateway({
       avgFillPrice: existing?.avgFillPrice ?? 0,
       contract: contract ? { ...contract } : existing?.contract ?? null,
     };
+    const selectedAccount = String(getAccount() ?? '').trim();
+    const quickOwn = own && !!selectedAccount && record.account === selectedAccount;
+    const quickRecovery = assessRecoveredQuickOrder({
+      orderId: identity.orderId,
+      own: quickOwn,
+      order,
+      nowMs: clock(),
+      maxFutureMs: quickCancelMs + 1000,
+    });
+    if (quickOwn && quickRecovery.authoritative) {
+      record.quick = true;
+      record.quickBrokerDeadlineMs = quickRecovery.brokerDeadlineMs;
+      // A restarted process cannot reconstruct the earlier millisecond-local
+      // deadline. Its safe local backstop is the exact broker GTD from TTQ1.
+      if (!existing?.quickCancelAtMs) record.quickCancelAtMs = quickRecovery.brokerDeadlineMs;
+    }
     target.set(mapKey, record);
+    if (own && (DEAD_ORDER_STATUSES.has(record.status) || isTerminalOrderStatus(record.status))) {
+      clearQuickTimer(identity.orderId);
+    }
+    if (quickOwn && quickRecovery.hazard && !DEAD_ORDER_STATUSES.has(record.status)) {
+      surfaceQuickRecoveryHazard(stableKey, record, quickRecovery);
+    }
     log(`[ibkr] recovered ${own ? 'own' : 'read-only foreign'} order ${stableKey}: ${record.action} ${record.strike}${record.right} (${record.status})`);
     publishOrders();
+    return {
+      own,
+      orderKey: stableKey,
+      quickRecovery,
+    };
   }
 
   function onOrderStatus(
@@ -455,6 +645,14 @@ export function createOrderGateway({
     o.remaining = remaining;
     o.avgFillPrice = avgFillPrice;
     if (identity.permId != null) o.permId = identity.permId;
+    const remainingQty = Number(remaining);
+    if (own && (
+      DEAD_ORDER_STATUSES.has(status)
+      || isTerminalOrderStatus(status)
+      || (Number.isFinite(remainingQty) && remainingQty <= 0)
+    )) {
+      clearQuickTimer(identity.orderId);
+    }
     // A foreign/recovered order carries no local revision witness, so once it
     // goes terminal with fills the reduce-only guard would count it as 0 and a
     // second close could over-flatten before the position callback lands. Stamp
@@ -506,6 +704,7 @@ export function createOrderGateway({
     const rejected = ORDER_REJECT_CODES.has(code) || code >= 10000;
     if (rejected) {
       o.status = 'error';
+      clearQuickTimer(reqId);
       log(`[ibkr] order ${reqId} (${o.action} ${o.strike}${o.right}) REJECTED ${code}: ${reason}`);
       broadcast({ type: 'orderError', clientRef: o.clientRef, orderId: reqId, code, reason });
     } else {
@@ -513,6 +712,41 @@ export function createOrderGateway({
       broadcast({ type: 'orderWarning', clientRef: o.clientRef, orderId: reqId, code, reason });
     }
     return true;
+  }
+
+  // A successful recovery proof says these exact TTQ1 identities are absent
+  // from a later openOrderEnd-delimited snapshot. Retire only a record that
+  // still matches every account/client/order/perm/ref witness; a reused or
+  // changed row is left untouched. The neutral terminal status avoids claiming
+  // Cancelled versus Filled while keeping the stale row out of working-order
+  // and reduce-only projections. A late broker status can still refine it.
+  function retireProvenQuickOrders(rows) {
+    const selectedAccount = String(getAccount() ?? '').trim();
+    if (!selectedAccount || !Array.isArray(rows)) return 0;
+    let retired = 0;
+    for (const row of rows) {
+      const orderId = Number(row?.orderId);
+      const witness = row?.killOrderIdentity;
+      const orderRef = row?.order?.orderRef;
+      const parsed = parseQuickOrderRef(orderRef, { orderId });
+      const record = Number.isSafeInteger(orderId) ? orders.get(orderId) : null;
+      if (!record || !parsed.recognized || witness?.cancellable !== true
+        || witness.account !== selectedAccount
+        || witness.clientId !== clientId
+        || witness.orderId !== orderId
+        || record.account !== witness.account
+        || record.clientId !== witness.clientId
+        || record.permId !== witness.permId
+        || record.orderRef !== orderRef
+        || DEAD_ORDER_STATUSES.has(record.status)
+        || isTerminalOrderStatus(record.status)) continue;
+      clearQuickTimer(orderId);
+      record.status = 'RecoveredTerminal';
+      record.remaining = 0;
+      retired++;
+    }
+    if (retired) publishOrders();
+    return retired;
   }
 
   // ── Records owned on behalf of the staged transactions ────────────────────
@@ -578,6 +812,8 @@ export function createOrderGateway({
   // ── Lifecycle / reads ─────────────────────────────────────────────────────
 
   function disconnect() {
+    clearQuickTimers();
+    surfacedQuickHazards.clear();
     orders.clear();
     foreignOrders.clear();
   }
@@ -589,6 +825,7 @@ export function createOrderGateway({
     onOpenOrder,
     onOrderStatus,
     onOrderError,
+    retireProvenQuickOrders,
     recordKillCloseOrder,
     recordReverseOpenOrder,
     markOrderSubmissionUncertain,
