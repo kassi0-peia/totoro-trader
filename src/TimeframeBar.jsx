@@ -1,10 +1,11 @@
 import React from 'react';
 
 const OPTIONS = [
-  { label: '1m', value: 1 },
-  { label: '5m', value: 5 },
-  { label: '15m', value: 15 },
-  { label: '60m', value: 60 },
+  // Minute buttons are bare numbers (kisa, 2026-07-16); only 4h/1D keep a unit.
+  { label: '1', value: 1 },
+  { label: '5', value: 5 },
+  { label: '15', value: 15 },
+  { label: '60', value: 60 },
   { label: '4h', value: 240 },
   { label: '1D', value: 1440 }
 ];

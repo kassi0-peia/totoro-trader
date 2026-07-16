@@ -326,10 +326,9 @@
 }
 
 /* ── Multi-symbol Phase A: symbol search under the ATM quote strip ──
-   A thin right-aligned row (kisa's placement, 2026-07-07): the collapsed 🔍 /
-   watchlist control leads the symbol group, then guest/open-position tabs flow
-   to its right. Guest/SPX chips appear only when needed. Desktop-first —
-   hidden on mobile. */
+   One thin row: the 🔍/watchlist control + symbol tabs pinned hard LEFT
+   (kisa, 2026-07-16), account/🚏/⚡ cluster hard right. Guest/SPX chips
+   appear only when needed. Desktop-first — hidden on mobile. */
 .symbol-search-row {
   display: flex;
   justify-content: flex-end;
@@ -343,6 +342,10 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  /* Pin the 🔍/watchlist + symbol tabs to the row's LEFT edge (kisa,
+     2026-07-16); the auto margin pushes the account/🚏/⚡ cluster to the
+     far right on its own. */
+  margin-right: auto;
 }
 .sym-search-control {
   position: relative;
