@@ -29,10 +29,10 @@ const localDayKey = (t) => {
   return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
 };
 
-const localMonthKey = (t) => {
-  const d = new Date(t);
-  return `${d.getFullYear()}-${d.getMonth()}`;
-};
+// Day-number labels are narrow; they get their own, tighter spacing target so
+// a zoomed-out hourly axis thins instead of piling "16 17 18…" on top of
+// each other (a 4h session day is only ~2 bars).
+const DAY_LABEL_PX = 40;
 
 export function selectTimeAxisLabels(slots, {
   timeframe,
@@ -41,20 +41,17 @@ export function selectTimeAxisLabels(slots, {
 } = {}) {
   if (!Array.isArray(slots) || !(candleW > 0) || !(targetPx > 0)) return [];
   const minBars = Math.max(1, Math.round(targetPx / candleW));
+  const minDayBars = Math.max(1, Math.round(DAY_LABEL_PX / candleW));
   const labels = [];
   let previousDay = null;
-  let previousMonth = null;
   let lastLabelIndex = -Infinity;
   for (let i = 0; i < slots.length; i++) {
     const candle = slots[i];
     if (!candle || !Number.isFinite(candle.t)) continue;
     const day = localDayKey(candle.t);
-    const month = localMonthKey(candle.t);
     const dayBoundary = previousDay !== null && day !== previousDay;
     const firstVisible = previousDay === null;
-    const monthBoundary = previousMonth !== null && month !== previousMonth;
     previousDay = day;
-    previousMonth = month;
     if (timeframe >= 1440) {
       if (firstVisible || i - lastLabelIndex >= minBars) {
         labels.push({
@@ -69,14 +66,15 @@ export function selectTimeAxisLabels(slots, {
     if (timeframe >= 60) {
       if (!firstVisible && !dayBoundary) continue;
       const date = new Date(candle.t);
-      const showMonth = monthBoundary || (firstVisible && date.getDate() === 1);
-      labels.push({
-        index: i,
-        kind: showMonth ? 'month' : 'date',
-        label: showMonth
-          ? date.toLocaleDateString([], { month: 'short' })
-          : String(date.getDate()),
-      });
+      // The month appears exactly once, as the axis's opening label; every
+      // later label is a bare day number, thinned by pixel distance.
+      if (firstVisible) {
+        labels.push({ index: i, kind: 'month', label: date.toLocaleDateString([], { month: 'short' }) });
+        lastLabelIndex = i;
+        continue;
+      }
+      if (i - lastLabelIndex < minDayBars) continue;
+      labels.push({ index: i, kind: 'date', label: String(date.getDate()) });
       lastLabelIndex = i;
       continue;
     }
