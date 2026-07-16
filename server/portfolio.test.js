@@ -530,3 +530,22 @@ test('constructor rejects missing or unsafe dependencies', () => {
     timers: {},
   }), /timers/);
 });
+
+test('a position contract with no exchange is stored routable (SMART), a real one is kept', () => {
+  // IBKR position callbacks omit the exchange. Downstream consumers need a
+  // routable contract: inactive-guest quote marks failed at the broker with
+  // "Please enter exchange", and KILL's exact-identity check refused the leg
+  // (fail-closed — it could not flatten a guest position). The conId pins the
+  // exact contract; SMART is only the routing instruction.
+  const h = harness();
+  h.portfolio.onManagedAccounts('DU111');
+  h.portfolio.beginInitialSync();
+  h.portfolio.onPosition('DU111', option({ conId: 9001, symbol: 'MSTR', tradingClass: 'MSTR', exchange: '' }), 5, 320);
+  h.portfolio.onPosition('DU111', option({ conId: 9002, strike: 7500, exchange: 'CBOE' }), 1, 900);
+  h.portfolio.onPositionEnd();
+  const rows = h.portfolio.publicSnapshot().positions;
+  const mstr = rows.find((p) => p.contract.conId === 9001);
+  const spx = rows.find((p) => p.contract.conId === 9002);
+  assert.equal(mstr.contract.exchange, 'SMART', 'missing exchange is stamped SMART');
+  assert.equal(spx.contract.exchange, 'CBOE', 'a real exchange is never overwritten');
+});
