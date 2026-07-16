@@ -43,6 +43,7 @@ import {
   buildArmedCreate,
   buildArmedDisarm,
   buildArmedQtyAdd,
+  buildArmedRetarget,
   createArmedAuthorityModel,
   disconnectArmedAuthority,
   parseArmedAuthorityCache,
@@ -650,6 +651,23 @@ export default function App() {
       buildArmedQtyAdd(model, { requestId, id, delta, createdAt: Date.now() })
     ));
     if (sent) showToast(`⚔ quantity +${delta} pending bridge confirmation`, 'warn');
+    return !!sent;
+  }, [armedCanExecuteMutation, armedDisplay.status, issueArmedCommand, showToast]);
+  const retargetArmed = useCallback((arm, newTrigger, dir) => {
+    if (!armedCanExecuteMutation) {
+      showToast(`⚔ trigger unchanged — ${armedDisplay.status}`, 'err');
+      return false;
+    }
+    const sent = issueArmedCommand((model, requestId) => (
+      buildArmedRetarget(model, {
+        requestId,
+        id: arm?.id,
+        newTrigger,
+        dir,
+        createdAt: Date.now(),
+      })
+    ));
+    if (sent) showToast(`⚔ RETARGETING · ${Number(arm.level).toFixed(2)} stays live until confirmed`, 'warn');
     return !!sent;
   }, [armedCanExecuteMutation, armedDisplay.status, issueArmedCommand, showToast]);
 
@@ -1956,6 +1974,7 @@ export default function App() {
               onCancelArmPlacement={cancelArmPlacement}
               onDisarmArmed={armedCanDisarm ? disarmArmed : null}
               onAddArmedQty={armedCanExecuteMutation ? addArmedQty : null}
+              onRetargetArmed={armedCanExecuteMutation ? retargetArmed : null}
               armedQtyMax={armedQtyMax}
               armedAuthorityStatus={armedDisplay.status}
               armedCanDisarm={armedCanDisarm}
