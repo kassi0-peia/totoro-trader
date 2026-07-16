@@ -8,7 +8,7 @@
 // It detects a double top (the two ears = a "totoro"), a triple top ("tritoro"),
 // and a failed breakout before collapse ("small paw 🐾"), names them on the chart.
 //
-// kisa's call (2026-06-22): decorative, not strictly useful — pulled out of the
+// the owner's call (2026-06-22): decorative, not strictly useful — pulled out of the
 // hot Chart.jsx render loop to slim it, but KEPT here to improve + re-add later.
 // This is a faithful copy of the original block (was Chart.jsx ~lines 729–817),
 // wrapped as a function with its draw-loop dependencies passed in.
@@ -33,7 +33,7 @@
 //     separate draw step. (It's currently one intertwined block.)
 //   • Confidence score (ear symmetry × valley depth × volume confirmation).
 //   • Optional alert/webhook when a fresh totoro completes at the live edge.
-//   • Tune simTolFor / depthTol against kisa's discord's real labelled examples.
+//   • Tune simTolFor / depthTol against the owner's discord's real labelled examples.
 // ─────────────────────────────────────────────────────────────────────────
 
 export function drawTotoroDetector(ctx, { view, price, bucketMs, layout, theme, priceToY, indexToX }) {

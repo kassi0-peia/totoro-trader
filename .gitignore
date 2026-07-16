@@ -50,3 +50,7 @@ totoro-review-tasks.md
 # personal launch helper (hardcodes ~/ibc paths)
 start-all.sh
 .claude/
+
+# local diagnostic artifacts
+server/.basis-cache.json.bak-*
+server/mark-audit-*.csv

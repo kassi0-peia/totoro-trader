@@ -5,7 +5,7 @@
 // safe/empty result so a malformed message can't drive requests onto the wire.
 //
 // The watchlist is quotes-only (no orders, no streaming): the bridge polls each
-// symbol with one-shot snapshot reqMktData on a slow cycle, because kisa's
+// symbol with one-shot snapshot reqMktData on a slow cycle, because the owner's
 // market-data line budget is already spent on the SPXW chain (or the guest
 // chain while a guest is active). SPX itself is excluded here — it's the home
 // instrument and already streams; the client pins it from the live feed.

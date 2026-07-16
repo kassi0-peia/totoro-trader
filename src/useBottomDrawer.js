@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from 'react';
 
-// ── Bottom drawer (kisa 2026-07-10: "hide everything below the chart") ──
+// ── Bottom drawer (the owner 2026-07-10: "hide everything below the chart") ──
 // At rest the chart runs edge-to-edge. The invisible band along the bottom
 // edge materializes the panel (tf-bar + positions) after a 1.5s hover —
 // same rhythm as the left trades drawer — or instantly on click; it FADES

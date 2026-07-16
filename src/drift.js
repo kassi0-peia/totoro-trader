@@ -1,4 +1,4 @@
-// Delta drift (kisa 2026-07-13): a 0.31-delta lotto quietly becoming a
+// Delta drift (the owner 2026-07-13): a 0.31-delta lotto quietly becoming a
 // 0.12-delta lotto is the earliest honest sign it's dying — before the
 // premium fully admits it. Entry delta is stamped on each fill row by the
 // bridge AT fill time (IBKR's own delta, never modeled after the fact);

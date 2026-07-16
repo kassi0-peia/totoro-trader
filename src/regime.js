@@ -1,6 +1,6 @@
 // Regime meter — is the tape TRENDING or CHOPPING right now?
 //
-// kisa's 0DTE playbook branches on trend-vs-chop, so the cockpit needs an honest,
+// the owner's 0DTE playbook branches on trend-vs-chop, so the cockpit needs an honest,
 // explainable read. We use Kaufman's Efficiency Ratio (ER) over the trailing
 // window of 1-minute closes:
 //

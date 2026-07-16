@@ -1,7 +1,7 @@
 import React, { useEffect } from 'react';
 import { armedContractChoices } from './app/armedPlacement.js';
 
-// Right-click strike menu (kisa, 2026-07-09): the ⚡-off half of the chart's
+// Right-click strike menu (the owner 2026-07-09): the ⚡-off half of the chart's
 // right-click gesture. Buy/sell arm the SAME confirm ticket a strike click
 // opens — the menu never sends an order itself. Sells are hidden in replay
 // (replay practices longs) and offline; the alert items manage the one-shot

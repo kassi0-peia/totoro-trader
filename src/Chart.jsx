@@ -387,7 +387,7 @@ export default function Chart({
   }, [view, size, theme.bg, clearHitLists, resetHover]);
 
   // Record a clip of the WHOLE SCREEN (getDisplayMedia) — cursor, drawers,
-  // toasts, armed cards, everything (kisa, 2026-07-16: the 07-13 canvas-capture
+  // toasts, armed cards, everything (the owner 2026-07-16: the 07-13 canvas-capture
   // workaround silently lost all of that; the chart alone isn't the story).
   // The original failure was never getDisplayMedia itself: Firefox anchors its
   // screen-share doorhanger to the toolbox userChrome.css collapses, so the

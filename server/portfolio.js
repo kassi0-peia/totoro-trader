@@ -369,7 +369,7 @@ export function createPortfolioController({
       : String(accountsValue ?? '').split(',');
     const first = normalizedAccount(values[0]) || null;
     if (!first) return false; // preserve the current account if an empty event arrives
-    // Selection is UNCHANGED (values[0]) — kisa's setups are single-account and
+    // Selection is UNCHANGED (values[0]) — the owner's setups are single-account and
     // fail-closing here could lock her out. Just surface the ambiguity loudly so
     // the UI can warn; we still route the first account only.
     const distinct = [...new Set(values.map(normalizedAccount).filter(Boolean))];
