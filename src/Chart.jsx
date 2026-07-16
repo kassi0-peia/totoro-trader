@@ -26,8 +26,11 @@ import { drawMarkers } from './chart/draw/markers.js';
 import { drawBusStops } from './chart/draw/busstops.js';
 import {
   buildArmedAxisGroups,
+  resolveArmedGuideGrab,
+  resolveArmedRetargetDrop,
   resolveChartClickIntent,
-  resolveChartContextTarget
+  resolveChartContextTarget,
+  snapArmedTrigger,
 } from './chart/interactionIntent.js';
 import {
   chartViewportStorageKey,
@@ -94,6 +97,7 @@ export default function Chart({
   onCancelArmPlacement = null,
   onDisarmArmed = null,
   onAddArmedQty = null,
+  onRetargetArmed = null,
   armedQtyMax = ARMED_AUTHORITY_MAX_QTY,
   armedAuthorityStatus = 'WAITING FOR ARMED AUTHORITY',
   armedCanDisarm = false,
@@ -127,6 +131,7 @@ export default function Chart({
   }, [showVolume]);
   const [recording, setRecording] = useState(false);    // screen-capture clip in progress
   const [armCursor, setArmCursor] = useState(null);     // exclusive trigger-level preview
+  const [armedRetarget, setArmedRetarget] = useState(null);
   const recRef = useRef(null);                          // active MediaRecorder
   const markerHitsRef = useRef([]); // point markers + closed-trade connector segments
   const ghostHitsRef = useRef([]);  // decision-replay ghost fills: [{ x, y, half, fill }]
@@ -439,6 +444,25 @@ export default function Chart({
       e.preventDefault();
       return;
     }
+    if (onRetargetArmed && layout && view) {
+      const rect = canvasRef.current?.getBoundingClientRect();
+      if (rect) {
+        const grab = resolveArmedGuideGrab({
+          x: e.clientX - rect.left,
+          y: e.clientY - rect.top,
+          armed,
+          layout,
+          priceToY,
+        });
+        if (grab) {
+          e.preventDefault();
+          canvasRef.current?.setPointerCapture?.(e.pointerId);
+          setArmedRetarget({ arm: grab.arm, candidate: grab.arm.level });
+          clearStrikeHover();
+          return;
+        }
+      }
+    }
     canvasRef.current?.setPointerCapture?.(e.pointerId);
     startDrag(e.clientX, e.clientY);
   };
@@ -458,6 +482,17 @@ export default function Chart({
       setArmCursor({ x, y, price: yToPrice(y) });
       return;
     }
+    if (armedRetarget) {
+      const rect = canvasRef.current?.getBoundingClientRect();
+      if (!rect || !layout || !view) return;
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      const candidate = x >= 0 && x <= layout.chartW && y >= layout.priceTop && y <= layout.priceBot
+        ? snapArmedTrigger(yToPrice(y), strikeStep)
+        : null;
+      setArmedRetarget((current) => current ? { ...current, candidate } : null);
+      return;
+    }
     if (dragRef.current) {
       handleDragMove(e.clientX, e.clientY);
       if (dragRef.current.moved) clearStrikeHover();
@@ -469,10 +504,28 @@ export default function Chart({
   const handlePointerUp = (e) => {
     if (e.pointerType !== 'mouse') return;
     if (armPlacement) return;
+    if (armedRetarget) {
+      const drag = armedRetarget;
+      setArmedRetarget(null);
+      suppressClickRef.current = performance.now() + 800;
+      const drop = resolveArmedRetargetDrop({
+        arm: drag.arm,
+        level: drag.candidate,
+        marketPrice: price,
+        strikeStep,
+      });
+      if (drop.ok) onRetargetArmed?.(drag.arm, drop.level, drop.dir);
+      return;
+    }
     endDrag();
   };
 
   const handlePointerCancel = (e) => {
+    if (armedRetarget) {
+      setArmedRetarget(null);
+      suppressClickRef.current = performance.now() + 800;
+      return;
+    }
     if (armPlacement) {
       setArmCursor(null);
       return;
@@ -580,6 +633,19 @@ export default function Chart({
     if (armPlacement) resetHover();
   }, [armPlacement?.strike, armPlacement?.right, armPlacement?.expiry, resetHover]);
 
+  useEffect(() => {
+    if (!armedRetarget) return undefined;
+    const cancel = (event) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      event.stopPropagation();
+      setArmedRetarget(null);
+      suppressClickRef.current = performance.now() + 800;
+    };
+    window.addEventListener('keydown', cancel, true);
+    return () => window.removeEventListener('keydown', cancel, true);
+  }, [armedRetarget]);
+
   // OHLCV legend data: hovered candle, else the latest one (TradingView-style).
   const ohlc = (() => {
     if (!tfCandles.length) return null;
@@ -639,7 +705,7 @@ export default function Chart({
   }
 
   return (
-    <div className={`chart-wrap${fullscreen ? ' fullscreen' : ''}${armPlacement ? ' arm-placement' : ''}`} ref={wrapRef}>
+    <div className={`chart-wrap${fullscreen ? ' fullscreen' : ''}${armPlacement ? ' arm-placement' : ''}${armedRetarget ? ' armed-retarget' : ''}`} ref={wrapRef}>
       {ohlc && (
         <div className="ohlc-legend">
           <span className="ohlc-pair" style={{ color: ohlc.up ? theme.up : theme.down }}>
@@ -658,10 +724,11 @@ export default function Chart({
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         onPointerCancel={handlePointerCancel}
-        onPointerLeave={armPlacement ? () => setArmCursor(null) : handlePointerLeave}
+        onPointerLeave={armPlacement ? () => setArmCursor(null) : armedRetarget ? undefined : handlePointerLeave}
         onClick={handleClickEvent}
         onContextMenu={(e) => {
           e.preventDefault(); // chart owns right-click; no browser menu
+          if (armedRetarget) return;
           if (armPlacement) {
             onCancelArmPlacement?.();
             return;
@@ -867,6 +934,17 @@ export default function Chart({
               : armPreview?.reason}
           </div>
         </>
+      )}
+      {armedRetarget?.candidate != null && layout && view && (
+        <div
+          className="arm-placement-line"
+          aria-hidden="true"
+          style={{
+            top: priceToY(armedRetarget.candidate),
+            width: layout.chartW,
+            borderColor: armedRetarget.arm.right === 'C' ? theme.callLine : theme.putLine,
+          }}
+        />
       )}
       <button
         className="fs-btn"
