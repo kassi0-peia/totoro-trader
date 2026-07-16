@@ -54,3 +54,15 @@ start-all.sh
 # local diagnostic artifacts
 server/.basis-cache.json.bak-*
 server/mark-audit-*.csv
+
+# personal workshop artifacts (local only)
+AGENTS.md
+BACKLOG.md
+spec-*.md
+server/mark-audit.js
+deploy/claude-click.sh
+deploy/launch-totoro.sh
+deploy/set-window-icon.py
+deploy/totoro-click.sh
+scripts/check-basis.mjs
+scripts/fetch-fri-close.mjs
