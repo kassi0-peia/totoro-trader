@@ -845,6 +845,20 @@ test('a hard reject fails the order; a warning leaves it live', () => {
   assert.equal(h.broadcastsOfType('orderWarning').length, 1);
 });
 
+test('a rejected CANCEL request never relabels the order — orderStatus stays lifecycle truth', () => {
+  // 10148 = "cannot be cancelled, state: Filled" (seen live 2026-07-16): the
+  // order FILLED; only the cancel bounced. 161/10147 are the same family.
+  for (const code of [161, 10147, 10148]) {
+    const h = harness({ orderIds: [10] });
+    h.gateway.placeOrderRequest(h.ws, openBuy({ clientRef: 'a', limit: 2.5 }));
+    h.gateway.onOrderStatus(10, 'Filled', 1, 0, 3.6, 4242, 0, 3.6, 17);
+    assert.equal(h.gateway.onOrderError(10, code, new Error(`cancel reject ${code}`)), true);
+    assert.equal(h.gateway.getOwnOrder(10).status, 'Filled', String(code));
+    assert.equal(h.broadcastsOfType('orderError').length, 0, String(code));
+    assert.equal(h.broadcastsOfType('orderWarning').length, 1, String(code));
+  }
+});
+
 test('GTD and time-in-force validation errors are hard order rejections', () => {
   for (const code of [111, 334, 336, 337]) {
     const h = harness();
