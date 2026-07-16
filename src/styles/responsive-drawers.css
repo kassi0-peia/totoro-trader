@@ -134,21 +134,17 @@
 /* In-flow since 2026-07-09 (kisa): lives in the symbol-search-row beside the 🔍
    instead of floating over the chart's top-right corner. */
 .chart-acct {
+  order: 2;
   display: flex;
   align-items: center;
   gap: 8px;
-  /* End the cluster left of the chart's ~64px price-label gutter (the old
-     float cleared it with right:72px; the row merge lost that — kisa
-     2026-07-10). The 🔍 alone stays at the edge, her 07-07 placement. */
-  margin-right: 28px;
-  transition: margin-right 160ms;
+  /* The watchlist + symbol tabs now lead this right-aligned row; account,
+     bus-stop, and lightning controls own the far-right edge. */
+  margin-right: 0;
   font-size: 10px;
   letter-spacing: 0.08em;
 }
-/* Axis premiums add a second number column to the right gutter — slide the
-   cluster further left so PAPER/🚏/⚡ never sit over it (the old float's
-   right:110px, in row terms). */
-.chart-acct--axis { margin-right: 64px; }
+.chart-acct--axis { margin-right: 0; }
 .chart-acct-id {
   color: var(--c-muted);
   font-variant-numeric: tabular-nums;
