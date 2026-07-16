@@ -24,6 +24,7 @@ export default function useCockpitSettings() {
   const [showPositions, setShowPositions] = useState(() => storedBool('tt.showPositions', true));
   const [showMarkers, setShowMarkers] = useState(() => storedBool('tt.showMarkers', true));
   const [dayLevelsOn, setDayLevelsOn] = useState(() => storedBool('tt.dayLevels', false));
+  const [showGridlines, setShowGridlines] = useState(() => storedBool('tt.showGridlines', true));
 
   const theme = THEMES[themeKey];
   const chartTheme = useMemo(
@@ -57,8 +58,9 @@ export default function useCockpitSettings() {
       localStorage.setItem('tt.showPositions', showPositions ? '1' : '0');
       localStorage.setItem('tt.showMarkers', showMarkers ? '1' : '0');
       localStorage.setItem('tt.dayLevels', dayLevelsOn ? '1' : '0');
+      localStorage.setItem('tt.showGridlines', showGridlines ? '1' : '0');
     } catch {}
-  }, [axisChain, rungButton, showOvn, showPositions, showMarkers, dayLevelsOn]);
+  }, [axisChain, rungButton, showOvn, showPositions, showMarkers, dayLevelsOn, showGridlines]);
 
   return {
     themeKey,
@@ -77,5 +79,7 @@ export default function useCockpitSettings() {
     setShowMarkers,
     dayLevelsOn,
     setDayLevelsOn,
+    showGridlines,
+    setShowGridlines,
   };
 }

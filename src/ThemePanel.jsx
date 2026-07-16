@@ -5,6 +5,7 @@ export default function ThemePanel({
   open, current, onPick, onClose,
   axisChain = false, onToggleAxisChain = null,
   dayLevelsOn = false, onToggleDayLevels = null,
+  showGridlines = true, onToggleGridlines = null,
   rungButton = false, onToggleRungButton = null,
   showOvn = true, onToggleShowOvn = null,
   showPositions = true, onToggleShowPositions = null,
@@ -47,6 +48,20 @@ export default function ThemePanel({
             aria-checked={dayLevelsOn}
             onClick={onToggleDayLevels}
             aria-label="Toggle day levels"
+          >
+            <span className="toggle-knob" />
+          </button>
+        </div>
+      )}
+      {onToggleGridlines && (
+        <div className="theme-toggle-row" data-tip="Show horizontal and vertical chart gridlines. Axis labels remain visible when off.">
+          <span>Gridlines</span>
+          <button
+            className={`toggle-switch${showGridlines ? ' on' : ''}`}
+            role="switch"
+            aria-checked={showGridlines}
+            onClick={onToggleGridlines}
+            aria-label="Toggle chart gridlines"
           >
             <span className="toggle-knob" />
           </button>

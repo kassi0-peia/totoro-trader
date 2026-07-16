@@ -106,6 +106,7 @@ export default function Chart({
   alerts = [],
   armed = [],
   dayLevels = null,
+  showGridlines = true,
   beLine = null,
   onMenu = null,
   apiRef = null,
@@ -303,7 +304,7 @@ export default function Chart({
     // on that cascade, so it too must not be reordered.
     // ─────────────────────────────────────────────────────────────────────────
 
-    drawGrid(ctx, { view, layout, theme, priceToY, indexToX, timeframe, showVolume, axisChain });
+    drawGrid(ctx, { view, layout, theme, priceToY, indexToX, timeframe, showVolume, axisChain, showGridlines });
 
     drawCandles(ctx, { view, layout, theme, priceToY, indexToX, price, positions, showPositions, source, showVolume });
 
@@ -329,7 +330,7 @@ export default function Chart({
     }
 
     busHitsRef.current = drawBusStops(ctx, { view, layout, theme, priceToY, indexToX, price, busStops, tfCandles, tToIdx, bucketMs });
-  }, [candles, price, positions, theme, size, view, layout, priceToY, indexToX, timeframe, showMarkers, showVolume, expectedMove, alerts, dayLevels, beLine, axisChain, strikeStep, greeksMap, ivol, timeToExpiryYears, source, showPositions, ghostFills, busStops, highlightPositionId, tfCandles, clearHitLists]);
+  }, [candles, price, positions, theme, size, view, layout, priceToY, indexToX, timeframe, showMarkers, showVolume, showGridlines, expectedMove, alerts, dayLevels, beLine, axisChain, strikeStep, greeksMap, ivol, timeToExpiryYears, source, showPositions, ghostFills, busStops, highlightPositionId, tfCandles, clearHitLists]);
 
   const {
     pinchRef,
