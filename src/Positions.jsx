@@ -55,10 +55,11 @@ export default function Positions({ positions, theme, onClose, onReverse, onCanc
     const m = 100 * (p.qty || 0) * plSign(p);
     acc.on = true;
     acc.delta += (p.greeksLive.delta || 0) * m;
+    acc.gamma += (p.greeksLive.gamma || 0) * m;
     acc.theta += (p.greeksLive.theta || 0) * m;
     acc.vega += (p.greeksLive.vega || 0) * m;
     return acc;
-  }, { on: false, delta: 0, theta: 0, vega: 0 });
+  }, { on: false, delta: 0, gamma: 0, theta: 0, vega: 0 });
   const fmtG = (v, dp = 0) => `${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(dp)}`;
 
   return (
@@ -96,7 +97,7 @@ export default function Positions({ positions, theme, onClose, onReverse, onCanc
           <div className="pl-block" data-tip="Net greeks of the open book: Δ share-equivalents · Θ $/day · ν $/vol pt (shorts flip sign)">
             <span>Greeks</span>
             <b className="net-greeks">
-              Δ{fmtG(net.delta)} · Θ{fmtG(net.theta)} · ν{fmtG(net.vega)}
+              Δ{fmtG(net.delta)} · Γ{fmtG(net.gamma, 1)} · Θ{fmtG(net.theta)} · ν{fmtG(net.vega)}
             </b>
           </div>
         )}

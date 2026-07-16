@@ -41,3 +41,15 @@ export function deltaDecayed(entry, now) {
 export function fmtDelta(d) {
   return Math.abs(d).toFixed(2).replace(/^0/, '');
 }
+
+// Gamma under the same genuine-source guard as liveDeltaOf: the 0 stamped on
+// snapshot/nodata/expired rows is a placeholder, not a gamma.
+export function liveGammaOf(g) {
+  if (!g || (g.source !== 'ibkr' && g.source !== 'mid')) return null;
+  return Number.isFinite(g.gamma) ? g.gamma : null;
+}
+
+// ".017" — gamma runs an order of magnitude under delta, so three decimals.
+export function fmtGamma(g) {
+  return Math.abs(g).toFixed(3).replace(/^0/, '');
+}

@@ -464,6 +464,7 @@ export default function PositionModal({
             {(anchor || pinned) && (
               <div className="pos-greek-strip" aria-label="Live position Greeks" style={{ '--pos-greek-color': color }}>
                 <span><i>Δ</i><b>{signedGreek(pos.greeksLive?.delta, 2)}</b></span>
+                <span><i>Γ</i><b>{signedGreek(pos.greeksLive?.gamma, 3)}</b></span>
                 <span><i>Θ</i><b>{signedGreek(pos.greeksLive?.theta, 2)}</b></span>
                 <span><i>ν</i><b>{signedGreek(pos.greeksLive?.vega, 2)}</b></span>
                 <span><i>IV</i><b>{iv}</b></span>
