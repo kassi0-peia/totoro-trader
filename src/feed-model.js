@@ -124,6 +124,19 @@ function guestEnvelopeMatches(state, msg) {
     && Number(state.guest.conId) === Number(msg.conId);
 }
 
+function invalidateQuoteTimestamps(greeksMap) {
+  const next = new Map();
+  for (const [key, row] of greeksMap || []) {
+    next.set(key, {
+      ...row,
+      bidTs: null,
+      askTs: null,
+      tickTs: null,
+    });
+  }
+  return next;
+}
+
 // Interpret one bridge message without owning any transport state. `clock` is
 // injectable so arrival timestamps are deterministic in tests.
 export function applyMessage(s, msg, clock = Date.now) {
@@ -139,6 +152,9 @@ export function applyMessage(s, msg, clock = Date.now) {
     const greeksMap = new Map();
     for (const g of msg.greeks || []) greeksMap.set(optionKey(g.strike, g.type), g);
     const goLive = !!msg.connected;
+    const connectionGreeksMap = goLive
+      ? greeksMap
+      : invalidateQuoteTimestamps(greeksMap.size ? greeksMap : s.greeksMap);
     return {
       ...s,
       live: goLive,
@@ -148,7 +164,10 @@ export function applyMessage(s, msg, clock = Date.now) {
       // used as a seed at connect. Live ticks below re-stamp it to arrival time.
       tickTs: msg.tickTs ?? s.tickTs,
       candles: goLive && msg.candles?.length ? msg.candles : s.candles,
-      greeksMap,
+      greeksMap: connectionGreeksMap,
+      guestGreeksMap: goLive
+        ? s.guestGreeksMap
+        : invalidateQuoteTimestamps(s.guestGreeksMap),
       source: msg.source || s.source,
       rth: typeof msg.rth === 'boolean' ? msg.rth : (goLive && msg.source === 'SPX'),
       expiry: msg.expiry ?? s.expiry,
@@ -352,8 +371,9 @@ export function applyMessage(s, msg, clock = Date.now) {
           updatedAt: nowMs(),
         }
         : s.reverseState,
+      greeksMap: invalidateQuoteTimestamps(s.greeksMap),
       guest: null,
-      guestGreeksMap: new Map(),
+      guestGreeksMap: invalidateQuoteTimestamps(s.guestGreeksMap),
       guestResourceKey: null,
       guestResourceGeneration: null,
       watchlistQuotes: {}

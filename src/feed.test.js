@@ -17,6 +17,7 @@ import {
   sendWsJson,
 } from './feed.js';
 import { replayAccess } from './app/replayAccess.js';
+import { marketableLimitForAction } from './order-payload.js';
 
 test('feed.js preserves the reducer export while transport and model stay separate', () => {
   assert.equal(reexportedApplyMessage, applyMessage);
@@ -240,6 +241,82 @@ test('status connected:false immediately fails closed and clears stale account a
   // Positions stay IBKR-authoritative until the bridge's following positions
   // reset arrives; status itself does not invent or discard portfolio data.
   assert.equal(s1.positions, positions);
+});
+
+test('IBKR disconnect invalidates cached HOME and guest quote timestamps until fresh ticks arrive', () => {
+  const now = 10_000;
+  const homeRow = {
+    strike: 7500, type: 'call', premium: 6.4,
+    bid: 6.3, ask: 6.5, bidTs: now - 100, askTs: now - 90, tickTs: now - 80,
+  };
+  const guestRow = {
+    strike: 600, type: 'put', premium: 2.2,
+    bid: 2.1, ask: 2.3, bidTs: now - 70, askTs: now - 60, tickTs: now - 50,
+  };
+  const connected = {
+    ...createInitialSnapshot(),
+    live: true,
+    greeksMap: new Map([['7500C', homeRow]]),
+    guest: { symbol: 'SPY', conId: 999 },
+    guestGreeksMap: new Map([['600P', guestRow]]),
+  };
+
+  const disconnected = applyMessage(connected, { type: 'status', connected: false });
+  const staleHome = disconnected.greeksMap.get('7500C');
+  const staleGuest = disconnected.guestGreeksMap.get('600P');
+  assert.equal(staleHome.bid, 6.3);
+  assert.equal(staleHome.ask, 6.5);
+  assert.equal(staleHome.bidTs, null);
+  assert.equal(staleHome.askTs, null);
+  assert.equal(staleHome.tickTs, null);
+  assert.equal(staleGuest.bid, 2.1);
+  assert.equal(staleGuest.ask, 2.3);
+  assert.equal(staleGuest.bidTs, null);
+  assert.equal(staleGuest.askTs, null);
+  assert.equal(staleGuest.tickTs, null);
+  assert.equal(marketableLimitForAction(staleHome, 'SELL', now), null);
+
+  const reconnected = applyMessage(disconnected, { type: 'status', connected: true });
+  const fresh = applyMessage(reconnected, {
+    type: 'greeks',
+    strike: 7500,
+    optionType: 'call',
+    premium: 6.4,
+    bid: 6.3,
+    ask: 6.5,
+    bidTs: now + 10,
+    askTs: now + 11,
+    tickTs: now + 12,
+  });
+  assert.equal(marketableLimitForAction(fresh.greeksMap.get('7500C'), 'SELL', now + 20), 6.2);
+});
+
+test('disconnected snapshot keeps quote prices but invalidates HOME and guest timestamps', () => {
+  const s0 = {
+    ...createInitialSnapshot(),
+    guestGreeksMap: new Map([['600C', {
+      strike: 600, type: 'call', bid: 4.9, ask: 5.1, bidTs: 90, askTs: 91, tickTs: 92,
+    }]]),
+  };
+  const s1 = applyMessage(s0, {
+    type: 'snapshot',
+    connected: false,
+    greeks: [{
+      strike: 7500, type: 'put', bid: 5.3, ask: 5.5, bidTs: 100, askTs: 101, tickTs: 102,
+    }],
+  });
+
+  assert.deepEqual(
+    { bid: s1.greeksMap.get('7500P').bid, ask: s1.greeksMap.get('7500P').ask },
+    { bid: 5.3, ask: 5.5 },
+  );
+  assert.equal(s1.greeksMap.get('7500P').bidTs, null);
+  assert.equal(s1.greeksMap.get('7500P').askTs, null);
+  assert.equal(s1.greeksMap.get('7500P').tickTs, null);
+  assert.equal(s1.guestGreeksMap.get('600C').bid, 4.9);
+  assert.equal(s1.guestGreeksMap.get('600C').bidTs, null);
+  assert.equal(s1.guestGreeksMap.get('600C').askTs, null);
+  assert.equal(s1.guestGreeksMap.get('600C').tickTs, null);
 });
 
 test('status connected:true changes connectivity without inventing account authority', () => {
