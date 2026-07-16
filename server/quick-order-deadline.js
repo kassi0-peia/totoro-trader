@@ -45,6 +45,62 @@ export function formatQuickGoodTillDate(epochMs) {
   return `${iso.slice(0, 4)}${iso.slice(5, 7)}${iso.slice(8, 10)}-${iso.slice(11, 19)}`;
 }
 
+const GTD_UTC_DASH_PATTERN = /^\d{8}-\d{2}:\d{2}:\d{2}$/;
+const GTD_ZONED_PATTERN = /^(\d{8}) (\d{2}:\d{2}:\d{2})(?: (\S+))?$/;
+
+function renderGtdInZone(epochMs, timeZone) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hour12: false,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).formatToParts(new Date(epochMs));
+  const get = (type) => parts.find((part) => part.type === type)?.value ?? '';
+  // Some ICU locales render midnight as '24'; GTD strings use '00'.
+  const hour = get('hour') === '24' ? '00' : get('hour');
+  return `${get('year')}${get('month')}${get('day')} ${hour}:${get('minute')}:${get('second')}`;
+}
+
+// The Gateway does NOT echo goodTillDate as the string it was given. A GTD
+// submitted in the dash-UTC form comes back normalized to the TWS/Gateway
+// display timezone ('YYYYMMDD HH:MM:SS Zone/Name'). Strict string equality
+// therefore flagged EVERY live quick order as a GTD hazard on its first
+// openOrder echo, and recovery cancelled it seconds after placement (first
+// live TTQ1 run, 2026-07-16). Compare the DEADLINE INSTANT instead: render
+// the known broker deadline in the echoed string's own zone and require an
+// exact match. An echo whose zone Intl cannot resolve, or whose instant
+// differs, remains a fail-closed hazard.
+export function quickGoodTillDateMatches(received, brokerDeadlineMs, { localTimeZone = null } = {}) {
+  if (!validEpochMs(brokerDeadlineMs) || brokerDeadlineMs % 1000 !== 0) return false;
+  const value = String(received ?? '').trim();
+  if (!value) return false;
+  if (GTD_UTC_DASH_PATTERN.test(value)) {
+    return value === formatQuickGoodTillDate(brokerDeadlineMs);
+  }
+  const match = GTD_ZONED_PATTERN.exec(value);
+  if (!match) return false;
+  const dateTime = `${match[1]} ${match[2]}`;
+  // A zone-less echo is ambiguous; accept only the two zones the Gateway
+  // plausibly meant (UTC, or the host zone the Gateway runs in). The horizon
+  // and expiry checks that follow still bound behavior by the orderRef
+  // deadline, never by this witness.
+  const zones = match[3]
+    ? [match[3]]
+    : ['UTC', localTimeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone];
+  return zones.some((zone) => {
+    if (!zone) return false;
+    try {
+      return renderGtdInZone(brokerDeadlineMs, zone) === dateTime;
+    } catch {
+      return false;
+    }
+  });
+}
+
 export function createQuickOrderDeadline({ nowMs, timeoutMs, orderId }) {
   if (!validEpochMs(nowMs)) throw new TypeError('invalid quick deadline clock');
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
@@ -200,11 +256,13 @@ export function assessRecoveredQuickOrder({
   }
 
   const expectedGoodTillDate = formatQuickGoodTillDate(parsed.brokerDeadlineMs);
-  if (String(order?.goodTillDate ?? '').trim() !== expectedGoodTillDate) {
+  const receivedGoodTillDate = String(order?.goodTillDate ?? '').trim();
+  if (!quickGoodTillDateMatches(receivedGoodTillDate, parsed.brokerDeadlineMs)) {
     return recoveryHazard('GTD_MISMATCH', 'TTQ1 broker deadline metadata does not match its orderRef', {
       authoritative,
       brokerDeadlineMs: parsed.brokerDeadlineMs,
       expectedGoodTillDate,
+      receivedGoodTillDate,
     });
   }
   if (!validEpochMs(nowMs)) {

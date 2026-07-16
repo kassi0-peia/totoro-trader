@@ -6,6 +6,7 @@ import {
   createQuickOrderDeadline,
   formatQuickGoodTillDate,
   parseQuickOrderRef,
+  quickGoodTillDateMatches,
 } from './quick-order-deadline.js';
 
 const ORDER_ID = 42;
@@ -156,6 +157,8 @@ test('recognized own quick metadata surfaces every unsafe recovery state as a ha
     [brokerOrder(deadline, { orderType: 'STP' }), 'WRONG_ORDER_TYPE', true],
     [brokerOrder(deadline, { tif: 'DAY' }), 'MISSING_GTD_TIF', true],
     [brokerOrder(deadline, { goodTillDate: '20260715-00:00:02' }), 'GTD_MISMATCH', true],
+    [brokerOrder(deadline, { goodTillDate: '20260714 20:00:02 America/Toronto' }), 'GTD_MISMATCH', true],
+    [brokerOrder(deadline, { goodTillDate: '' }), 'GTD_MISMATCH', true],
     [brokerOrder(deadline, { orderRef: 'TTQ1:bad' }), 'MALFORMED_ORDER_REF', false],
   ];
   for (const [order, code, authoritative] of cases) {
@@ -170,6 +173,60 @@ test('recognized own quick metadata surfaces every unsafe recovery state as a ha
     assert.equal(assessed.authoritative, authoritative, code);
     assert.equal(assessed.code, code);
   }
+});
+
+test('quick GTD echoes normalized to the Gateway timezone still verify the exact deadline instant', () => {
+  const deadline = deadlineFixture(); // broker deadline = 20260715-00:00:01 UTC
+  const echoes = [
+    '20260715-00:00:01',                 // the sent dash-UTC form
+    '20260714 20:00:01 America/Toronto', // Gateway display zone (EDT, observed 2026-07-16)
+    '20260714 20:00:01 US/Eastern',      // IANA alias zone
+    '20260715 00:00:01 UTC',
+    '20260715 00:00:01',                 // zone-less echo, UTC-interpreted
+  ];
+  for (const goodTillDate of echoes) {
+    assert.equal(quickGoodTillDateMatches(goodTillDate, deadline.brokerDeadlineMs), true, goodTillDate);
+    const assessed = assessRecoveredQuickOrder({
+      orderId: ORDER_ID,
+      own: true,
+      order: brokerOrder(deadline, { goodTillDate }),
+      nowMs: START_MS,
+    });
+    assert.equal(assessed.code, 'RECOVERABLE', goodTillDate);
+    assert.equal(assessed.hazard, false, goodTillDate);
+  }
+});
+
+test('quick GTD instant verification stays fail-closed for wrong instants and unknown zones', () => {
+  const deadline = deadlineFixture();
+  for (const goodTillDate of [
+    '20260714 20:00:02 America/Toronto', // wrong instant
+    '20260715 00:00:01 America/Toronto', // right wall clock in the wrong zone = wrong instant
+    '20260714 20:00:01 EDT',             // abbreviation Intl cannot resolve
+    '20260714 20:00:01 Not/AZone',
+    'garbage',
+    '',
+    null,
+  ]) {
+    assert.equal(
+      quickGoodTillDateMatches(goodTillDate, deadline.brokerDeadlineMs),
+      false,
+      String(goodTillDate),
+    );
+  }
+});
+
+test('a GTD hazard carries the received and expected strings for diagnosis', () => {
+  const deadline = deadlineFixture();
+  const assessed = assessRecoveredQuickOrder({
+    orderId: ORDER_ID,
+    own: true,
+    order: brokerOrder(deadline, { goodTillDate: '20260714 20:00:02 America/Toronto' }),
+    nowMs: START_MS,
+  });
+  assert.equal(assessed.code, 'GTD_MISMATCH');
+  assert.equal(assessed.receivedGoodTillDate, '20260714 20:00:02 America/Toronto');
+  assert.equal(assessed.expectedGoodTillDate, '20260715-00:00:01');
 });
 
 test('a syntactically valid deadline beyond the quick horizon is a hazard', () => {
