@@ -16,13 +16,13 @@ test('hourly time axes show only day anchors with no intermediate clock labels',
   assert.deepEqual(
     selectTimeAxisLabels(slots, { timeframe: 60, candleW: 25, targetPx: 100 }),
     [
-      { index: 0, kind: 'date', label: '15' },
+      { index: 0, kind: 'month', label: 'Jul' },
       { index: 3, kind: 'date', label: '16' },
     ],
   );
 });
 
-test('1h and 4h axes write the month only when a new month begins', () => {
+test('1h and 4h axes show the month once at the start, then bare day numbers', () => {
   const slots = [
     { t: new Date(2026, 6, 31, 20).getTime() },
     { t: new Date(2026, 6, 31, 23).getTime() },
@@ -34,12 +34,28 @@ test('1h and 4h axes write the month only when a new month begins', () => {
     assert.deepEqual(
       selectTimeAxisLabels(slots, { timeframe, candleW: 40, targetPx: 80 }),
       [
-        { index: 0, kind: 'date', label: '31' },
-        { index: 2, kind: 'month', label: 'Aug' },
+        { index: 0, kind: 'month', label: 'Jul' },
+        { index: 2, kind: 'date', label: '3' },
         { index: 4, kind: 'date', label: '4' },
       ],
     );
   }
+});
+
+test('zoomed-out 4h day numbers thin by pixel distance instead of stacking', () => {
+  // Six session days × two 4h bars each at 5px candles — labeling every day
+  // boundary would put a number every ~10px.
+  const slots = [];
+  for (let day = 16; day <= 21; day++) {
+    slots.push({ t: at(day, 10) }, { t: at(day, 14) });
+  }
+  assert.deepEqual(
+    selectTimeAxisLabels(slots, { timeframe: 240, candleW: 5, targetPx: 100 }),
+    [
+      { index: 0, kind: 'month', label: 'Jul' },
+      { index: 8, kind: 'date', label: '20' },
+    ],
+  );
 });
 
 test('time-axis density adapts to candle pixels while day boundaries always win', () => {
