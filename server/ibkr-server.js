@@ -713,13 +713,25 @@ function wireHandlers(api) {
     if (api !== ib) return;
     ids.observeNextValidId(id);
     console.log(`[ibkr] handshake complete, nextValidId=${id}`);
+    // Every bring-up step below runs isolated: portfolio/kill emits invoke
+    // coordinator listeners INLINE, so one throwing listener used to unwind
+    // this whole handler and silently skip the home-market subscriptions —
+    // seen live 2026-07-15 (empty chain, no ticks, watchdog blind because a
+    // never-ticked source skipped its stale check). markConnected() is stamped
+    // first so the first-tick watchdog reconnects even if everything after
+    // it fails.
+    homeMarket.markConnected();
     ordersReady = false;
     orderIdNamespaceSafe = true;
     openOrderRecoveryPromise = null;
-    killOrderService.reconnect();
     portfolioRecoveryStartedAt = Date.now();
-    setStatus(true);
-    broadcastPortfolio();
+    const step = (name, fn) => {
+      try { fn(); } catch (e) {
+        console.error(`[ibkr] connect bring-up step failed (${name}):`, e?.message || e);
+      }
+    };
+    step('kill-order-service reconnect', () => killOrderService.reconnect());
+    step('status broadcast', () => { setStatus(true); broadcastPortfolio(); });
     if (!mktDataTypeSent) {
       try {
         api.reqMarketDataType(MARKET_DATA_TYPE);
@@ -729,11 +741,11 @@ function wireHandlers(api) {
       }
     }
     try { api.reqManagedAccts(); } catch {}
-    portfolio.beginInitialSync();            // authoritative positions for all accounts
+    step('portfolio initial sync', () => portfolio.beginInitialSync()); // authoritative positions for all accounts
     try { api.reqExecutions(nextRequestId(), {}); } catch {} // backfill fills missed while disconnected
-    requestAccountSummary();                 // funds / buying power
-    homeMarket.start();   // SPX/ES/VIX/SPY subscriptions + history seeds
-    evaluateSession();    // establish currentExpiry (chain subscribes once a price arrives)
+    step('account summary', () => requestAccountSummary());  // funds / buying power
+    step('home-market subscriptions', () => homeMarket.start()); // SPX/ES/VIX/SPY subs + history seeds
+    step('session evaluation', () => evaluateSession()); // establish currentExpiry (chain subscribes once a price arrives)
   });
 
   // TWS reports the type actually served per subscription (1 live, 2 frozen,
