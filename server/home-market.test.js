@@ -251,6 +251,44 @@ test('watchdog requests a reconnect when the RTH SPX feed stalls', () => {
   assert.equal(h.events.reconnects, 1);
 });
 
+test('watchdog reconnects when a connected source never delivers a first tick', () => {
+  // The regular stale checks skip a source whose lastTick is 0, so a half-failed
+  // bring-up (handshake landed, subscriptions never issued) used to wedge
+  // silently — no ticks, empty chain, no watchdog action (seen live 2026-07-15).
+  const h = makeHome({ rth: true, source: 'SPX', cfg: { spxStaleMs: 1000, histSeedTimeoutMs: 10 ** 9 } });
+  h.home.markConnected(h.now()); // handshake stamped, but start() never ran
+  assert.equal(h.home.watchdog(h.now()), false); // within the window: not yet a stall
+  h.tick(2000);
+  assert.equal(h.home.watchdog(h.now()), true);
+  assert.equal(h.events.reconnects, 1);
+});
+
+test('watchdog first-tick deadline also covers the overnight ES source', () => {
+  const h = makeHome({ rth: false, source: 'ES', cfg: { esStaleMs: 1000, histSeedTimeoutMs: 10 ** 9 } });
+  h.home.markConnected(h.now());
+  h.tick(2000);
+  assert.equal(h.home.watchdog(h.now()), true);
+  assert.equal(h.events.reconnects, 1);
+});
+
+test('first-tick deadline stays quiet before a handshake and after a real tick', () => {
+  const h = makeHome({ rth: true, source: 'SPX', cfg: { spxStaleMs: 1000, histSeedTimeoutMs: 10 ** 9 } });
+  // No markConnected: nothing to measure from — never fires.
+  h.tick(5000);
+  assert.equal(h.home.watchdog(h.now()), false);
+  // Connected + subscribed + ticked: the normal stale check owns it from here.
+  h.home.markConnected(h.now());
+  h.home.start();
+  const spxReqId = h.reqIdOf((c) => c.m === 'reqMktData' && SPX_IND(c.contract));
+  h.home.onTickPrice(spxReqId, 4, 5000);
+  assert.equal(h.home.watchdog(h.now()), false);
+  // reset() clears the stamp: a dead connection can't fire a stale deadline.
+  h.home.reset();
+  h.tick(5000);
+  assert.equal(h.home.watchdog(h.now()), false);
+  assert.equal(h.events.reconnects, 0);
+});
+
 test('watchdog re-requests a stalled SPX history seed without reconnecting', () => {
   const h = makeHome({ rth: true, source: 'SPX', cfg: { histSeedTimeoutMs: 1000, spxStaleMs: 10 ** 9 } });
   h.home.start(); // stamps spxHistRequestedAt

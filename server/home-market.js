@@ -110,6 +110,7 @@ export function createHomeMarket({
 
   const barRunaway = createBarRunawayMonitor({ maxBars: C.barRunaway });
   const watchdogState = {
+    connectedAt: 0, // stamped by markConnected() the instant a handshake lands
     lastSpxTick: 0,
     lastEsTick: 0,
     spxHistRequestedAt: 0,
@@ -720,6 +721,24 @@ export function createHomeMarket({
   // Performs at most one feed/runaway/hist action, returning true iff it acted.
   function watchdog(t = now()) {
     const sess = session();
+    // First-tick deadline: the stale checks below skip a source whose lastTick
+    // is still 0, so a connection whose bring-up half-failed (subscriptions
+    // never issued — seen live 2026-07-15 when a nextValidId listener threw
+    // before homeMarket.start()) used to wedge SILENTLY with an empty chain and
+    // no ticks, forever. If the handshake landed but the active source has
+    // never ticked within its stale window, that is a stall, not a quiet
+    // market — reconnect so the normal bring-up runs again.
+    if (watchdogState.connectedAt) {
+      const sinceConnect = t - watchdogState.connectedAt;
+      const neverTicked = sess.source === 'SPX'
+        ? (sess.rth && !watchdogState.lastSpxTick && sinceConnect > C.spxStaleMs)
+        : (!watchdogState.lastEsTick && sinceConnect > C.esStaleMs);
+      if (neverTicked) {
+        log(`[watchdog] ${sess.source} never delivered a first tick ${Math.round(sinceConnect / 1000)}s after connect — bring-up incomplete, reconnecting`);
+        requestReconnect();
+        return true;
+      }
+    }
     if (sess.source === 'SPX' && sess.rth && watchdogState.lastSpxTick
         && t - watchdogState.lastSpxTick > C.spxStaleMs) {
       log(`[watchdog] SPX feed stalled ${Math.round((t - watchdogState.lastSpxTick) / 1000)}s — reconnecting`);
@@ -760,6 +779,12 @@ export function createHomeMarket({
   // ── Lifecycle / reads ──────────────────────────────────────────────────────
 
   // Home half of the disconnect reset. Guest/watchlist/armed are the coordinator's.
+  // Stamped straight off the handshake, BEFORE the coordinator's bring-up steps
+  // run — so the first-tick watchdog above still fires if any of them throws.
+  function markConnected(t = now()) {
+    watchdogState.connectedAt = t;
+  }
+
   function reset() {
     homeSubs.clear();
     chain.clear();
@@ -770,6 +795,7 @@ export function createHomeMarket({
     // A guest may have paused the SPXW chain when the socket dropped; clear it so
     // the next handshake can rebuild SPXW/options-basis after login.
     spxwChainPaused = false;
+    watchdogState.connectedAt = 0;
     watchdogState.lastSpxTick = 0;
     watchdogState.lastEsTick = 0;
     watchdogState.spxHistRequestedAt = 0;
@@ -800,6 +826,7 @@ export function createHomeMarket({
   return {
     // lifecycle
     start,
+    markConnected,
     reset,
     // IB event routing
     onTickPrice,
