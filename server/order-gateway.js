@@ -50,6 +50,11 @@ const ORDER_REJECT_CODES = new Set([
   463,
 ]);
 
+// Rejections of a CANCEL request, not of the order: the order commonly already
+// Filled (10148) or was never found (10147/161). These must never flip an
+// order record to 'error' — orderStatus stays the lifecycle truth.
+const CANCEL_REJECT_CODES = new Set([161, 10147, 10148]);
+
 // Working (unfilled, uncanceled) orders — shown on every device so a resting
 // order can always be seen and canceled, even after a page reload.
 const DEAD_ORDER_STATUSES = new Set([
@@ -703,6 +708,15 @@ export function createOrderGateway({
     if (!orders.has(reqId)) return false;
     const o = orders.get(reqId);
     const reason = String(err?.message ?? err);
+    // A failed CANCEL request says nothing about the order itself — 10148
+    // usually means it already Filled (seen live 2026-07-16: filled quick
+    // orders were relabeled 'error' and toasted as order failures). Leave the
+    // record's lifecycle to orderStatus and surface only a warning.
+    if (CANCEL_REJECT_CODES.has(code)) {
+      log(`[ibkr] order ${reqId} (${o.action} ${o.strike}${o.right}) cancel rejected ${code}: ${reason}`);
+      broadcast({ type: 'orderWarning', clientRef: o.clientRef, orderId: reqId, code, reason });
+      return true;
+    }
     const rejected = ORDER_REJECT_CODES.has(code) || code >= 10000;
     if (rejected) {
       o.status = 'error';
