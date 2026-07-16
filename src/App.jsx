@@ -2251,7 +2251,15 @@ export default function App() {
         onClick={armPlacement ? undefined : toggleBottom}
       >
         <span className="footer-status">{feed.live ? 'IBKR LIVE DATA' : 'OFFLINE — NO CONNECTION'}</span>
-        <div className="footer-timeframes" onClick={(event) => event.stopPropagation()}>
+        <div
+          className="footer-timeframes"
+          onClick={(event) => event.stopPropagation()}
+          // The buttons live inside the drawer's hover trigger: entering them
+          // cancels the dwell so picking a timeframe never opens the drawer;
+          // leaving re-arms it (a leave that exits the footer disarms after).
+          onMouseEnter={armPlacement ? undefined : disarmBottom}
+          onMouseLeave={armPlacement ? undefined : armBottom}
+        >
           <TimeframeButtons
             value={timeframe}
             onChange={setTimeframe}
