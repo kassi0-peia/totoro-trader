@@ -77,7 +77,7 @@ test('stop and trail entries are refused as close-only exits', () => {
   assert.equal(planOrderRequest({ ...base, intent: 'close', action: 'SELL', trail: 0.5 }, context).ok, true);
 });
 
-test('quick lifetime metadata is restricted to unbracketed SPX BUY-to-open', () => {
+test('quick lifetime metadata is restricted to unbracketed BUY-to-open on an exact active symbol', () => {
   assert.equal(planOrderRequest({ ...base, quick: true }, context).ok, true);
   assert.equal(planOrderRequest({ ...base, quick: true, limit: 2.5 }, context).ok, true);
 
@@ -85,11 +85,16 @@ test('quick lifetime metadata is restricted to unbracketed SPX BUY-to-open', () 
     symbol: 'SPY', expiry: '20260717', strikes: [600],
     expirations: ['20260717'], multiplier: '100', tradingClass: 'SPY',
   };
+  assert.equal(planOrderRequest({
+    ...base, quick: true, symbol: 'SPY', strike: 600, expiry: '20260717',
+  }, { ...context, guest }).ok, true);
+  assert.equal(planOrderRequest({
+    ...base, quick: true, symbol: 'SPY', strike: 600, expiry: '20260717', limit: 2.5,
+  }, { ...context, guest }).ok, true);
   for (const msg of [
     { ...base, quick: true, action: 'SELL', limit: 2.5 },
     { ...base, quick: true, intent: 'close', action: 'SELL', limit: 2.5 },
     { ...base, quick: true, limit: 2.5, takeProfit: 4 },
-    { ...base, quick: true, symbol: 'SPY', strike: 600, expiry: '20260717', limit: 2.5 },
   ]) {
     const rejected = planOrderRequest(msg, msg.symbol ? { ...context, guest } : context);
     assert.equal(rejected.ok, false);
@@ -156,19 +161,29 @@ test('parentOrderRecord preserves fill-quality reference only when valid', () =>
   assert.equal('refAtSend' in parentOrderRecord(withoutRef), false);
 });
 
-test('guest orders use discovered contract fields and reject a missing limit', () => {
+test('guest orders use discovered contract fields for MKT, LMT, STOP, and TRAIL', () => {
   const guest = {
     symbol: 'SPY', expiry: '20260717', strikes: [600, 605],
     expirations: ['20260717'], multiplier: '100', tradingClass: 'SPY',
   };
   const guestContext = { ...context, guest };
-  const rejected = planOrderRequest({ ...base, symbol: 'SPY', strike: 600, expiry: '20260717' }, guestContext);
-  assert.deepEqual(rejected, { ok: false, reason: 'guest orders require a positive limit (no MKT)' });
+  const market = planOrderRequest({ ...base, symbol: 'SPY', strike: 600, expiry: '20260717' }, guestContext);
+  assert.equal(market.ok, true);
+  assert.equal(market.orderType, 'MKT');
+  assert.deepEqual(market.contract, guestOptionContract(guest, 600, 'C', '20260717'));
 
   const plan = planOrderRequest({ ...base, symbol: 'spy', strike: 600, expiry: '20260717', limit: 2 }, guestContext);
   assert.equal(plan.ok, true);
   assert.equal(plan.orderSymbol, 'SPY');
   assert.deepEqual(plan.contract, guestOptionContract(guest, 600, 'C', '20260717'));
+  assert.equal(planOrderRequest({
+    ...base, symbol: 'SPY', strike: 600, expiry: '20260717',
+    intent: 'close', action: 'SELL', stop: 1,
+  }, guestContext).orderType, 'STP');
+  assert.equal(planOrderRequest({
+    ...base, symbol: 'SPY', strike: 600, expiry: '20260717',
+    intent: 'close', action: 'SELL', trail: 0.5,
+  }, guestContext).orderType, 'TRAIL');
 });
 
 test('inactive guests and invalid strikes fail before an IBKR order is built', () => {
@@ -266,6 +281,28 @@ test('a server-routed MKT needs a fresh ask for its exact SPXW expiry', () => {
   }), false);
   const limit = planOrderRequest({ ...base, limit: 2 }, context);
   assert.equal(marketOrderHasFreshAsk(limit, { now }), true);
+});
+
+test('a guest MKT accepts only a fresh exact-symbol contract witness', () => {
+  const now = 1_000_000;
+  const guest = {
+    symbol: 'SPY', expiry: '20260717', strikes: [600],
+    expirations: ['20260717'], multiplier: '100', tradingClass: 'SPY',
+  };
+  const market = planOrderRequest({
+    ...base, symbol: 'SPY', strike: 600, expiry: '20260717',
+  }, { ...context, guest });
+  const exact = {
+    symbol: 'SPY', strike: 600, right: 'C', expiry: '20260717',
+    bid: 1.9, ask: 2, askTs: now - 10,
+  };
+  assert.equal(marketOrderHasFreshAsk(market, { streamed: exact, now }), true);
+  assert.equal(marketOrderHasFreshAsk(market, {
+    streamed: { ...exact, symbol: 'SPX' }, now,
+  }), false);
+  assert.equal(marketOrderHasFreshAsk(market, {
+    streamed: { ...exact, strike: 605 }, now,
+  }), false);
 });
 
 test('a fresh non-ask tick cannot launder a stale ask and crossed books fail closed', () => {

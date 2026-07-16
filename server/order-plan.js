@@ -87,9 +87,6 @@ export function planOrderRequest(msg, { currentExpiry, guest, account, routingLo
       { strikes: guest.strikes, expirations: guest.expirations },
     );
     if (!valid.ok) return valid;
-    if (!positiveFiniteNumber(msg.limit)) {
-      return { ok: false, reason: 'guest orders require a positive limit (no MKT)' };
-    }
     orderSymbol = guestSym;
     contract = guestOptionContract(guest, strike, right, expiry);
   } else {
@@ -150,18 +147,18 @@ export function planOrderRequest(msg, { currentExpiry, guest, account, routingLo
 
   // `quick` opts an order into the ten-second broker deadline/recovery
   // protocol. It is intentionally narrower than the general order route:
-  // only the two SPX BUY-to-open lightning shapes (market or positive limit)
-  // and server-fired armed entries may use it. Never let a forged flag alter
-  // close, bracket, guest, stop, or trailing-order semantics.
+  // only unbracketed BUY-to-open lightning shapes (market or positive limit)
+  // and server-fired armed entries may use it. Exact guest ownership was
+  // already proven above. Never let a forged flag alter close, bracket, stop,
+  // or trailing-order semantics.
   if (quick && (
-    guestSym
-    || intent !== 'open'
+    intent !== 'open'
     || action !== 'BUY'
     || wantTp
     || wantSl
     || (orderType !== 'LMT' && orderType !== 'MKT')
   )) {
-    return { ok: false, reason: 'quick is supported only for unbracketed SPX BUY-to-open orders' };
+    return { ok: false, reason: 'quick is supported only for unbracketed BUY-to-open orders' };
   }
 
   const order = {
@@ -238,12 +235,17 @@ export function parentOrderRecord(plan, reduceOnly = null) {
 // forge an old ask. Non-MKT plans are unaffected.
 export function marketOrderHasFreshAsk(plan, { streamed = null, snapshot = null, now = Date.now(), maxAgeMs = 60_000 } = {}) {
   if (plan?.orderType !== 'MKT') return true;
-  if (plan.intent !== 'open' || plan.action !== 'BUY' || plan.orderSymbol !== 'SPX') return false;
+  if (plan.intent !== 'open' || plan.action !== 'BUY' || !plan.orderSymbol) return false;
   return [streamed, snapshot].some((quote) => {
     const ask = Number(quote?.ask);
     const bid = Number(quote?.bid);
     const askTs = Number(quote?.askTs);
     const age = Number(now) - askTs;
+    const symbolMatches = !quote?.symbol
+      || String(quote.symbol).toUpperCase() === plan.orderSymbol;
+    const strikeMatches = quote?.strike == null || Number(quote.strike) === plan.strike;
+    const rightMatches = !quote?.right || quote.right === plan.right;
+    const expiryMatches = !quote?.expiry || quote.expiry === plan.expiry;
     return ask > 0
       // A crossed positive book is not a trustworthy market witness. A
       // one-sided ask is still usable; some thin SPXW strikes have no bid.
@@ -251,7 +253,10 @@ export function marketOrderHasFreshAsk(plan, { streamed = null, snapshot = null,
       && Number.isFinite(age)
       && age >= 0
       && age <= maxAgeMs
-      && (!quote?.expiry || quote.expiry === plan.expiry);
+      && symbolMatches
+      && strikeMatches
+      && rightMatches
+      && expiryMatches;
   });
 }
 

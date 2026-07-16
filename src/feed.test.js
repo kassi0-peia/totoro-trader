@@ -535,6 +535,61 @@ test('guestGreeks carries tickTs so the guest mark ladder has a freshness gate',
   assert.equal(s1.guestGreeksMap.get('455C').tickTs, ts);
 });
 
+test('active guest quote snapshots merge only into the exact resource generation', () => {
+  const envelope = {
+    symbol: 'SPY',
+    conId: 756733,
+    resourceKey: 'SPY|756733',
+    resourceGeneration: 9,
+  };
+  const active = applyMessage({
+    ...createInitialSnapshot(),
+    caps: { guestRegistry: true },
+  }, {
+    type: 'guest',
+    ...envelope,
+    guest: {
+      symbol: 'SPY',
+      conId: 756733,
+      price: 600,
+      candles: [],
+      greeks: [],
+      expiry: '20260717',
+      strikes: [600, 605],
+      strikeStep: 5,
+      expirations: ['20260717'],
+      settlement: 'physical',
+      live: true,
+    },
+  });
+  const quote = {
+    type: 'quoteResult',
+    symbol: 'SPY',
+    strike: 605,
+    right: 'C',
+    expiry: '20260717',
+    bid: 1.9,
+    ask: 2.1,
+    bidTs: 100,
+    askTs: 101,
+    tickTs: 102,
+    guestResourceKey: envelope.resourceKey,
+    guestResourceGeneration: envelope.resourceGeneration,
+    guestUnderlyingConId: envelope.conId,
+  };
+  const merged = applyMessage(active, quote);
+  assert.equal(merged.guestGreeksMap.get('605C').ask, 2.1);
+  assert.deepEqual(merged.posQuotes, {});
+
+  const stale = applyMessage(merged, {
+    ...quote,
+    strike: 610,
+    guestResourceGeneration: 8,
+  });
+  assert.equal(stale, merged);
+  assert.equal(stale.guestGreeksMap.has('610C'), false);
+});
+
 test('guestTick appends/replaces the live guest candle', () => {
   const s0 = { ...spxState(), guest: { symbol: 'SPCX', price: 452, candles: [{ t: 10, close: 452 }], live: true } };
   const s1 = applyMessage(s0, { type: 'guestTick', symbol: 'SPCX', price: 452.5, candle: { t: 10, close: 452.5 } });
