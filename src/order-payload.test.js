@@ -55,6 +55,15 @@ test('fresh midpoint requires two fresh sides and an uncrossed positive book', (
   assert.equal(freshQuoteMid({ bid: 1.90, ask: 2.10, tickTs: NOW, snapshotTs: NOW, ts: NOW }, NOW), null);
 });
 
+test('a stamp slightly newer than the witness clock is current, not stale', () => {
+  // The render clock ticks ~800ms behind quote-triggered renders; a strict
+  // age >= 0 dropped the freshest quotes back to the phantom-prone model.
+  assert.equal(freshQuoteMid({ bid: 1.90, ask: 2.10, bidTs: NOW + 800, askTs: NOW + 2000 }, NOW), 2);
+  // Far-future stamps are a broken clock and still refuse.
+  assert.equal(freshQuoteMid({ bid: 1.90, ask: 2.10, bidTs: NOW + 5001, askTs: NOW }, NOW), null);
+  assert.equal(marketableLimitForAction({ bid: null, ask: 2, askTs: NOW + 800 }, 'BUY', NOW), 2.05);
+});
+
 // ── buildOpenOrder (EXECUTE ticket) ────────────────────────────────────────
 
 test('buy MKT: no limit field, no bracket fields, right/action/expiry set', () => {
