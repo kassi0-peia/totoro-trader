@@ -43,7 +43,7 @@ export const QUICK_CANCEL_MS = 10_000; // ⚡ unfilled-order lifetime before aut
 const ORDER_REJECT_CODES = new Set([
   110, // price does not conform to the minimum price variation
   111, // invalid time-in-force for this order type
-  201, 202, 203, 321,
+  201, 203, 321,
   334, // invalid Good Till Date order
   336, // invalid time or time zone in Good Till Date
   337, // invalid date in Good Till Date
@@ -237,6 +237,7 @@ export function createOrderGateway({
         qty: o.qty,
         orderType: o.orderType ?? null,
         limit: o.limit ?? null,
+        aux: o.aux ?? null,
         status: o.status,
       }));
   }
@@ -548,6 +549,7 @@ export function createOrderGateway({
       qty: order?.totalQuantity ?? existing?.qty,
       orderType: order?.orderType ?? existing?.orderType,
       limit: order?.lmtPrice ?? existing?.limit ?? null,
+      aux: order?.auxPrice ?? existing?.aux ?? null,
       orderRef: (typeof order?.orderRef === 'string' && order.orderRef)
         ? order.orderRef
         : existing?.orderRef ?? null,
@@ -717,6 +719,15 @@ export function createOrderGateway({
       broadcast({ type: 'orderWarning', clientRef: o.clientRef, orderId: reqId, code, reason });
       return true;
     }
+    // 202 CONFIRMS a cancellation (requested or broker-initiated); it is not a
+    // rejection. orderStatus 'Cancelled' carries the lifecycle truth and the
+    // client already toasts CANCELED from that event — routing 202 through the
+    // error path relabeled every routine cancel as an order failure on every
+    // connected screen (seen live 2026-07-17, TRAIL-exit cancel).
+    if (code === 202) {
+      log(`[ibkr] order ${reqId} (${o.action} ${o.strike}${o.right}) canceled (202): ${reason}`);
+      return true;
+    }
     const rejected = ORDER_REJECT_CODES.has(code) || code >= 10000;
     if (rejected) {
       o.status = 'error';
@@ -793,6 +804,7 @@ export function createOrderGateway({
       qty: order.totalQuantity,
       orderType: order.orderType,
       limit: order.lmtPrice ?? null,
+      aux: order.auxPrice ?? null,
       ocaGroup: order.ocaGroup ?? null,
       status: submission.status || 'PendingSubmit',
       filled: submission.filled ?? 0,

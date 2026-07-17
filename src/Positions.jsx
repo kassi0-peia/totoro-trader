@@ -113,7 +113,13 @@ export default function Positions({ positions, theme, onClose, onReverse, onCanc
             <span className="pos-cell"><span className="cell-label">QTY</span>×{o.qty}</span>
             <span className="pos-cell">
               <span className="cell-label">{o.action}</span>
-              {o.limit != null ? `${o.orderType || 'LMT'} $${Number(o.limit).toFixed(2)}` : o.orderType || 'MKT'}
+              {/* STP/TRAIL price their trigger from auxPrice; IBKR echoes lmtPrice 0
+                  for them, which used to render as a bogus "$0.00". */}
+              {(o.orderType === 'STP' || o.orderType === 'TRAIL') && o.aux != null && Number(o.aux) > 0
+                ? `${o.orderType} $${Number(o.aux).toFixed(2)}`
+                : o.limit != null && Number(o.limit) > 0
+                  ? `${o.orderType || 'LMT'} $${Number(o.limit).toFixed(2)}`
+                  : o.orderType || 'MKT'}
             </span>
             <span className="pos-cell pos-status" style={{ color: theme.muted }}>
               <span className="cell-label">ORDER</span>{o.status}
