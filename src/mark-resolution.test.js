@@ -148,6 +148,19 @@ test('a non-active symbol resolves only from the exact snapshot poller cache', (
   assert.equal(missing.source, 'nodata');
 });
 
+test('a conId-less inactive contract falls back to the symbol|strike|right|expiry key', () => {
+  const posQuotes = {
+    'MSTR|95|P|20260717': { snapshotTs: NOW - 5000, premium: 1.1, delta: -0.2, bid: 1.0, ask: 1.2 },
+  };
+  const { resolveGreeks } = createGreeksResolvers(makeCtx({ posQuotes }));
+  const g = resolveGreeks(95, 'put', '20260717', 'MSTR');
+  assert.equal(g.premium, 1.1);
+  const stale = createGreeksResolvers(makeCtx({
+    posQuotes: { 'MSTR|95|P|20260717': { snapshotTs: NOW - 120_000, premium: 1.1 } },
+  })).resolveGreeks(95, 'put', '20260717', 'MSTR');
+  assert.equal(stale.source, 'nodata', 'a >90s snapshot is no-data, never a stale mark');
+});
+
 test('the guest ladder mirrors SPX: mid first, then model, then flat BS', () => {
   const guestMap = chain([
     chainEntry({ strike: 200, type: 'call', premium: 3.1, bid: 3.0, ask: 3.4, greeks: { delta: 0.4 } }),
