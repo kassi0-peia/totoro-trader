@@ -79,17 +79,8 @@ import {
   positionQuoteAccess,
 } from './app/positionQuotePolicy.js';
 import { createGreeksResolvers } from './app/markResolution.js';
-import {
-  loadPinnedCardState,
-  pinnedCardReducer,
-  savePinnedCardState,
-  topPinnedCard,
-} from './app/pinnedPositionCards.js';
-
-function browserViewport() {
-  if (typeof window === 'undefined') return { width: 1280, height: 800 };
-  return { width: window.innerWidth, height: window.innerHeight };
-}
+import usePinnedCards from './app/usePinnedCards.js';
+import useTradesDrawer from './app/useTradesDrawer.js';
 
 const ARMED_AUTHORITY_CACHE_KEY = 'tt.armedAuthority.v1';
 const LEGACY_ARMED_CACHE_KEY = 'tt.armed';
@@ -154,81 +145,34 @@ export default function App() {
   const [hoverPos, setHoverPos] = useState(null);   // { id, x, y } — hover card over a position row
   const cardHoveredRef = useRef(false);             // mouse is over the floating hover card itself
   const cardHideRef = useRef(null);                 // pending 0.5s dismiss after leaving the card
-  // Persistent position cards store only exact contract identity + layout. Live
-  // rows are resolved from `inspectablePositions` at render time below; restoring
-  // this state can never synthesize a position or an order.
-  const pinnedViewportRef = useRef(browserViewport());
-  const [pinnedCardState, dispatchPinnedCard] = useReducer(
-    pinnedCardReducer,
-    null,
-    () => loadPinnedCardState(typeof localStorage === 'undefined' ? null : localStorage, pinnedViewportRef.current),
-  );
-  const pinnedCards = pinnedCardState.cards;
-  const topCard = topPinnedCard(pinnedCardState);
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      savePinnedCardState(typeof localStorage === 'undefined' ? null : localStorage, pinnedCardState);
-    }, 120);
-    return () => clearTimeout(timer);
-  }, [pinnedCardState]);
-  useEffect(() => {
-    const resize = () => {
-      pinnedViewportRef.current = browserViewport();
-      dispatchPinnedCard({ type: 'viewport', viewport: pinnedViewportRef.current });
-    };
-    window.addEventListener('resize', resize);
-    return () => window.removeEventListener('resize', resize);
-  }, []);
-  const pinPosition = useCallback((position) => {
-    if (!position || position.status !== 'open') return;
-    setHoverPos(null);
-    dispatchPinnedCard({ type: 'open', position, viewport: pinnedViewportRef.current });
-  }, []);
-  const focusPinnedCard = useCallback((key) => {
-    dispatchPinnedCard({ type: 'focus', key, viewport: pinnedViewportRef.current });
-  }, []);
-  const movePinnedCard = useCallback((key, x, y) => {
-    dispatchPinnedCard({ type: 'move', key, x, y, viewport: pinnedViewportRef.current });
-  }, []);
-  const resizePinnedCard = useCallback((key, width, height) => {
-    dispatchPinnedCard({ type: 'resize', key, width, height, viewport: pinnedViewportRef.current });
-  }, []);
-  const dismissPinnedCard = useCallback((key) => {
-    dispatchPinnedCard({ type: 'close', key, viewport: pinnedViewportRef.current });
-  }, []);
-  // Slide-in drawer: today's fills over the chart. Open/closed state is
-  // layout memory (tt.drawerOpen) — if she trades with it pinned open, it
-  // greets her open on the next load.
-  const [tradesPeek, setTradesPeek] = useState(() => {
-    try { return localStorage.getItem('tt.drawerOpen') === '1'; } catch { return false; }
-  });
-  const [drawerMounted, setDrawerMounted] = useState(tradesPeek); // kept true through the slide-out animation
-  useEffect(() => {
-    try { localStorage.setItem('tt.drawerOpen', tradesPeek ? '1' : '0'); } catch {}
-  }, [tradesPeek]);
-  const hoverOpenRef = useRef(null); // 2s left-edge hover-to-open timer
-  const openTrades = useCallback(() => { clearTimeout(hoverOpenRef.current); setDrawerMounted(true); setTradesPeek(true); }, []);
-  const closeTrades = useCallback(() => { clearTimeout(hoverOpenRef.current); setTradesPeek(false); }, []);
-  const dismissTradesBackdrop = useCallback((event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    closeTrades();
-  }, [closeTrades]);
-  // Hover the chart's left edge for 1.5s to peek the drawer open.
-  const armHoverOpen = useCallback(() => {
-    if (tradesPeek) return;
-    clearTimeout(hoverOpenRef.current);
-    hoverOpenRef.current = setTimeout(openTrades, 1500);
-  }, [tradesPeek, openTrades]);
-  const disarmHoverOpen = useCallback(() => clearTimeout(hoverOpenRef.current), []);
-  // (Esc-closes-the-drawer moved into the keyboard layer's single prioritized
-  // Esc chain below — one close per press, top-most surface first.)
-  // Unmount the drawer after its slide-out animation finishes (deterministic).
-  useEffect(() => {
-    if (tradesPeek || !drawerMounted) return;
-    const t = setTimeout(() => setDrawerMounted(false), 300);
-    return () => clearTimeout(t);
-  }, [tradesPeek, drawerMounted]);
+  // Persistent position cards store only exact contract identity + layout
+  // (src/app/usePinnedCards.js). Live rows are resolved from
+  // `inspectablePositions` at render time below; restoring this state can
+  // never synthesize a position or an order.
+  const {
+    pinnedCards,
+    topCard,
+    pinPosition,
+    focusPinnedCard,
+    movePinnedCard,
+    resizePinnedCard,
+    dismissPinnedCard,
+    closeTopCard,
+  } = usePinnedCards({ setHoverPos });
+  // Slide-in drawer: today's fills over the chart (src/app/useTradesDrawer.js).
+  const {
+    tradesPeek,
+    drawerMounted,
+    openTrades,
+    closeTrades,
+    dismissTradesBackdrop,
+    armHoverOpen,
+    disarmHoverOpen,
+    drawerView,
+    setDrawerView,
+    noteReq,
+    setNoteReq,
+  } = useTradesDrawer();
   // ── Bottom drawer (the owner 2026-07-10: "hide everything below the chart") ──
   // Invisible bottom band + footer: hover 1.5s or click to reveal the panel;
   // clicks-off/Esc close it. Order fills never open it; the chart stays put
@@ -240,22 +184,9 @@ export default function App() {
     event.stopPropagation();
     setBottomOpen(false);
   }, [setBottomOpen]);
-  // ── Trades-drawer view: today's blotter ↔ multi-day journal (history) ──
-  // The history view (equity curve + daily P/L) renders INSIDE the drawer;
-  // the toggle lives in the drawer header — zero new cockpit chrome.
-  const [drawerView, setDrawerView] = useState(() => {
-    try { return localStorage.getItem('tt.drawerView') === 'history' ? 'history' : 'today'; } catch { return 'today'; }
-  });
-  // N hotkey → annotate the latest fill: opens the drawer on today's view with
-  // that row's note editor focused (the "note to self" moment, right after a
-  // fill). The nonce re-triggers even for the same fill id.
-  const [noteReq, setNoteReq] = useState(null);
   // ? overlay — keys/gestures/marks reference (the owner 2026-07-13: "it's falling
   // out of my head"). Toggled by ?, closed by Esc/click-away; zero resting UI.
   const [helpOpen, setHelpOpen] = useState(false);
-  useEffect(() => {
-    try { localStorage.setItem('tt.drawerView', drawerView); } catch {}
-  }, [drawerView]);
   const [quickMode, setQuickMode] = useState(false); // ⚡ right-click quick trade — per session, not persisted
   // 🚏 Bus Stop: called (price, time) coordinates. Stops persist (localStorage,
   // per-browser — the calibration record is the point); the arm toggle doesn't.
@@ -1393,10 +1324,7 @@ export default function App() {
       if (chartMenu) return;
       if (document.querySelector('.replay-cal-pop')) return;
       if (armPlacement) { cancelArmPlacement(); return; }
-      if (topCard) {
-        dispatchPinnedCard({ type: 'close-top', viewport: pinnedViewportRef.current });
-        return;
-      }
+      if (topCard) { closeTopCard(); return; }
       if (hoverPos != null) { setHoverPos(null); return; }
       if (busPanelId != null) { setBusPanelId(null); return; }
       if (searchPopover.isOpen()) { searchPopover.close(); return; }
