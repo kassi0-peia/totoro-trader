@@ -17,6 +17,15 @@ const rightOf = (type) => (type === 'call' ? 'C' : 'P');
 
 export const ORDER_QUOTE_FRESH_MS = 60_000;
 
+// Freshness witnesses are allowed to run slightly behind the tape. The app's
+// render clock ticks every ~800ms while quote-triggered renders carry stamps
+// newer than it, so a strict `age >= 0` rejected exactly the freshest quotes
+// and dropped marks back to the phantom-prone model (observed live
+// 2026-07-16: fresh 25.30×25.50 book, mark 26.33 = model). A small negative
+// age is "current", not stale; anything further in the future is a broken
+// clock and still refuses.
+export const QUOTE_TS_SKEW_MS = 5_000;
+
 function positiveFiniteNumber(value) {
   return typeof value === 'number' && Number.isFinite(value) && value > 0;
 }
@@ -41,7 +50,7 @@ function quoteSideTimestamp(quote, action) {
 function timestampIsFresh(ts, now, maxAgeMs) {
   if (ts == null) return false;
   const age = Number(now) - ts;
-  return Number.isFinite(age) && age >= 0 && age <= maxAgeMs;
+  return Number.isFinite(age) && age >= -QUOTE_TS_SKEW_MS && age <= maxAgeMs;
 }
 
 // A midpoint is trustworthy only when BOTH prices belong to a current,
