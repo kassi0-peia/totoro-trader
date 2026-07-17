@@ -2,7 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { applyOrderEvent } from './app/orderEvents.js';
 import { POSITION_LIFECYCLE } from './app/positionLifecycle.js';
-import { createArmedAuthorityModel } from './app/armedAuthority.js';
+import {
+  ARMED_AUTHORITY_PROTOCOL,
+  buildArmedDisarm,
+  createArmedAuthorityModel,
+} from './app/armedAuthority.js';
 
 function harness({ armedModel = createArmedAuthorityModel(), refAtSend = {}, fillUnderlying = new Map() } = {}) {
   const toasts = [];
@@ -90,6 +94,29 @@ test('armedCommandRejected reconciles without inventing a commit for an unknown 
   assert.match(h.toasts[0].text, /⚔ unchanged — revision conflict/);
   // No pending command matches, so the model is unchanged and nothing commits.
   assert.equal(h.commits.length, 0);
+});
+
+test('armedCommandRejected clears the exact matching pending command and commits', () => {
+  const confirmed = {
+    protocol: ARMED_AUTHORITY_PROTOCOL,
+    lineageId: 'lineage-a',
+    sessionId: 'session-a',
+    revision: 7,
+    digest: '7'.padStart(64, '0'),
+    phase: 'READY',
+    account: 'DU123',
+    expiry: '20260715',
+    orders: [{ id: 'arm-1', level: 7600, strike: 7605, right: 'C', dir: 'up', expiry: '20260715', qty: 1 }],
+  };
+  const model = createArmedAuthorityModel({ connected: true, confirmed });
+  const prepared = buildArmedDisarm(model, { requestId: 'req-1', id: 'arm-1', createdAt: 1 });
+  assert.equal(prepared.ok, true);
+  assert.equal(prepared.state.pending.requestId, 'req-1');
+  const h = harness({ armedModel: prepared.state });
+  apply({ type: 'armedCommandRejected', requestId: 'req-1', reason: 'stale revision', currentState: confirmed }, h);
+  assert.equal(h.commits.length, 1);
+  assert.equal(h.commits[0].pending, null, 'the rejected pending command is cleared');
+  assert.match(h.toasts[0].text, /⚔ unchanged — stale revision/);
 });
 
 test('cancelAck toasts only on failure', () => {
