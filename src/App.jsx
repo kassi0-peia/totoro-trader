@@ -23,7 +23,6 @@ import { classifyRegime } from './regime.js';
 import { expiryCutoffMs, suggestTimetable, displayRows, scanTouch } from './busstop.js';
 import BusStopPanel from './BusStopPanel.jsx';
 import { plDollars } from './pl.js';
-import { chimeFill, chimeAlert } from './sounds.js';
 import { deriveDayLevels } from './levels.js';
 import useReplayController from './app/useReplayController.js';
 import { replayAccess, replayBlocksLiveOrders, shouldExitReplay } from './app/replayAccess.js';
@@ -59,7 +58,6 @@ import {
   IVOL_FALLBACK,
   MID_FRESH_MS,
   SPXW_STRIKE_STEP,
-  freshUnderlyingPriceForFill,
   inactivePositionSnapshotGreeks,
   optHistKey,
   readGuestIntent,
@@ -74,7 +72,8 @@ import {
   filterChartPositions,
   reconcilePositions,
 } from './app/positionModel.js';
-import { POSITION_LIFECYCLE, positionLifecycleReducer } from './app/positionLifecycle.js';
+import { positionLifecycleReducer } from './app/positionLifecycle.js';
+import { applyOrderEvent } from './app/orderEvents.js';
 import {
   POSITION_QUOTE_MODE,
   planPositionQuoteRequests,
@@ -320,9 +319,8 @@ export default function App() {
     return stored;
   }, []);
 
-  // Sounds live in src/sounds.js now: chimeFill (the original two-note fill
-  // chime, moved verbatim) here, and chimeAlert (a single soft blip for ⏰
-  // alerts) inside useAlerts.
+  // Sounds live in src/sounds.js: chimeFill/chimeAlert ring from the order-event
+  // dispatch (src/app/orderEvents.js) and useAlerts.
 
   // Micro fill animation: when a fill lands, the affected position row (and
   // the strike line on the active chart) glow once, ~400ms, no layout shift.
@@ -335,134 +333,18 @@ export default function App() {
     setFillFlash({ strike: msg.strike, right: msg.right, expiry: msg.expiry, symbol: msg.symbol ?? 'SPX', action: msg.action, ts: Date.now() });
   }, []);
 
-  // Apply IBKR order lifecycle events to local positions. Entry/exit prices come
-  // from IBKR's reported avgFillPrice — never local estimates.
+  // Apply IBKR order lifecycle events to local positions (src/app/orderEvents.js).
+  // Entry/exit prices come from IBKR's reported avgFillPrice — never local estimates.
   const handleOrderEvent = useCallback((msg, authority = {}) => {
-    if (msg.type === 'reverseState') {
-      if (msg.phase === 'COMPLETE') {
-        showToast(`REVERSE: close proven, ${msg.closedQty ?? msg.requestedQty ?? ''} target contract${(msg.closedQty ?? msg.requestedQty) === 1 ? '' : 's'} submitted as LMT`, 'ok');
-      } else if (msg.phase === 'PARTIAL' || msg.phase === 'FAILED') {
-        showToast(`REVERSE stopped — ${msg.reason || 'no reopen was sent'}`, 'err');
-      }
-      return;
-    }
-    if (msg.type === 'orderAck' && msg.accepted === false) {
-      dispatchPositionLifecycle({
-        type: POSITION_LIFECYCLE.ORDER_FAILED,
-        clientRef: msg.clientRef,
-        reason: msg.reason,
-      });
-      showToast(`Order rejected: ${msg.reason}`, 'err');
-      return;
-    }
-    if (msg.type === 'orderWarning') {
-      // Non-fatal (e.g. "held until the open") — keep the working position, just notify.
-      showToast(`Order note: ${msg.reason}`, 'err');
-      return;
-    }
-    if (msg.type === 'orderAutoCancel') {
-      // A ⚡ order outlived its moment and the bridge asked IBKR to cancel its
-      // live remainder. Only the later IBKR status proves cancellation and
-      // performs position cleanup; this toast reports the request honestly.
-      showToast(`⚡ ${msg.strike}${msg.right} — ${msg.reason}`, 'err');
-      return;
-    }
-    if (msg.type === 'armedCommandRejected') {
-      const previous = armedAuthorityRef.current;
-      const reconciled = reconcileArmedRejection(previous, msg);
-      if (reconciled.state && reconciled.state !== previous) {
-        commitArmedAuthority(reconciled.state);
-      }
-      showToast(`⚔ unchanged — ${msg.reason || 'bridge refused the command'}`, 'err');
-      return;
-    }
-    // Legacy bridge events are notification-only. Only armedState may change
-    // the displayed/persisted authority; never reconstruct truth from a toast.
-    if (msg.type === 'armedCleared' || msg.type === 'armedQtyUpdated') {
-      return;
-    }
-    if (msg.type === 'armedQtyRejected') {
-      showToast(`⚔ quantity unchanged — ${msg.reason || 'bridge refused the update'}`, 'err');
-      return;
-    }
-    if (msg.type === 'armedFired') {
-      chimeAlert();
-      const qty = Number.isSafeInteger(msg.qty) && msg.qty >= 1 && msg.qty <= ARMED_AUTHORITY_MAX_QTY
-        ? msg.qty
-        : 1;
-      showToast(`⚔ FIRED — SPX crossed ${msg.level}: submitted BUY ×${qty} ${msg.strike}${msg.right} as a marketable LMT`, 'ok');
-      return;
-    }
-    if (msg.type === 'armedFailed' || msg.type === 'armedRejected') {
-      showToast(`⚔ ${msg.strike ?? ''}${msg.right ?? ''} disarmed — ${msg.reason}`, 'err');
-      return;
-    }
-    if (msg.type === 'orderError') {
-      dispatchPositionLifecycle({
-        type: POSITION_LIFECYCLE.ORDER_FAILED,
-        clientRef: msg.clientRef,
-        reason: msg.reason,
-      });
-      showToast(`Order error: ${msg.reason}`, 'err');
-      return;
-    }
-    if (msg.type === 'cancelAck') {
-      if (!msg.ok) showToast(`Cancel failed: ${msg.reason}`, 'err');
-      return;
-    }
-    if (msg.type === 'fill') {
-      // Bracket child fills (clientRef "<base>:tp" / "<base>:sl") close the
-      // position the parent opened.
-      const childMatch = typeof msg.clientRef === 'string' && msg.clientRef.match(/^(.*):(tp|sl)$/);
-      if (childMatch && msg.status === 'Filled' && (msg.remaining === 0 || msg.remaining == null)) {
-        const px = freshUnderlyingPriceForFill(msg, fillUnderlyingRef.current);
-        const closedAt = Date.now();
-        dispatchPositionLifecycle({
-          type: POSITION_LIFECYCLE.ORDER_FILLED,
-          fill: msg,
-          underlyingPrice: px,
-          filledAt: closedAt,
-          positionsRevision: authority.positionsRevision,
-        });
-        showToast(`BRACKET ${childMatch[2].toUpperCase()} FILLED ${msg.strike}${msg.right} @ $${Number(msg.avgFillPrice).toFixed(2)}`, 'ok');
-        chimeFill();
-        markFillFlash(msg);
-        return;
-      }
-      if (msg.status === 'Cancelled' || msg.status === 'ApiCancelled') {
-        dispatchPositionLifecycle({
-          type: POSITION_LIFECYCLE.ORDER_CANCELLED,
-          clientRef: msg.clientRef,
-          reason: 'canceled',
-          closeReason: 'close canceled',
-        });
-        showToast(`CANCELED ${msg.action} ${msg.strike}${msg.right}`, 'ok');
-        return;
-      }
-      const done = msg.status === 'Filled' && (msg.remaining === 0 || msg.remaining == null);
-      if (!done) return;
-      const px = freshUnderlyingPriceForFill(msg, fillUnderlyingRef.current);
-      const filledAt = Date.now();
-      const fillPositionsRevision = Number.isSafeInteger(authority.positionsRevision)
-        && authority.positionsRevision >= 0
-        ? authority.positionsRevision
-        : null;
-      dispatchPositionLifecycle({
-        type: POSITION_LIFECYCLE.ORDER_FILLED,
-        fill: msg,
-        underlyingPrice: px,
-        filledAt,
-        positionsRevision: fillPositionsRevision,
-      });
-      // Fill quality: how far the fill landed from the price seen at send —
-      // the number that teaches which moments are expensive to hurry.
-      const sent = refAtSendRef.current[msg.clientRef];
-      const d = sent && sent.px > 0 ? Number(msg.avgFillPrice) - sent.px : null;
-      const refNote = d != null ? ` · ${d >= 0 ? '+' : '−'}$${Math.abs(d).toFixed(2)} vs ${sent.kind}@send` : '';
-      showToast(`FILLED ${msg.action} ${msg.strike}${msg.right} ×? @ $${Number(msg.avgFillPrice).toFixed(2)}${refNote}`.replace('×?', `×${msg.filled}`), 'ok');
-      chimeFill();
-      markFillFlash(msg);
-    }
+    applyOrderEvent(msg, authority, {
+      showToast,
+      dispatchPositionLifecycle,
+      markFillFlash,
+      commitArmedAuthority,
+      armedAuthorityRef,
+      refAtSendRef,
+      fillUnderlyingRef,
+    });
   }, [showToast, markFillFlash, commitArmedAuthority]);
 
   const [guestEvent, setGuestEvent] = useState(null);
