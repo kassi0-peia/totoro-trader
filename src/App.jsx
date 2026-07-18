@@ -39,6 +39,7 @@ import {
   buildArmedCreate,
 } from './app/armedAuthority.js';
 import { createArmedOrderId, useArmedAuthority, useArmedCommands } from './app/useArmedCommands.js';
+import { createArmedExitId, useArmedExitAuthority, useArmedExitCommands } from './app/useArmedExitCommands.js';
 import { killBannerFor } from './app/killDisplay.js';
 import { freshQuoteMid } from './order-payload.js';
 import {
@@ -154,12 +155,14 @@ export default function App() {
   // and guest inputs (feed/guest/activeSymbol/showToast) are in scope.
   const [chartMenu, setChartMenu] = useState(null); // {x, y, price, alertId, alertPrice}
   const [armPlacement, dispatchArmPlacement] = useReducer(armedPlacementReducer, null);
+  // ⚔̸ Exit-level placement: {posId, strike, right, expiry, action, qty, trail}.
+  const [exitPlacement, setExitPlacement] = useState(null);
   // Trigger placement owns the chart interaction until its second click. Do not
   // let a pending footer/bottom-edge dwell materialize the positions drawer in
   // the middle of that gesture.
   useEffect(() => {
-    if (armPlacement) disarmBottom();
-  }, [armPlacement, disarmBottom]);
+    if (armPlacement || exitPlacement) disarmBottom();
+  }, [armPlacement, exitPlacement, disarmBottom]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [now, setNow] = useState(Date.now());
   const [toast, setToast] = useState(null); // { text, kind: 'ok'|'err' }
@@ -178,6 +181,8 @@ export default function App() {
   // authority state lives above the feed because the order-event dispatch
   // reconciles armedCommandRejected through it.
   const { armedAuthority, armedAuthorityRef, commitArmedAuthority } = useArmedAuthority();
+  // ⚔̸ The exit book (spec-armed-exits.md) rides the same discipline.
+  const { armedExitAuthority, armedExitAuthorityRef, commitArmedExitAuthority } = useArmedExitAuthority();
 
   // Sounds live in src/sounds.js: chimeFill/chimeAlert ring from the order-event
   // dispatch (src/app/orderEvents.js) and useAlerts.
@@ -204,8 +209,10 @@ export default function App() {
       armedAuthorityRef,
       refAtSendRef,
       fillUnderlyingRef,
+      commitArmedExitAuthority,
+      armedExitAuthorityRef,
     });
-  }, [showToast, markFillFlash, commitArmedAuthority]);
+  }, [showToast, markFillFlash, commitArmedAuthority, commitArmedExitAuthority]);
 
   const [guestEvent, setGuestEvent] = useState(null);
   const feed = useIbkrFeed({ onOrderEvent: handleOrderEvent, onGuestEvent: setGuestEvent });
@@ -270,6 +277,22 @@ export default function App() {
     setChartMenu,
   });
   const armedQtyMax = ARMED_AUTHORITY_MAX_QTY;
+
+  const {
+    armedExitDisplay,
+    armedExits,
+    armedExitCanDisarm,
+    armedExitCanMutate,
+    createArmedExit,
+    disarmArmedExit,
+    retargetArmedExit,
+  } = useArmedExitCommands({
+    feed,
+    armedExitAuthority,
+    armedExitAuthorityRef,
+    commitArmedExitAuthority,
+    showToast,
+  });
 
   // KILL clears armed authority on the server as its first durable stage. The
   // client deliberately does nothing optimistic and waits for armedState.
@@ -887,6 +910,88 @@ export default function App() {
     dispatchArmPlacement({ type: 'cancel' });
   }, []);
 
+  // ⚔̸ Armed-exit placement (spec-armed-exits.md): a card button chooses the
+  // action; the chart click chooses the SPX level. Validation mirrors entry
+  // placement — SPX home cockpit only, live, mutation-ready authority.
+  const beginExitPlacement = useCallback((pos, action, qty, trail) => {
+    if (!feed.caps?.armedExit) { showToast('⚔̸ needs the updated bridge — restart totoro-bridge first', 'err'); return false; }
+    if (replaySurfaceOpen || guestActive || activeSymbol !== 'SPX' || !feed.live) {
+      showToast('⚔̸ armed exits are SPX-only and need the live cockpit', 'err');
+      return false;
+    }
+    if ((pos?.symbol ?? 'SPX') !== 'SPX' || pos?.expiry !== cockpitExpiry || pos?.side !== 'long' || pos?.status !== 'open') {
+      showToast('⚔̸ only an open long SPX position on the current expiry can arm an exit', 'err');
+      return false;
+    }
+    if (!armedExitCanMutate) { showToast(`⚔̸ not available — ${armedExitDisplay.status}`, 'err'); return false; }
+    if (armedExits.length >= 3) { showToast('⚔̸ exit book is full — disarm one first (max 3)', 'err'); return false; }
+    setExitPlacement({
+      posId: pos.id,
+      strike: pos.strike,
+      right: pos.type === 'call' ? 'C' : 'P',
+      expiry: pos.expiry,
+      action,
+      qty,
+      trail: action === 'trail' ? trail : null,
+    });
+    showToast('⚔̸ click the SPX level on the chart — Esc / right-click cancels', 'ok');
+    return true;
+  }, [feed.caps?.armedExit, feed.live, replaySurfaceOpen, guestActive, activeSymbol, cockpitExpiry, armedExitCanMutate, armedExitDisplay.status, armedExits.length, showToast]);
+
+  const placeExitTrigger = useCallback((rawLevel) => {
+    if (!exitPlacement) return false;
+    if (!armedExitCanMutate) { showToast(`⚔̸ not armed — ${armedExitDisplay.status}`, 'err'); return false; }
+    const level = Math.round(Number(rawLevel) * 100) / 100;
+    const px = cockpitPrice;
+    if (!Number.isFinite(level) || level <= 0) { showToast('⚔̸ invalid level', 'err'); return false; }
+    if (!Number.isFinite(px) || px <= 0) { showToast('⚔̸ no current market price', 'err'); return false; }
+    if (level === px) { showToast('⚔̸ trigger must differ from the market', 'err'); return false; }
+    if (Math.abs(level - px) / px > 0.1) { showToast('⚔̸ trigger is >10% from the market', 'err'); return false; }
+    const open = positionsLive.find((p) => p.id === exitPlacement.posId && p.status === 'open');
+    if (!open || open.side !== 'long' || !Number.isSafeInteger(open.qty) || open.qty < 1) {
+      showToast('⚔̸ position is no longer open', 'err');
+      setExitPlacement(null);
+      return false;
+    }
+    const order = {
+      id: createArmedExitId(),
+      level,
+      strike: exitPlacement.strike,
+      right: exitPlacement.right,
+      dir: level > px ? 'up' : 'down',
+      expiry: exitPlacement.expiry,
+      qty: Math.min(exitPlacement.qty, open.qty),
+      action: exitPlacement.action,
+      trail: exitPlacement.trail,
+    };
+    const sent = createArmedExit(order);
+    if (sent) setExitPlacement(null);
+    return !!sent;
+  }, [exitPlacement, armedExitCanMutate, armedExitDisplay.status, cockpitPrice, positionsLive, createArmedExit, showToast]);
+
+  // Any cockpit seam change cancels a pending exit placement, mirroring entries.
+  useEffect(() => {
+    if (!exitPlacement) return;
+    if (activeSymbol !== 'SPX' || guestActive || replaySurfaceOpen || !feed.live
+      || !feed.executionEnabled || !armedExitCanMutate || replayTransitionBlocked
+      || exitPlacement.expiry !== cockpitExpiry) {
+      setExitPlacement(null);
+    }
+  }, [exitPlacement, activeSymbol, guestActive, replaySurfaceOpen, feed.live, feed.executionEnabled, armedExitCanMutate, replayTransitionBlocked, cockpitExpiry]);
+
+  const chartExitPlacement = exitPlacement
+    ? {
+      strike: exitPlacement.strike,
+      right: exitPlacement.right,
+      expiry: exitPlacement.expiry,
+      exit: { action: exitPlacement.action, qty: exitPlacement.qty, trail: exitPlacement.trail },
+    }
+    : null;
+
+  const armedExitRowsFor = useCallback((p) => armedExits.filter((x) => (
+    x.strike === p.strike && x.right === (p.type === 'call' ? 'C' : 'P') && x.expiry === p.expiry
+  )), [armedExits]);
+
   // A placement draft belongs to one live SPX cockpit/expiry. Any seam change
   // cancels it before the old chart coordinate can be interpreted elsewhere.
   useEffect(() => {
@@ -936,6 +1041,7 @@ export default function App() {
       if (pending) return;
       if (chartMenu) return;
       if (document.querySelector('.replay-cal-pop')) return;
+      if (exitPlacement) { setExitPlacement(null); return; }
       if (armPlacement) { cancelArmPlacement(); return; }
       if (topCard) { closeTopCard(); return; }
       if (hoverPos != null) { setHoverPos(null); return; }
@@ -973,7 +1079,7 @@ export default function App() {
     onTicket: (type) => {
       // C/P work in replay too — practice tickets are the point of replay.
       if (!hotkeysLive) return false;
-      if (armPlacement) return false;
+      if (armPlacement || exitPlacement) return false;
       if (pending || chartMenu) return false; // a ticket/menu is already up
       const hov = chartApiRef.current?.hover;
       const S = replayActive ? dispPrice : cockpitPrice;
@@ -1276,9 +1382,12 @@ export default function App() {
               showPositions={showPositions}
               showMarkers={showMarkers}
               quickMode={guestPending || (guestActive && !feed.caps?.guestQuick) ? false : quickMode}
-              armPlacement={armPlacement}
-              onPlaceArmTrigger={placeArmTrigger}
-              onCancelArmPlacement={cancelArmPlacement}
+              armPlacement={armPlacement ?? chartExitPlacement}
+              onPlaceArmTrigger={(level) => (exitPlacement ? placeExitTrigger(level) : placeArmTrigger(level))}
+              onCancelArmPlacement={() => { if (exitPlacement) setExitPlacement(null); else cancelArmPlacement(); }}
+              armedExits={replayActive || activeSymbol !== 'SPX' ? EMPTY_ARR : armedExits}
+              onDisarmArmedExit={armedExitCanDisarm ? disarmArmedExit : null}
+              armedExitAuthorityStatus={armedExitDisplay.status}
               onDisarmArmed={armedCanDisarm ? disarmArmed : null}
               onAddArmedQty={armedCanExecuteMutation ? addArmedQty : null}
               onRetargetArmed={armedCanExecuteMutation ? retargetArmed : null}
@@ -1365,7 +1474,7 @@ export default function App() {
               The band is invisible chrome — hover peeks and click pins.
               Order fills never open it. Mobile: statically open. */}
           <div
-            className={`bottom-zone${bottomShown ? ' open' : ''}${armPlacement ? ' interaction-blocked' : ''}`}
+            className={`bottom-zone${bottomShown ? ' open' : ''}${armPlacement || exitPlacement ? ' interaction-blocked' : ''}`}
           >
             <button
               className="bottom-grab"
@@ -1494,6 +1603,11 @@ export default function App() {
         onRefresh={refreshPositionHistory}
         canRefresh={canRefreshPositionHistory}
         onAttachExit={attachExit}
+        armedExitOk={!!feed.caps?.armedExit && !replayActive && activeSymbol === 'SPX' && !guestActive && armedExitCanMutate}
+        armedExitRowsFor={armedExitRowsFor}
+        armedExitMaxQty={10}
+        onArmExit={beginExitPlacement}
+        onDisarmExit={armedExitCanDisarm ? disarmArmedExit : null}
       />
 
       {(() => {

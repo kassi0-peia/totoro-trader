@@ -95,6 +95,9 @@ export default function Chart({
   armPlacement = null,
   onPlaceArmTrigger = null,
   onCancelArmPlacement = null,
+  armedExits = [],
+  onDisarmArmedExit = null,
+  armedExitAuthorityStatus = 'READY',
   onDisarmArmed = null,
   onAddArmedQty = null,
   onRetargetArmed = null,
@@ -663,8 +666,20 @@ export default function Chart({
   const armPreviewLevel = armCursor?.price != null
     ? Math.round(armCursor.price * 100) / 100
     : null;
+  // Exit placements share the entry placement surface but not its OTM rule —
+  // an exit level is a P/L plan on an existing position, any side of strike.
+  const resolveExitPreview = (level) => {
+    if (!(typeof price === 'number' && Number.isFinite(price) && price > 0)) {
+      return { ok: false, reason: 'no current market price' };
+    }
+    if (level === price) return { ok: false, reason: 'level equals the market' };
+    if (Math.abs(level - price) / price > 0.1) return { ok: false, reason: '>10% from the market' };
+    return { ok: true, armed: { dir: level > price ? 'up' : 'down' } };
+  };
   const armPreview = armPlacement && armPreviewLevel != null
-    ? resolveArmedTrigger(armPlacement, { level: armPreviewLevel, marketPrice: price })
+    ? (armPlacement.exit
+      ? resolveExitPreview(armPreviewLevel)
+      : resolveArmedTrigger(armPlacement, { level: armPreviewLevel, marketPrice: price }))
     : null;
   // Offline/empty startup has no canvas layout yet. Axis controls are derived
   // from that layout, so keep them absent until both coordinate witnesses exist
@@ -673,6 +688,14 @@ export default function Chart({
     ? []
     : buildArmedAxisGroups({
       armed,
+      priceToY,
+      priceTop: layout.priceTop + 8,
+      priceBot: layout.priceBot - 8,
+    });
+  const armedExitAxisGroups = armPlacement || !layout || !view
+    ? []
+    : buildArmedAxisGroups({
+      armed: armedExits,
       priceToY,
       priceTop: layout.priceTop + 8,
       priceBot: layout.priceBot - 8,
@@ -910,9 +933,85 @@ export default function Chart({
           </div>
         );
       })}
+      {armedExitAxisGroups.map((group) => {
+        const controlTop = group.y - 8.5;
+        const ready = armedExitAuthorityStatus === 'READY';
+        const one = group.items.length === 1 ? group.items[0].arm : null;
+        const label = one ? `⚔̸ ${one.strike}${one.right}` : `⚔̸ ×${group.items.length}`;
+        const rights = new Set(group.items.map(({ arm }) => arm.right));
+        const onlyRight = rights.size === 1 ? group.items[0].arm.right : null;
+        const labelColor = onlyRight === 'C'
+          ? theme.callLine
+          : onlyRight === 'P' ? theme.putLine : theme.text;
+        return (
+          <div
+            key={`exit:${group.items.map(({ arm }) => arm.id).join(':')}`}
+            className="armed-axis-control armed-exit-axis"
+            style={{
+              left: layout.chartW,
+              top: controlTop,
+              width: RIGHT_AXIS,
+              '--armed-axis-color': labelColor,
+            }}
+            onContextMenu={(event) => event.preventDefault()}
+          >
+            <button
+              type="button"
+              className={`armed-axis-label${ready ? '' : ' withheld'}`}
+              aria-label={`${group.items.length} armed exit${group.items.length === 1 ? '' : 's'} · ${armedExitAuthorityStatus} — show details`}
+              aria-haspopup="true"
+            >
+              {label}
+            </button>
+            {group.items.filter(({ arm }) => arm.liveAuthorization === true).map(({ arm, y }) => (
+              <span
+                key={`exit-guide:${arm.id}`}
+                className="armed-axis-guide armed-exit-guide"
+                aria-hidden="true"
+                style={{
+                  top: y - controlTop,
+                  width: layout.chartW,
+                  borderColor: arm.right === 'C' ? theme.callLine : theme.putLine,
+                }}
+              />
+            ))}
+            <div className="armed-axis-popover" role="dialog" aria-label="Armed exits">
+              <div className="armed-axis-head">
+                <b>EXITS</b>
+                <span>{ready ? 'ONE-SHOT' : 'SERVER TRUTH'}</span>
+              </div>
+              {!ready && (
+                <div className="armed-axis-sync-warning">{armedExitAuthorityStatus}</div>
+              )}
+              {group.items.map(({ arm }) => (
+                <div key={`exit-row:${arm.id}`} className="armed-axis-item">
+                  <div className="armed-axis-contract">
+                    <b style={{ color: arm.right === 'C' ? theme.callLine : theme.putLine }}>
+                      {arm.action === 'trail' ? `TRL $${Number(arm.trail).toFixed(2)}` : 'CLOSE'} ×{arm.qty} {arm.strike}{arm.right}
+                    </b>
+                  </div>
+                  <div className="armed-axis-route">SPX {arm.dir === 'up' ? '↑' : '↓'} {Number(arm.level).toFixed(2)}</div>
+                  <div className="armed-axis-order">{arm.status || 'ARMED'}</div>
+                  {onDisarmArmedExit && arm.liveAuthorization === true && (arm.status || 'ARMED') === 'ARMED' && (
+                    <button
+                      type="button"
+                      className="armed-axis-disarm"
+                      onClick={() => onDisarmArmedExit(arm.id)}
+                    >
+                      DISARM
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })}
       {armPlacement && (
         <div className="arm-placement-instruction" role="status">
-          ARMING {armPlacement.strike}{armPlacement.right} · HOVER TRIGGER LEVEL · CLICK TO PLACE · ESC / RIGHT-CLICK CANCEL
+          {armPlacement.exit
+            ? `EXIT ${armPlacement.strike}${armPlacement.right} · ${armPlacement.exit.action === 'trail' ? `ATTACH TRAIL $${Number(armPlacement.exit.trail).toFixed(2)}` : 'CLOSE'} ×${armPlacement.exit.qty} · HOVER SPX LEVEL · CLICK TO ARM · ESC / RIGHT-CLICK CANCEL`
+            : `ARMING ${armPlacement.strike}${armPlacement.right} · HOVER TRIGGER LEVEL · CLICK TO PLACE · ESC / RIGHT-CLICK CANCEL`}
         </div>
       )}
       {armPlacement && armCursor && armPreviewLevel != null && layout && (
@@ -931,7 +1030,9 @@ export default function Chart({
             }}
           >
             {armPreview?.ok
-              ? `CLICK · SPX ${armPreviewLevel.toFixed(2)} ${armPreview.armed.dir === 'up' ? '↑' : '↓'} → BUY ×1 ${armPlacement.strike}${armPlacement.right}`
+              ? (armPlacement.exit
+                ? `CLICK · SPX ${armPreviewLevel.toFixed(2)} ${armPreview.armed.dir === 'up' ? '↑' : '↓'} → ${armPlacement.exit.action === 'trail' ? `TRAIL $${Number(armPlacement.exit.trail).toFixed(2)}` : 'CLOSE'} ×${armPlacement.exit.qty} ${armPlacement.strike}${armPlacement.right}`
+                : `CLICK · SPX ${armPreviewLevel.toFixed(2)} ${armPreview.armed.dir === 'up' ? '↑' : '↓'} → BUY ×1 ${armPlacement.strike}${armPlacement.right}`)
               : armPreview?.reason}
           </div>
         </>
