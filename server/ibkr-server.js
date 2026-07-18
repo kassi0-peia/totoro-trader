@@ -30,6 +30,13 @@ import {
   validateArmedOrder,
 } from './armed.js';
 import {
+  ARMED_EXIT_MAX,
+  ARMED_EXIT_QTY_MAX,
+  armedExitTriggered,
+  planArmedExitFire,
+} from './armed-exit.js';
+import { createArmedExitStateStore } from './armed-exit-store.js';
+import {
   ARMED_STATE_BLOCKED,
   ARMED_STATE_READY,
   createArmedStateStore,
@@ -83,6 +90,7 @@ const JOURNAL_FILE = path.join(__dirname, '.journal.json');
 const KILL_LOCK_FILE = path.join(__dirname, '.kill-lock.json');
 const REVERSE_LOCK_FILE = path.join(__dirname, '.reverse-lock.json');
 const ARMED_STATE_FILE = path.join(__dirname, '.armed-state.json');
+const ARMED_EXIT_STATE_FILE = path.join(__dirname, '.armed-exit-state.json');
 const SHOTS_DIR = path.join(__dirname, '.journal-shots'); // 📸 fill snapshots (client-rendered chart stills)
 
 // HTTPS is opt-in (TLS=1 or explicit TLS_CERT/TLS_KEY) so the default HTTP mode
@@ -184,6 +192,8 @@ const watchInFlight = new Map();  // symbol -> reqId of the snapshot currently o
 // never replayed into this authority.
 let armedStateStore = null;
 let armedPrevPrice = null;        // previous displayed price for crossing detection
+let armedExitStateStore = null;
+let armedExitPrevPrice = null;    // the exit book keeps its own crossing witness
 const killLockStore = createRoutingLockStore({ file: KILL_LOCK_FILE });
 let killRoutingLocked = killLockStore.isLocked(); // staged KILL bypasses normal browser/armed routes
 if (killRoutingLocked) {
@@ -324,7 +334,7 @@ const killCoordinator = createKillSwitchCoordinator({
     }
   },
   getAccount: () => (ib && connected ? portfolio.publicSnapshot().account : null),
-  clearArmed: () => clearArmedAuthorityForKill(),
+  clearArmed: () => { clearArmedAuthorityForKill(); clearArmedExitAuthorityForKill(); return true; },
   snapshotOpenOrders: (context) => killOrderService.snapshotOpenOrders(context),
   cancelOrder: (orderId, context) => killOrderService.cancelOrder(orderId, context),
   waitForCancellations: (orderIds, context) => killOrderService.waitForCancellations(orderIds, context),
@@ -412,7 +422,7 @@ const homeMarket = createHomeMarket({
   basis: basisCtl,
   broadcast,
   publishSnapshot: () => broadcast(snapshotMsg()),
-  onDisplayPriceTick: () => checkArmedOrders(),
+  onDisplayPriceTick: () => { checkArmedOrders(); checkArmedExitOrders(); },
   requestReconnect: () => { try { ib?.disconnect(); } catch { /* already gone */ } },
 });
 
@@ -463,6 +473,7 @@ wss.on('connection', (ws) => {
     else if (msg.type === 'fillNote') tradeJournal.handleFillNote(msg);
     else if (msg.type === 'fillShot') tradeJournal.handleFillShot(msg);
     else if (msg.type === 'armedCommand') handleArmedCommand(ws, msg);
+    else if (msg.type === 'armedExitCommand') handleArmedExitCommand(ws, msg);
     else if (msg.type === 'armed' || msg.type === 'armedQtyAdd') handleLegacyArmedCommand(ws, msg);
     else if (msg.type === 'kill') handleKill(ws, msg);
     else if (msg.type === 'reverse') handleReverse(ws, msg);
@@ -2080,6 +2091,21 @@ function handleReverse(ws, msg) {
     return send(terminal);
   }
 
+  // Exits armed on the source contract must be durably gone before the
+  // reverse close leg goes out; a still-armed row after the flip would act
+  // on the wrong book. Undisarmable READY rows fail the REVERSE closed.
+  const exitDisarm = disarmArmedExitsForContract({
+    strike: resolved.source?.strike,
+    right: resolved.source?.right,
+    expiry: resolved.source?.expiry,
+    reason: 'REVERSE transaction',
+  });
+  if (!exitDisarm.ok) {
+    const terminal = reject('EXIT_DISARM_FAILED', 'armed exits on this position could not be disarmed');
+    reverseRequestRegistry.commit(reservation.token, terminal);
+    return null;
+  }
+
   reverseCoordinator.start({
     requestId,
     source: resolved.source,
@@ -2194,6 +2220,338 @@ function fireArmedOrder(a, px) {
   return { accepted: true, orderId: disposition.orderId, ask: entry.ask };
 }
 
+// ── ⚔̸ Durable armed-exit authority (spec-armed-exits.md) ────────────────────
+// The mirror of the entry book: pre-authorized exits on exact open long SPX
+// positions that fire when the displayed price crosses their level. CLOSE
+// fires a fresh-bid marketable limit (reduce-only via the gateway, never MKT,
+// no ⚡ auto-cancel — a resting exit beats a silently naked position); TRAIL
+// attaches the regular typed-$ trailing stop through the same order path the
+// position card uses. Fail closed at fire: the one-shot is consumed first and
+// every fence failure reports instead of degrading.
+
+function publicArmedExitState() {
+  return armedExitStateStore?.publicState() ?? null;
+}
+
+// Authoritative open quantity/side for one exact home-expiry SPX option.
+// Returns null while position truth is not ready (fences fail closed on it).
+function armedExitOpenPosition({ strike, right, expiry } = {}) {
+  const snapshot = portfolio.publicSnapshot();
+  if (!snapshot.positionsReady) return null;
+  let qty = 0;
+  for (const row of snapshot.positions) {
+    const c = row?.contract;
+    if (!c || String(c.secType ?? '').toUpperCase() !== 'OPT') continue;
+    if (String(c.symbol ?? '').trim().toUpperCase() !== 'SPX') continue;
+    if (String(c.lastTradeDateOrContractMonth ?? '').slice(0, 8) !== expiry) continue;
+    if (Number(c.strike) !== strike) continue;
+    const r = String(c.right ?? '').trim().toUpperCase().charAt(0);
+    if (r !== right) continue;
+    qty += Number(row.qty) || 0;
+  }
+  return { openQty: qty > 0 ? qty : 0, side: qty > 0 ? 'long' : qty < 0 ? 'short' : 'flat' };
+}
+
+function broadcastArmedExitState(extra = {}) {
+  const state = publicArmedExitState();
+  if (!state) return false;
+  return broadcast({ type: 'armedExitState', ...state, ...extra });
+}
+
+function ensureArmedExitStore(account = portfolio.publicSnapshot().account) {
+  if (armedExitStateStore) return armedExitStateStore;
+  const expiry = currentArmedExpiry();
+  if (!account || !expiry) return null;
+  armedExitStateStore = createArmedExitStateStore({
+    file: ARMED_EXIT_STATE_FILE,
+    initialAccount: account,
+    initialExpiry: expiry,
+    liveContext: (raw) => {
+      const truth = armedExitOpenPosition(raw ?? {});
+      return {
+        price: homeMarket.displayPrice(),
+        // A short/flat contract reports 0 open — arming it is refused. An
+        // unknown truth omits the fence; CREATE is already gated on
+        // executionReady(), which requires the positionEnd barrier.
+        ...(truth ? { openQty: truth.side === 'long' ? truth.openQty : 0 } : {}),
+      };
+    },
+  });
+  const state = publicArmedExitState();
+  if (state.phase === ARMED_STATE_BLOCKED) {
+    console.error(`[ibkr] armed-exit authority BLOCKED: ${state.error || 'persisted state is not trustworthy'}; staged KILL is required before routing resumes`);
+  } else {
+    syncArmedExitAuthorityAnchor({ reason: 'bridge authority initialized' });
+  }
+  broadcastArmedExitState();
+  return armedExitStateStore;
+}
+
+function clearReadyArmedExitState({ nextAccount, nextExpiry, reason, notify = true } = {}) {
+  const before = publicArmedExitState();
+  if (!before || before.phase !== ARMED_STATE_READY) {
+    return { ok: false, reason: before?.error || 'armed-exit authority unavailable' };
+  }
+  const result = armedExitStateStore.clearInternal({
+    lineageId: before.lineageId,
+    account: before.account,
+    expiry: before.expiry,
+    baseRevision: before.revision,
+    baseDigest: before.digest,
+    nextAccount: nextAccount || before.account,
+    nextExpiry: nextExpiry || before.expiry,
+  });
+  if (!result.ok) {
+    broadcastArmedExitState();
+    return result;
+  }
+  armedExitPrevPrice = null;
+  broadcastArmedExitState();
+  if (notify) {
+    for (const exit of before.orders) {
+      broadcast({ type: 'armedExitFailed', ...exit, reason: reason || 'disarmed by bridge authority change' });
+    }
+  }
+  return result;
+}
+
+function syncArmedExitAuthorityAnchor({ reason = 'armed-exit authority changed' } = {}) {
+  const state = publicArmedExitState();
+  const selectedAccount = portfolio.publicSnapshot().account;
+  const expiry = currentArmedExpiry();
+  if (!state || state.phase !== ARMED_STATE_READY || !selectedAccount || !expiry) return false;
+  if (state.expiry !== expiry) {
+    const result = clearReadyArmedExitState({
+      nextAccount: selectedAccount,
+      nextExpiry: expiry,
+      reason: `${reason}: expiry rolled — disarmed`,
+    });
+    return result.ok;
+  }
+  if (state.orders.length === 0 && state.account !== selectedAccount) {
+    const result = clearReadyArmedExitState({
+      nextAccount: selectedAccount,
+      nextExpiry: expiry,
+      reason,
+      notify: false,
+    });
+    return result.ok;
+  }
+  if (state.orders.length && state.account !== selectedAccount) {
+    console.error(`[ibkr] armed-exit authority belongs to ${state.account}; selected account ${selectedAccount} cannot watch or change it`);
+  }
+  return true;
+}
+
+function rejectArmedExitCommand(ws, msg, code, reason, state = publicArmedExitState()) {
+  return sendWs(ws, {
+    type: 'armedExitCommandRejected',
+    protocol: 1,
+    requestId: typeof msg?.requestId === 'string' ? msg.requestId : null,
+    code,
+    reason,
+    currentState: state,
+  });
+}
+
+function handleArmedExitCommand(ws, msg) {
+  const store = ensureArmedExitStore();
+  if (!store) return rejectArmedExitCommand(ws, msg, 'NO_AUTHORITY', 'no selected account is available for armed-exit authority');
+  if (msg?.protocol !== 1) return rejectArmedExitCommand(ws, msg, 'PROTOCOL_MISMATCH', 'armed-exit protocol 1 is required');
+
+  const operationType = msg?.operation?.type;
+  if (operationType === 'CREATE' || operationType === 'RETARGET') {
+    const state = publicArmedExitState();
+    const selectedAccount = portfolio.publicSnapshot().account;
+    const expiry = currentArmedExpiry();
+    if (killRoutingLocked || reverseRoutingLocked) {
+      return rejectArmedExitCommand(
+        ws,
+        msg,
+        'ROUTING_LOCKED',
+        killRoutingLocked ? 'KILL transaction active' : 'REVERSE transaction active',
+      );
+    }
+    if (!executionReady()) {
+      return rejectArmedExitCommand(ws, msg, 'EXECUTION_DISABLED', 'account/order/position authority is not ready');
+    }
+    if (state?.phase !== ARMED_STATE_READY || state.account !== selectedAccount || state.expiry !== expiry) {
+      return rejectArmedExitCommand(ws, msg, 'AUTHORITY_MISMATCH', 'armed-exit authority does not match the selected account and current expiry');
+    }
+    if (!Number.isFinite(homeMarket.displayPrice())) {
+      return rejectArmedExitCommand(ws, msg, 'NO_MARKET_PRICE', 'no current SPX-equivalent price is available');
+    }
+  } else if (operationType !== 'DISARM') {
+    return rejectArmedExitCommand(ws, msg, 'INVALID_OPERATION', 'unsupported armed-exit operation');
+  }
+
+  const result = store.compareAndCommit(msg);
+  if (!result.ok) {
+    if (result.state?.phase === ARMED_STATE_BLOCKED) broadcastArmedExitState();
+    return rejectArmedExitCommand(ws, msg, result.code || 'REJECTED', result.reason || 'armed-exit command refused', result.state);
+  }
+  if (operationType === 'RETARGET' && result.ok && !result.duplicate) armedExitPrevPrice = null;
+  broadcastArmedExitState({ appliedRequestId: msg.requestId });
+  const committed = result.state.orders;
+  console.log(`[ibkr] ⚔̸ exit authority r${result.state.revision}: ${committed.length ? committed.map((exit) => `${exit.action === 'trail' ? `TRL$${exit.trail}` : 'CLOSE'} ${exit.qty}× ${exit.strike}${exit.right} @ ${exit.level}${exit.dir === 'up' ? '↑' : '↓'}`).join(' · ') : 'empty'}`);
+  if (committed.length === 0) syncArmedExitAuthorityAnchor({ reason: 'empty authority re-anchored' });
+  return true;
+}
+
+function clearArmedExitAuthorityForKill() {
+  const account = portfolio.publicSnapshot().account;
+  const expiry = currentArmedExpiry();
+  const store = ensureArmedExitStore(account);
+  if (!store || !account || !expiry) throw new Error('armed-exit authority cannot be cleared without an exact account and expiry');
+  const before = publicArmedExitState();
+  const result = before.phase === ARMED_STATE_BLOCKED
+    ? store.recoverBlocked({ nextAccount: account, nextExpiry: expiry })
+    : store.clearInternal({
+      lineageId: before.lineageId,
+      account: before.account,
+      expiry: before.expiry,
+      baseRevision: before.revision,
+      baseDigest: before.digest,
+      nextAccount: account,
+      nextExpiry: expiry,
+    });
+  if (!result.ok) throw new Error(result.reason || 'armed-exit authority clear could not be persisted');
+  armedExitPrevPrice = null;
+  broadcastArmedExitState();
+  broadcast({ type: 'armedExitCleared', reason: 'KILL transaction' });
+  return true;
+}
+
+// REVERSE flips a position; any exit armed on it would then act on the wrong
+// book. Durably disarm every matching row BEFORE the reverse close leg goes
+// out. READY-but-undisarmable fails the caller closed; a BLOCKED book cannot
+// fire (the watcher requires READY), so it does not block the reverse.
+function disarmArmedExitsForContract({ strike, right, expiry, reason = 'position reversed' } = {}) {
+  const state = publicArmedExitState();
+  if (!state || state.phase !== ARMED_STATE_READY) return { ok: true, disarmed: 0 };
+  const matches = (exit) => exit.strike === strike && exit.right === right && exit.expiry === expiry;
+  let disarmed = 0;
+  for (;;) {
+    const current = publicArmedExitState();
+    if (!current || current.phase !== ARMED_STATE_READY) break;
+    const row = current.orders.find(matches);
+    if (!row) break;
+    const removal = armedExitStateStore.removeInternal({
+      id: row.id,
+      lineageId: current.lineageId,
+      account: current.account,
+      expiry: current.expiry,
+      baseRevision: current.revision,
+      baseDigest: current.digest,
+    });
+    if (!removal.ok) break;
+    disarmed += 1;
+    broadcast({ type: 'armedExitFailed', ...removal.removedOrder, reason });
+  }
+  if (disarmed) broadcastArmedExitState();
+  const after = publicArmedExitState();
+  const remaining = after?.phase === ARMED_STATE_READY ? after.orders.some(matches) : false;
+  return { ok: !remaining, disarmed };
+}
+
+// Runs on every SPX/ES tick beside checkArmedOrders, with its own crossing
+// witness: the first tick after any gap only primes.
+function checkArmedExitOrders() {
+  const px = homeMarket.displayPrice();
+  if (px == null) return;
+  const prev = armedExitPrevPrice;
+  armedExitPrevPrice = px;
+  const state = publicArmedExitState();
+  if (!state || state.phase !== ARMED_STATE_READY) return;
+  if (killRoutingLocked || reverseRoutingLocked) return;
+  const selectedAccount = portfolio.publicSnapshot().account;
+  const expiry = currentArmedExpiry();
+  if (!executionReady() || state.account !== selectedAccount || state.expiry !== expiry) return;
+  if (prev == null || prev === px || state.orders.length === 0) return;
+  for (const candidate of state.orders) {
+    if (!armedExitTriggered(candidate, prev, px)) continue;
+    const current = publicArmedExitState();
+    const live = current?.orders.find((exit) => exit.id === candidate.id);
+    if (!live || !armedExitTriggered(live, prev, px)) continue;
+    const removal = armedExitStateStore.removeInternal({
+      id: live.id,
+      lineageId: current.lineageId,
+      account: current.account,
+      expiry: current.expiry,
+      baseRevision: current.revision,
+      baseDigest: current.digest,
+    });
+    if (!removal.ok) {
+      broadcastArmedExitState();
+      broadcast({
+        type: 'armedExitFailed',
+        ...live,
+        reason: `authority persistence failed — exit did not fire${removal.reason ? `: ${removal.reason}` : ''}`,
+      });
+      continue;
+    }
+    const x = removal.removedOrder;
+    broadcastArmedExitState();
+    let result;
+    try {
+      result = fireArmedExit(x, px);
+    } catch (error) {
+      result = { accepted: false, reason: error?.message || String(error) };
+    }
+    if (result?.accepted === true) {
+      broadcast({ type: 'armedExitFired', ...x, qty: result.qty, price: px, bid: result.bid, orderId: result.orderId });
+    } else {
+      broadcast({ type: 'armedExitFailed', ...x, reason: result?.reason || 'order routing refused the armed exit' });
+    }
+  }
+}
+
+// Fire once the one-shot is durably consumed. Both actions demand a fresh
+// exact bid (no blind fires) and route through the order gateway so every
+// existing guard (reduce-only reservation, account gate, ack flow) applies.
+function fireArmedExit(x, px) {
+  const currentExpiry = homeMarket.getCurrentExpiry();
+  if (x.expiry && currentExpiry && x.expiry !== currentExpiry) {
+    return { accepted: false, reason: 'expiry rolled since arming' };
+  }
+  if (!isPortfolioReady(connected, portfolio.isReady(), ordersReady)) {
+    return { accepted: false, reason: 'portfolio recovery incomplete — refused to fire' };
+  }
+  const truth = armedExitOpenPosition(x);
+  if (!truth) return { accepted: false, reason: 'position truth unavailable — refused to fire' };
+  const plan = planArmedExitFire(x, truth);
+  if (!plan.ok) return { accepted: false, reason: plan.reason };
+  const entry = homeMarket.getChainEntry(`${x.strike}${x.right}`);
+  const fresh = entry && entry.expiry === currentExpiry && entry.bid > 0 &&
+    entry.bidTs != null && Date.now() - entry.bidTs < 60_000;
+  if (!fresh) {
+    return { accepted: false, reason: 'no fresh bid at trigger — refused to fire blind' };
+  }
+  const base = {
+    clientRef: `armedx:${x.id}`,
+    intent: 'close',
+    action: 'SELL',
+    strike: x.strike,
+    right: x.right,
+    qty: plan.qty,
+    expiry: x.expiry || currentExpiry,
+  };
+  let payload;
+  if (x.action === 'trail') {
+    payload = { ...base, trail: x.trail };
+  } else {
+    const tick = entry.bid < 3 ? 0.05 : 0.10;
+    const limit = Math.max(Math.round((entry.bid - tick) * 100) / 100, 0.05);
+    payload = { ...base, limit, refAtSend: entry.bid };
+  }
+  const disposition = orderGateway.placeOrderRequest({ readyState: 0 }, payload);
+  if (disposition?.accepted !== true) {
+    return { accepted: false, reason: disposition?.reason || 'bridge refused the armed exit' };
+  }
+  console.log(`[ibkr] ⚔̸ EXIT FIRED ${x.strike}${x.right}: ${px.toFixed(2)} crossed ${x.level} → ${x.action === 'trail' ? `attach TRAIL $${x.trail}` : 'SELL'} ${plan.qty}× ${x.action === 'trail' ? '' : `@ ≥${payload.limit}`}`);
+  return { accepted: true, orderId: disposition.orderId, bid: entry.bid, qty: plan.qty };
+}
+
 // ── Session evaluation ──────────────────────────────────────────────────────
 
 function evaluateSession() {
@@ -2208,6 +2566,7 @@ function evaluateSession() {
 
   if (expiryRolled) {
     syncArmedAuthorityAnchor({ reason: 'session changed' });
+    syncArmedExitAuthorityAnchor({ reason: 'session changed' });
   }
 
   if (next.source !== prevSource || next.expiry !== prevExpiry) {
@@ -2264,6 +2623,7 @@ function resetSubscriptions() {
   // subscription) — but the crossing clock resets, so a level crossed during
   // the blackout can never fire retroactively (first tick back only primes).
   armedPrevPrice = null;
+  armedExitPrevPrice = null;
 }
 
 function setStatus(s) {
@@ -2297,6 +2657,8 @@ function setAccount(id) {
   if (next.account !== before) {
     ensureArmedStateStore(next.account);
     syncArmedAuthorityAnchor({ reason: 'selected account changed' });
+    ensureArmedExitStore(next.account);
+    syncArmedExitAuthorityAnchor({ reason: 'selected account changed' });
     killOrderService.accountChanged(next.account);
     killCoordinator.accountChanged(next.account);
     reverseCoordinator.accountChanged(next.account);
@@ -2902,6 +3264,7 @@ function snapshotMsg() {
     killState: publicKillState(),
     reverseState: publicReverseState(),
     armedState: publicArmedState(),
+    armedExitState: publicArmedExitState(),
     // Capability handshake: the client must never send an order field this
     // bridge won't understand — an old bridge ignoring `trail` would route
     // the leg as naked MKT. New order-shaping fields get a flag here, and
@@ -2912,6 +3275,9 @@ function snapshotMsg() {
       reverseTransaction: true,
       armedStateV1: true,
       armedQtyMax: ARMED_QTY_MAX,
+      armedExit: true,
+      armedExitMax: ARMED_EXIT_MAX,
+      armedExitQtyMax: ARMED_EXIT_QTY_MAX,
       guestMarket: true,
       guestQuick: true,
       guestRung: true,
