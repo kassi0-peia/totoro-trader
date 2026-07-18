@@ -5,11 +5,12 @@
 import { POSITION_LIFECYCLE } from './positionLifecycle.js';
 import { freshUnderlyingPriceForFill } from './helpers.js';
 import { ARMED_AUTHORITY_MAX_QTY, reconcileArmedRejection } from './armedAuthority.js';
+import { reconcileArmedExitRejection } from './armedExitAuthority.js';
 import { chimeFill, chimeAlert } from '../sounds.js';
 
 // deps: { showToast, dispatchPositionLifecycle, markFillFlash,
 //         commitArmedAuthority, armedAuthorityRef, refAtSendRef,
-//         fillUnderlyingRef }
+//         fillUnderlyingRef, commitArmedExitAuthority, armedExitAuthorityRef }
 // The refs are passed whole (not .current) so every event reads the freshest
 // value, exactly as the original closure did.
 export function applyOrderEvent(msg, authority, deps) {
@@ -21,6 +22,8 @@ export function applyOrderEvent(msg, authority, deps) {
     armedAuthorityRef,
     refAtSendRef,
     fillUnderlyingRef,
+    commitArmedExitAuthority,
+    armedExitAuthorityRef,
   } = deps;
   if (msg.type === 'reverseState') {
     if (msg.phase === 'COMPLETE') {
@@ -79,6 +82,32 @@ export function applyOrderEvent(msg, authority, deps) {
   }
   if (msg.type === 'armedFailed' || msg.type === 'armedRejected') {
     showToast(`⚔ ${msg.strike ?? ''}${msg.right ?? ''} disarmed — ${msg.reason}`, 'err');
+    return;
+  }
+  if (msg.type === 'armedExitCommandRejected') {
+    const previous = armedExitAuthorityRef?.current;
+    if (previous && commitArmedExitAuthority) {
+      const reconciled = reconcileArmedExitRejection(previous, msg);
+      if (reconciled.state && reconciled.state !== previous) {
+        commitArmedExitAuthority(reconciled.state);
+      }
+    }
+    showToast(`⚔̸ unchanged — ${msg.reason || 'bridge refused the command'}`, 'err');
+    return;
+  }
+  if (msg.type === 'armedExitCleared') {
+    return; // authority truth arrives via armedExitState, never via a toast
+  }
+  if (msg.type === 'armedExitFired') {
+    chimeAlert();
+    const what = msg.action === 'trail'
+      ? `attached TRAIL $${Number(msg.trail).toFixed(2)}`
+      : 'submitted a marketable LMT close';
+    showToast(`⚔̸ EXIT FIRED — SPX crossed ${msg.level}: ${what} ×${msg.qty ?? ''} on ${msg.strike}${msg.right}`, 'ok');
+    return;
+  }
+  if (msg.type === 'armedExitFailed') {
+    showToast(`⚔̸ ${msg.strike ?? ''}${msg.right ?? ''} exit disarmed — ${msg.reason}`, 'err');
     return;
   }
   if (msg.type === 'orderError') {

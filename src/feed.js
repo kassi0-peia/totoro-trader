@@ -210,7 +210,7 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent, onGuestEvent }
         // Raw armedState is a witness from one exact socket/session. App keeps
         // its own offline confirmed cache; the transport must not relabel an
         // older process's raw packet as fresh while this socket awaits snapshot.
-        setSnapshot((s) => ({ ...s, socketOpen: true, guestClientReady: false, armedState: null }));
+        setSnapshot((s) => ({ ...s, socketOpen: true, guestClientReady: false, armedState: null, armedExitState: null }));
         sendHello();
       };
 
@@ -246,7 +246,8 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent, onGuestEvent }
         // Order lifecycle events are transient — hand them to the callback.
         if (msg.type === 'orderAck' || msg.type === 'fill' || msg.type === 'orderError' || msg.type === 'orderWarning' || msg.type === 'orderAutoCancel' || msg.type === 'cancelAck' ||
             msg.type === 'armedFired' || msg.type === 'armedFailed' || msg.type === 'armedRejected' || msg.type === 'armedCleared' ||
-            msg.type === 'armedQtyUpdated' || msg.type === 'armedQtyRejected' || msg.type === 'armedCommandRejected') {
+            msg.type === 'armedQtyUpdated' || msg.type === 'armedQtyRejected' || msg.type === 'armedCommandRejected' ||
+            msg.type === 'armedExitFired' || msg.type === 'armedExitFailed' || msg.type === 'armedExitCleared' || msg.type === 'armedExitCommandRejected') {
           onOrderEventRef.current?.(msg, {
             positionsRevision: positionsAuthorityRef.current.positionsRevision,
           });
@@ -286,6 +287,7 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent, onGuestEvent }
           socketOpen: false,
           guestClientReady: false,
           armedState: null,
+          armedExitState: null,
           positionAuthoritySourceRevision: null,
           // Capabilities belong to this exact bridge process. Never let a
           // reconnect briefly expose an order-shaping control from the old one.
@@ -398,6 +400,12 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent, onGuestEvent }
     return sendWsJson(socketRef.current, command);
   }, []);
 
+  // Exit-book twin of sendArmedCommand — same one-command transport contract.
+  const sendArmedExitCommand = useCallback((command) => {
+    if (command?.type !== 'armedExitCommand' || command?.protocol !== 1) return false;
+    return sendWsJson(socketRef.current, command);
+  }, []);
+
   // Attach/edit/clear a one-line note on a fill row (today or any journal day).
   const sendFillNote = useCallback((id, text) => {
     return sendWsJson(socketRef.current, { type: 'fillNote', id, text });
@@ -439,5 +447,5 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent, onGuestEvent }
     return sendWsJson(socketRef.current, { type: 'watchlist', symbols });
   }, []);
 
-  return { ...snapshot, createRequestId, sendOrder, sendCancel, sendKill, sendReverse, sendArmedCommand, requestQuote, requestHistory, requestOptHistory, requestReplayDay, requestJournal, sendFillNote, sendFillShot, searchSymbols, activateSymbol, deactivateSymbol, setWatchlist };
+  return { ...snapshot, createRequestId, sendOrder, sendCancel, sendKill, sendReverse, sendArmedCommand, sendArmedExitCommand, requestQuote, requestHistory, requestOptHistory, requestReplayDay, requestJournal, sendFillNote, sendFillShot, searchSymbols, activateSymbol, deactivateSymbol, setWatchlist };
 }

@@ -38,6 +38,7 @@ export function createInitialSnapshot() {
     // Server-authoritative, revisioned armed-entry state. Browser storage is a
     // cache only; null means this bridge has not published authority yet.
     armedState: null,
+    armedExitState: null,
     caps: {},              // bridge capability flags (e.g. trail) — empty until the snapshot says
     trades: [],            // today's fills (blotter)
     positions: [],         // IBKR-authoritative open option positions
@@ -201,6 +202,9 @@ export function applyMessage(s, msg, clock = Date.now) {
       armedState: msg.armedState && typeof msg.armedState === 'object'
         ? { ...msg.armedState }
         : null,
+      armedExitState: msg.armedExitState && typeof msg.armedExitState === 'object'
+        ? { ...msg.armedExitState }
+        : null,
       // Bridge capability flags (absent on an old bridge = all false) — see
       // the snapshot builder's caps note. Gates order fields the bridge must
       // understand to route safely.
@@ -281,6 +285,11 @@ export function applyMessage(s, msg, clock = Date.now) {
   if (msg.type === 'armedState') {
     const { type: _messageType, ...armedState } = msg;
     return { ...s, armedState };
+  }
+
+  if (msg.type === 'armedExitState') {
+    const { type: _messageType, ...armedExitState } = msg;
+    return { ...s, armedExitState };
   }
 
   if (msg.type === 'historyResult') {
