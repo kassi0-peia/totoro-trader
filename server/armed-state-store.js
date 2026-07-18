@@ -18,7 +18,10 @@ export const ARMED_STATE_PROTOCOL = 1;
 export const ARMED_STATE_READY = 'READY';
 export const ARMED_STATE_BLOCKED = 'BLOCKED';
 
-const ORDER_KEYS = Object.freeze(['id', 'level', 'strike', 'right', 'dir', 'expiry', 'qty']);
+// Default record shape = ⚔ armed entries. A second lineage (⚔̸ armed exits)
+// reuses this store with its own key set / id prefix / structural extras —
+// the durability, digest, and compare-and-commit discipline are shared.
+const DEFAULT_ORDER_KEYS = Object.freeze(['id', 'level', 'strike', 'right', 'dir', 'expiry', 'qty']);
 const FILE_KEYS = Object.freeze(['version', 'lineageId', 'revision', 'digest', 'account', 'expiry', 'orders']);
 const DIGEST_RE = /^[a-f0-9]{64}$/;
 
@@ -52,28 +55,22 @@ function safeExpiry(value) {
   return day <= days[month - 1];
 }
 
-function safeOrderId(value) {
-  return typeof value === 'string' && value.length > 0 && validOrderClientRef(`armed:${value}`);
+function safeOrderIdFor(value, idPrefix) {
+  return typeof value === 'string' && value.length > 0 && validOrderClientRef(`${idPrefix}${value}`);
 }
 
 function compareOrderIds(left, right) {
   return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
 }
 
-function fixedOrder(value) {
-  return {
-    id: value?.id,
-    level: value?.level,
-    strike: value?.strike,
-    right: value?.right,
-    dir: value?.dir,
-    expiry: value?.expiry,
-    qty: value?.qty,
-  };
+function fixedOrderFor(value, orderKeys) {
+  const fixed = {};
+  for (const key of orderKeys) fixed[key] = value?.[key];
+  return fixed;
 }
 
-function structuralOrderReason(order, expiry) {
-  if (!safeOrderId(order.id)) return 'invalid armed id';
+function structuralOrderReasonFor(order, expiry, { idPrefix, structuralExtra }) {
+  if (!safeOrderIdFor(order.id, idPrefix)) return 'invalid armed id';
   if (!(typeof order.level === 'number' && Number.isFinite(order.level) && order.level > 0)) {
     return 'invalid trigger level';
   }
@@ -84,18 +81,22 @@ function structuralOrderReason(order, expiry) {
   if (order.dir !== 'up' && order.dir !== 'down') return 'invalid trigger direction';
   if (order.expiry !== expiry || !safeExpiry(order.expiry)) return 'armed expiry does not match its state anchor';
   if (!Number.isSafeInteger(order.qty) || order.qty < 1) return 'invalid armed quantity';
+  if (structuralExtra) {
+    const extra = structuralExtra(order);
+    if (extra) return extra;
+  }
   return null;
 }
 
-function canonicalOrders(orders) {
-  return orders.map((order) => fixedOrder(order)).sort(compareOrderIds);
+function canonicalOrdersFor(orders, orderKeys) {
+  return orders.map((order) => fixedOrderFor(order, orderKeys)).sort(compareOrderIds);
 }
 
-export function armedStateDigest(orders) {
-  return createHash('sha256').update(JSON.stringify(canonicalOrders(orders))).digest('hex');
+export function armedStateDigest(orders, orderKeys = DEFAULT_ORDER_KEYS) {
+  return createHash('sha256').update(JSON.stringify(canonicalOrdersFor(orders, orderKeys))).digest('hex');
 }
 
-function persistedShape(state) {
+function persistedShape(state, orderKeys) {
   return {
     version: ARMED_STATE_VERSION,
     lineageId: state.lineageId,
@@ -103,11 +104,11 @@ function persistedShape(state) {
     digest: state.digest,
     account: state.account,
     expiry: state.expiry,
-    orders: canonicalOrders(state.orders),
+    orders: canonicalOrdersFor(state.orders, orderKeys),
   };
 }
 
-function publicClone(state, sessionId) {
+function publicClone(state, sessionId, orderKeys) {
   return {
     protocol: ARMED_STATE_PROTOCOL,
     phase: state.phase,
@@ -117,12 +118,12 @@ function publicClone(state, sessionId) {
     digest: state.digest,
     account: state.account,
     expiry: state.expiry,
-    orders: canonicalOrders(state.orders),
+    orders: canonicalOrdersFor(state.orders, orderKeys),
     error: state.error ?? null,
   };
 }
 
-function blockedState(reason, prior = {}) {
+function blockedState(reason, prior = {}, orderKeys = DEFAULT_ORDER_KEYS) {
   return {
     phase: ARMED_STATE_BLOCKED,
     lineageId: prior.lineageId ?? null,
@@ -130,14 +131,14 @@ function blockedState(reason, prior = {}) {
     digest: typeof prior.digest === 'string' ? prior.digest : null,
     account: typeof prior.account === 'string' ? prior.account : null,
     expiry: typeof prior.expiry === 'string' ? prior.expiry : null,
-    orders: Array.isArray(prior.orders) ? canonicalOrders(prior.orders) : [],
+    orders: Array.isArray(prior.orders) ? canonicalOrdersFor(prior.orders, orderKeys) : [],
     error: reason,
   };
 }
 
 function validatorValue(result) {
   if (!result || result.ok !== true) return null;
-  return result.armed ?? result.order ?? result.value ?? null;
+  return result.armed ?? result.order ?? result.exit ?? result.value ?? null;
 }
 
 export function createArmedStateStore({
@@ -152,7 +153,16 @@ export function createArmedStateStore({
   validateOrder,
   deriveAddQuantity,
   deriveRetarget,
+  orderKeys = DEFAULT_ORDER_KEYS,
+  idPrefix = 'armed:',
+  structuralExtra = null,
+  allowCreateQuantity = false,
 } = {}) {
+  const canonical = (orders) => canonicalOrdersFor(orders, orderKeys);
+  const fixOrder = (value) => fixedOrderFor(value, orderKeys);
+  const digestOf = (orders) => armedStateDigest(orders, orderKeys);
+  const safeOrderId = (value) => safeOrderIdFor(value, idPrefix);
+  const structuralOrderReason = (order, expiry) => structuralOrderReasonFor(order, expiry, { idPrefix, structuralExtra });
   if (typeof file !== 'string' || !file) throw new TypeError('armed state file is required');
   if (!safeAccount(initialAccount)) throw new TypeError('armed state initial account is required');
   if (!safeExpiry(initialExpiry)) throw new TypeError('armed state initial expiry must be YYYYMMDD');
@@ -182,7 +192,7 @@ export function createArmedStateStore({
     }
     const candidate = validatorValue(result);
     if (!candidate) return { ok: false, reason: result?.reason || 'armed order validation failed' };
-    const order = fixedOrder(candidate);
+    const order = fixOrder(candidate);
     const structuralReason = structuralOrderReason(order, expiry);
     if (structuralReason) return { ok: false, reason: structuralReason };
     return { ok: true, order };
@@ -213,7 +223,7 @@ export function createArmedStateStore({
     const orders = [];
     const ids = new Set();
     for (const raw of parsed.orders) {
-      if (!sameKeys(raw, ORDER_KEYS)) throw new Error('armed state file contains a non-canonical order shape');
+      if (!sameKeys(raw, orderKeys)) throw new Error('armed state file contains a non-canonical order shape');
       const validated = validateAndCanonicalize(raw, {
         account: parsed.account,
         expiry: parsed.expiry,
@@ -227,9 +237,9 @@ export function createArmedStateStore({
       ids.add(validated.order.id);
       orders.push(validated.order);
     }
-    const sorted = canonicalOrders(orders);
+    const sorted = canonical(orders);
     if (!isDeepStrictEqual(parsed.orders, sorted)) throw new Error('armed state file order list is not canonical');
-    if (armedStateDigest(sorted) !== parsed.digest) throw new Error('armed state file digest does not match its orders');
+    if (digestOf(sorted) !== parsed.digest) throw new Error('armed state file digest does not match its orders');
     return {
       phase: ARMED_STATE_READY,
       lineageId: parsed.lineageId,
@@ -247,7 +257,7 @@ export function createArmedStateStore({
     state = parsePersisted(readFileSync(file, 'utf8'));
   } catch (error) {
     if (error?.code !== 'ENOENT') {
-      state = blockedState(errorText(error));
+      state = blockedState(errorText(error), {}, orderKeys);
     } else {
       const lineageId = createLineageId();
       if (!safeIdentity(lineageId)) throw new TypeError('armed state lineage identity is invalid');
@@ -255,17 +265,17 @@ export function createArmedStateStore({
         phase: ARMED_STATE_READY,
         lineageId,
         revision: 0,
-        digest: armedStateDigest([]),
+        digest: digestOf([]),
         account: initialAccount,
         expiry: initialExpiry,
         orders: [],
         error: null,
       };
       try {
-        writeFileSync(file, JSON.stringify(persistedShape(empty)));
+        writeFileSync(file, JSON.stringify(persistedShape(empty, orderKeys)));
         state = empty;
       } catch (writeError) {
-        state = blockedState(`armed state initialization persistence failed: ${errorText(writeError)}`, empty);
+        state = blockedState(`armed state initialization persistence failed: ${errorText(writeError)}`, empty, orderKeys);
       }
     }
   }
@@ -277,7 +287,7 @@ export function createArmedStateStore({
   }
 
   function reject(code, reason, extra = {}) {
-    return { ok: false, code, reason, ...extra, state: publicClone(state, sessionId) };
+    return { ok: false, code, reason, ...extra, state: publicClone(state, sessionId, orderKeys) };
   }
 
   function compareAuthority({ lineageId, baseRevision, baseDigest, account, expiry }) {
@@ -298,30 +308,30 @@ export function createArmedStateStore({
 
   function persistAndSwap({ orders, account = state.account, expiry = state.expiry }) {
     if (state.revision === Number.MAX_SAFE_INTEGER) {
-      state = blockedState('armed state revision is exhausted', state);
+      state = blockedState('armed state revision is exhausted', state, orderKeys);
       return reject('REVISION_EXHAUSTED', state.error);
     }
-    const nextOrders = canonicalOrders(orders);
+    const nextOrders = canonical(orders);
     const next = {
       phase: ARMED_STATE_READY,
       lineageId: state.lineageId,
       revision: state.revision + 1,
-      digest: armedStateDigest(nextOrders),
+      digest: digestOf(nextOrders),
       account,
       expiry,
       orders: nextOrders,
       error: null,
     };
     try {
-      writeFileSync(file, JSON.stringify(persistedShape(next)));
+      writeFileSync(file, JSON.stringify(persistedShape(next, orderKeys)));
     } catch (error) {
-      state = blockedState(`armed state persistence failed: ${errorText(error)}`, state);
+      state = blockedState(`armed state persistence failed: ${errorText(error)}`, state, orderKeys);
       return reject('PERSISTENCE_FAILED', state.error);
     }
     // Persist first: callers cannot observe or route from `next` until the
     // durable replacement has succeeded.
     state = next;
-    return { ok: true, state: publicClone(state, sessionId) };
+    return { ok: true, state: publicClone(state, sessionId, orderKeys) };
   }
 
   function compareAndCommit(message = {}) {
@@ -354,7 +364,7 @@ export function createArmedStateStore({
         ok: true,
         duplicate: true,
         appliedRevision: remembered.appliedRevision,
-        state: publicClone(state, sessionId),
+        state: publicClone(state, sessionId, orderKeys),
       };
     }
 
@@ -374,7 +384,9 @@ export function createArmedStateStore({
         source: 'create',
       });
       if (!validated.ok) return reject('INVALID_ORDER', validated.reason);
-      if (validated.order.qty !== 1) return reject('INVALID_ORDER', 'new armed triggers must start at quantity 1');
+      if (!allowCreateQuantity && validated.order.qty !== 1) {
+        return reject('INVALID_ORDER', 'new armed triggers must start at quantity 1');
+      }
       if (state.orders.some((order) => order.id === validated.order.id)) {
         return reject('DUPLICATE_ARMED_ID', 'armed id already exists');
       }
@@ -402,7 +414,7 @@ export function createArmedStateStore({
       });
       if (!validated.ok) return reject('INVALID_QUANTITY', validated.reason);
       const prior = state.orders[index];
-      const identityUnchanged = ORDER_KEYS
+      const identityUnchanged = orderKeys
         .filter((key) => key !== 'qty')
         .every((key) => validated.order[key] === prior[key]);
       if (!identityUnchanged || validated.order.qty <= prior.qty) {
@@ -439,7 +451,7 @@ export function createArmedStateStore({
       const prior = state.orders[index];
       // Only the trigger level and its crossing direction may move; identity
       // (id/strike/right/expiry) and the authorized quantity are preserved.
-      const identityUnchanged = ORDER_KEYS
+      const identityUnchanged = orderKeys
         .filter((key) => key !== 'level' && key !== 'dir')
         .every((key) => validated.order[key] === prior[key]);
       if (!identityUnchanged || validated.order.level === prior.level) {
@@ -478,7 +490,7 @@ export function createArmedStateStore({
     if (!removedOrder) return reject('NOT_FOUND', 'armed trigger not found');
     const committed = persistAndSwap({ orders: state.orders.filter((order) => order.id !== id) });
     if (!committed.ok) return committed;
-    return { ...committed, removedOrder: fixedOrder(removedOrder) };
+    return { ...committed, removedOrder: fixOrder(removedOrder) };
   }
 
   function clearInternal({
@@ -497,7 +509,7 @@ export function createArmedStateStore({
       return reject('INVALID_AUTHORITY', 'new armed account/expiry anchor is invalid');
     }
     if (state.orders.length === 0 && nextAccount === state.account && nextExpiry === state.expiry) {
-      return { ok: true, noOp: true, state: publicClone(state, sessionId) };
+      return { ok: true, noOp: true, state: publicClone(state, sessionId, orderKeys) };
     }
     return persistAndSwap({ orders: [], account: nextAccount, expiry: nextExpiry });
   }
@@ -522,16 +534,16 @@ export function createArmedStateStore({
       phase: ARMED_STATE_READY,
       lineageId,
       revision: 0,
-      digest: armedStateDigest([]),
+      digest: digestOf([]),
       account: nextAccount,
       expiry: nextExpiry,
       orders: [],
       error: null,
     };
     try {
-      writeFileSync(file, JSON.stringify(persistedShape(recovered)));
+      writeFileSync(file, JSON.stringify(persistedShape(recovered, orderKeys)));
     } catch (error) {
-      state = blockedState(`armed state recovery persistence failed: ${errorText(error)}`, state);
+      state = blockedState(`armed state recovery persistence failed: ${errorText(error)}`, state, orderKeys);
       return reject('PERSISTENCE_FAILED', state.error);
     }
 
@@ -540,11 +552,11 @@ export function createArmedStateStore({
     sessionId = nextSessionId;
     state = recovered;
     rememberedRequests.clear();
-    return { ok: true, state: publicClone(state, sessionId) };
+    return { ok: true, state: publicClone(state, sessionId, orderKeys) };
   }
 
   return {
-    publicState: () => publicClone(state, sessionId),
+    publicState: () => publicClone(state, sessionId, orderKeys),
     compareAndCommit,
     removeInternal,
     clearInternal,
