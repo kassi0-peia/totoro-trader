@@ -466,6 +466,9 @@
   transition: opacity 90ms ease;
 }
 
+/* ⚔̸ armed exits share the axis furniture; dashed reads as "leaving". */
+.armed-exit-guide { border-top-style: dashed; }
+
 .armed-axis-label:hover ~ .armed-axis-guide,
 .armed-axis-control:focus-within .armed-axis-guide {
   opacity: 0.72;

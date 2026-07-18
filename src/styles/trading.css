@@ -679,3 +679,46 @@
   padding: 1px 6px;
   text-align: center;
 }
+
+/* ==== ⚔̸ armed exits (spec-armed-exits.md) ==== */
+/* The list under the position card's @SPX row. */
+.armed-exit-list {
+  margin-top: 6px;
+  border-top: 1px solid var(--c-border);
+  padding-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.armed-exit-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.armed-exit-row .armed-exit-status {
+  margin-left: auto;
+  font-style: normal;
+  font-size: 8px;
+  letter-spacing: 0.08em;
+  color: var(--c-muted);
+}
+.armed-exit-disarm {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--c-border);
+  border-radius: 4px;
+  background: none;
+  color: var(--c-loss);
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+}
+.armed-exit-disarm:hover { border-color: var(--c-loss); }
+/* Typed fields, no arrows: the exit qty is a plain text input; keep any
+   number-input spinners off the exit row. */
+.exit-qty-input::-webkit-outer-spin-button,
+.exit-qty-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }

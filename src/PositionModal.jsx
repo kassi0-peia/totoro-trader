@@ -20,6 +20,11 @@ export default function PositionModal({
   onAttachExit = null,
   executionEnabled = false,
   trailOk = false,
+  armedExitOk = false,
+  armedExitRows = null,
+  armedExitMaxQty = 10,
+  onArmExit = null,
+  onDisarmExit = null,
   onActivate = null,
   onHoverChange = null,
   onCardFocus = null,
@@ -33,6 +38,7 @@ export default function PositionModal({
   const [tpStr, setTpStr] = useState('');
   const [slStr, setSlStr] = useState('');
   const [trailStr, setTrailStr] = useState('');
+  const [exitQtyStr, setExitQtyStr] = useState('');
   const [cursor, setCursor] = useState(null); // {x,y} over the premium graph
   const [view, setView] = useState(null);     // {lo,hi} times for the scroll-zoom window; null = full
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
@@ -501,6 +507,57 @@ export default function PositionModal({
             </div>
           );
         })()}
+        {!anchor && armedExitOk && onArmExit && pos.status === 'open' && (() => {
+          // ⚔̸ Armed exits (spec-armed-exits.md): pick the action, then click
+          // the SPX level on the chart. TRAIL reads the TRL field above — the
+          // same regular typed-$ trail, just attached when SPX gets there.
+          const trail = trailStr.trim() === '' ? null : parseFloat(trailStr);
+          const qtyCap = Math.min(Number.isSafeInteger(pos.qty) && pos.qty >= 1 ? pos.qty : 1, armedExitMaxQty);
+          const qty = exitQtyStr.trim() === '' ? qtyCap : parseInt(exitQtyStr, 10);
+          const qtyValid = Number.isSafeInteger(qty) && qty >= 1 && qty <= qtyCap;
+          const trailValid = trail != null && Number.isFinite(trail) && trail > 0;
+          return (
+            <div className="qty-row">
+              <span className="qty-label" data-tip="Armed exits: CLOSE fires a fresh-bid marketable limit, TRAIL attaches the TRL $ above — when SPX reaches the level you pick on the chart. Server-owned: fires even with this browser closed. One-shot; never a market order.">@SPX</span>
+              <div className="order-kind">
+                <input className="limit-input exit-qty-input" type="text" inputMode="numeric"
+                  value={exitQtyStr} placeholder={`×${qtyCap}`} onChange={(e) => setExitQtyStr(e.target.value)} aria-label="armed exit quantity" />
+                <button
+                  className="kind-btn"
+                  disabled={!executionEnabled || !qtyValid}
+                  data-tip="Close ×qty when SPX reaches a level — click the level on the chart next"
+                  onClick={() => qtyValid && onArmExit(pos, 'close', qty, null)}
+                >CLOSE</button>
+                <button
+                  className="kind-btn"
+                  disabled={!executionEnabled || !qtyValid || !trailValid}
+                  data-tip={trailValid ? 'Attach the TRL $ above when SPX reaches a level — click the level on the chart next' : 'Type a TRL $ amount above first'}
+                  onClick={() => qtyValid && trailValid && onArmExit(pos, 'trail', qty, trail)}
+                >TRAIL</button>
+              </div>
+            </div>
+          );
+        })()}
+        {!anchor && Array.isArray(armedExitRows) && armedExitRows.length > 0 && (
+          <div className="armed-exit-list" aria-label="Armed exits on this position">
+            {armedExitRows.map((x) => (
+              <div className="armed-exit-row" key={x.id}>
+                <span>
+                  ⚔̸ SPX {x.dir === 'up' ? '↑' : '↓'} {Number(x.level).toFixed(2)} → {x.action === 'trail' ? `TRAIL $${Number(x.trail).toFixed(2)}` : 'CLOSE'} ×{x.qty}
+                </span>
+                <i className="armed-exit-status">{x.status}</i>
+                {onDisarmExit && (
+                  <button
+                    className="armed-exit-disarm"
+                    onClick={() => onDisarmExit(x.id)}
+                    aria-label="Disarm this exit"
+                    data-tip="Disarm"
+                  >✕</button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
           </>
         )}
         {!anchor && !pinned && (
