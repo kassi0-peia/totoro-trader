@@ -748,6 +748,7 @@ export default function App() {
       const live = p.greeksLive?.premium ?? p.entryPremium;
       return s + plDollars(p, live);
     }, 0);
+  const openCount = positionsLive.filter((p) => p.status === 'open').length;
 
   const mood = openPL > 200 ? 'happy' : openPL < -200 ? 'sad' : 'calm';
   const earsUp = (() => {
@@ -1401,6 +1402,35 @@ export default function App() {
           </div>
         </div>
       </main>
+
+      {/* Mobile status strip: the phone's one fixed bottom line — live P/L,
+          open count, account. Tap raises the positions sheet over the chart's
+          lower half; 📒 slides the trades drawer. Hidden ≥721px (CSS). */}
+      <div className="mobile-strip">
+        <button
+          type="button"
+          className="ms-status"
+          onClick={toggleBottom}
+          aria-expanded={bottomShown}
+          aria-label="Positions and timeframes"
+        >
+          <span className="ms-caret">{bottomShown ? '▾' : '▴'}</span>
+          <span
+            className="ms-pl"
+            style={{ color: openCount === 0 ? theme.muted : openPL >= 0 ? theme.profit : theme.loss }}
+          >
+            {openCount === 0 ? 'FLAT' : `${openPL >= 0 ? '+' : '−'}$${Math.abs(openPL).toFixed(0)}`}
+          </span>
+          <span className="ms-count">{openCount === 0 ? 'no positions' : `${openCount} open`}</span>
+          <span className="ms-acct" style={{ color: '#0a0c12', background: acctColor }}>{acctLabel}</span>
+        </button>
+        <button
+          type="button"
+          className="ms-trades"
+          onClick={() => (tradesPeek ? closeTrades() : openTrades())}
+          aria-label="Today's trades"
+        >📒</button>
+      </div>
 
       {helpOpen && <HelpOverlay onClose={() => setHelpOpen(false)} />}
       {chartMenu && !pending && (() => {

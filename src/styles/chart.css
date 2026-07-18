@@ -76,20 +76,18 @@
   border-top: 1px solid var(--c-border);
 }
 @media (max-width: 720px) {
-  /* Touch has no hover, and positions must never hide behind a gesture on
-     the phone — the drawer is statically open, exactly the old layout. */
-  .bottom-zone { position: static; }
-  .bottom-dismiss-layer { display: none; }
+  /* Touch has no hover — the grab band goes; the mobile status strip under
+     the chart is the toggle. Open = a bottom SHEET over the chart's lower
+     half, tape still visible above it (never navigate away mid-trade). The
+     strip always shows P/L + open count, so positions are one thumb-tap
+     away, never fewer taps than the old scroll-below-the-fold layout. The
+     transparent dismiss layer still swallows the click-off. */
   .bottom-grab { display: none; }
-  .bottom-panel {
-    height: auto;
-    max-height: none;
-    overflow: visible;
-    opacity: 1;
-    visibility: visible;
-    pointer-events: auto;
+  .bottom-zone.open .bottom-panel {
+    max-height: 58vh;
+    border-radius: 12px 12px 0 0;
+    box-shadow: 0 -12px 30px rgba(0, 0, 0, 0.45);
   }
-
 }
 
 .tf-bar {
