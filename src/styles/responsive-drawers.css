@@ -341,7 +341,9 @@
      consume scarce vertical space, so mobile keeps only the real cockpit. */
   .symbol-search-row,
   .footer { display: none; }
-  .app { padding-bottom: env(safe-area-inset-bottom); }
+  /* Fixed-viewport cockpit, same as desktop: no page scroll. The mobile
+     status strip (last child of .app) carries the safe-area inset. */
+  .app { height: 100vh; height: 100dvh; overflow: hidden; padding-bottom: 0; }
 
   .header {
     padding: 10px 12px;
@@ -369,13 +371,19 @@
   .expiry-label { font-size: 8px; }
   .symbol { font-size: 9px; }
 
-  /* Near-fullscreen chart: fill the viewport below the header + quote strip,
-     leaving the timeframe bar just in view; positions/history scroll below. */
-  .chart-wrap {
-    height: calc((100vh - 150px) * 0.9);
-    height: calc((100dvh - 150px) * 0.9);
-    min-height: 300px;
-  }
+  /* The chart IS the mobile home (kisa 2026-07-05 declutter): it absorbs
+     everything between the quote strip and the status strip. Positions live
+     in the bottom sheet, not below the fold. */
+  .chart-area { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .chart-wrap { height: auto; flex: 1; min-height: 0; }
+
+  /* The strip's 📒 replaces the left-edge pull — a 22px hover hotzone is
+     hostile chrome on a phone (stray taps opened the drawer). */
+  .trades-pull, .trades-hotzone { display: none; }
+
+  /* Legend stays one line: drop volume, tighten the rest. */
+  .ohlc-legend { font-size: 10px; gap: 2px 8px; flex-wrap: nowrap; }
+  .ohlc-legend .ohlc-vol { display: none; }
 
   .acct-quick-btn { display: none; }   /* quick mode is right-click → desktop only */
   .acct-bus-btn { display: none; }     /* bus stop is desktop-only (spec-bus-stop.md) */
@@ -392,7 +400,7 @@
   .tf-bar { flex-wrap: wrap; }
   .tf-actions { margin-left: 0; flex-basis: 100%; gap: 10px; }
   .tf-panic, .tf-closeall { flex: 1; }
-  .pl-summary { gap: 10px; padding: 8px 12px 4px; }
+  .pl-summary { gap: 8px 14px; padding: 8px 12px 4px; flex-wrap: wrap; }
   .pl-summary .pl-block b { font-size: 12px; }
 
   .pos-row {
@@ -416,6 +424,55 @@
   .theme-panel { width: 100%; max-width: 360px; }
 
   .chart-tooltip { display: none; }
+}
+
+/* ── Mobile status strip: the phone's one fixed bottom line (live P/L, open
+   count, account). Tapping it raises the positions sheet; 📒 slides the
+   trades drawer. Desktop never sees it. ── */
+.mobile-strip { display: none; }
+@media (max-width: 720px) {
+  .mobile-strip {
+    display: flex;
+    align-items: stretch;
+    gap: 8px;
+    flex: none;
+    padding: 6px 10px calc(6px + env(safe-area-inset-bottom));
+    background: var(--c-surface);
+    border-top: 1px solid var(--c-border);
+  }
+  .ms-status {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 40px;              /* phone-thumb sized */
+    padding: 0 6px;
+    background: none;
+    border: none;
+    color: var(--c-text);
+    font: inherit;
+    text-align: left;
+  }
+  .ms-caret { color: var(--c-muted); font-size: 10px; }
+  .ms-pl { font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .ms-count { color: var(--c-muted); font-size: 11px; letter-spacing: 0.06em; }
+  .ms-acct {
+    margin-left: auto;
+    font-size: 9px;
+    font-weight: 800;
+    letter-spacing: 0.12em;
+    padding: 2px 7px;
+    border-radius: 4px;
+    align-self: center;
+  }
+  .ms-trades {
+    flex: none;
+    width: 44px;
+    border: 1px solid var(--c-border);
+    border-radius: 8px;
+    background: none;
+    font-size: 16px;
+  }
 }
 
 /* ============ TRADES DRAWER — HISTORY VIEW (multi-day journal) ============ */
