@@ -119,7 +119,7 @@ export function resolveArmedGuideGrab({
     const dist = Math.abs(gy - y);
     if (dist <= threshold && (best == null || dist < best.dist)) best = { arm, dist };
   }
-  return best ? { kind: 'grab-armed-guide', arm: best.arm } : null;
+  return best ? { kind: 'grab-armed-guide', arm: best.arm, dist: best.dist } : null;
 }
 
 // Resolve where a retarget drag would land: snap to the grid, then run the SAME
@@ -142,6 +142,28 @@ export function resolveArmedRetargetDrop({
   if (!resolved.ok) return { ok: false, level: snapped, reason: resolved.reason };
   if (snapped === arm.level) return { ok: false, level: snapped, reason: 'The trigger did not move' };
   return { ok: true, level: snapped, dir: resolved.armed.dir };
+}
+
+// Exit triggers are free levels (cents), not strike-grid levels — the same
+// geometry placeExitTrigger enforces at placement: inside the ±10% fence, not
+// exactly the market, and actually moved. No OTM rule: an exit level is a P/L
+// plan on an existing position, either side of its strike.
+export function resolveArmedExitRetargetDrop({ exit, level, marketPrice } = {}) {
+  if (!exit) return { ok: false, reason: 'No armed exit under the cursor' };
+  if (!(typeof level === 'number' && Number.isFinite(level))) {
+    return { ok: false, reason: 'Off the chart' };
+  }
+  const rounded = Math.round(level * 100) / 100;
+  if (rounded <= 0) return { ok: false, level: rounded, reason: 'Invalid level' };
+  if (!(typeof marketPrice === 'number' && Number.isFinite(marketPrice) && marketPrice > 0)) {
+    return { ok: false, level: rounded, reason: 'No current market price' };
+  }
+  if (rounded === marketPrice) return { ok: false, level: rounded, reason: 'Level equals the market' };
+  if (Math.abs(rounded - marketPrice) / marketPrice > 0.1) {
+    return { ok: false, level: rounded, reason: '>10% from the market' };
+  }
+  if (rounded === exit.level) return { ok: false, level: rounded, reason: 'The trigger did not move' };
+  return { ok: true, level: rounded, dir: rounded > marketPrice ? 'up' : 'down' };
 }
 
 // Trigger placement temporarily owns every canvas click. A valid price-pane
@@ -225,6 +247,9 @@ export function resolveChartClickIntent({
 // Right-click uses the event's CURRENT coordinate, never the last mousemove's
 // cached hover. Interactive paint hits block context actions so a quick order
 // cannot fire through a marker/card control that happens to be under the cursor.
+// The ONE exception is the position label chip: it resolves to its own kind so
+// the caller can open the position exit menu — every other hit class, checked
+// in the same fixed order as clicks, still blocks.
 export function resolveChartContextTarget({
   x,
   y,
@@ -237,7 +262,24 @@ export function resolveChartContextTarget({
 }) {
   const target = chartPointTarget({ x, y, layout, view, tfCandles, price, strikeStep });
   if (!target) return null;
-  return resolveChartHitIntent({ x, y, hits })
-    ? { kind: 'blocked' }
-    : { kind: 'context-target', ...target };
+  const h = normalizeHits(hits);
+  for (const hit of h.close) {
+    if (boxContains(hit, x, y)) return { kind: 'blocked' };
+  }
+  for (const hit of h.add) {
+    if (boxContains(hit, x, y)) return { kind: 'blocked' };
+  }
+  for (let i = h.markers.length - 1; i >= 0; i--) {
+    if (markerHitContains(h.markers[i], x, y)) return { kind: 'blocked' };
+  }
+  for (const hit of h.ghosts) {
+    if (pointContains(hit, x, y)) return { kind: 'blocked' };
+  }
+  for (const hit of h.buses) {
+    if (pointContains(hit, x, y)) return { kind: 'blocked' };
+  }
+  for (const hit of h.labels) {
+    if (boxContains(hit, x, y)) return { kind: 'position-label', position: hit.position, ...target };
+  }
+  return { kind: 'context-target', ...target };
 }

@@ -398,6 +398,7 @@
 }
 
 .arm-placement-line.invalid { opacity: 0.55; }
+.arm-placement-line.exit-preview { border-top-style: dashed; }
 
 .arm-placement-chip {
   position: absolute;
@@ -454,6 +455,12 @@
 .armed-axis-label.withheld {
   border-style: dashed;
   opacity: 0.72;
+}
+
+/* The tag doubles as the retarget drag handle (the dotted line is an 8px
+   target; the tag is the honest one). Only single-row groups drag. */
+.armed-axis-label.draggable {
+  cursor: ns-resize;
 }
 
 .armed-axis-guide {

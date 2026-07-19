@@ -608,6 +608,22 @@
 .cm-sell { color: var(--c-loss, #e07d8a); }
 .cm-arm { color: var(--c-accent); }
 
+/* ── Right-click position-label exit menu (shares the chart-menu shell) ── */
+.pos-exit-menu { padding: 8px 12px 10px; }
+.pos-exit-menu-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding-bottom: 4px;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+}
+.pos-exit-menu-head b { font-family: 'JetBrains Mono', monospace; font-size: 13px; }
+.pos-exit-menu-head span { color: var(--c-muted); font-size: 9px; letter-spacing: 0.12em; }
+.pos-exit-menu .qty-row { margin-bottom: 0; padding: 9px 0; gap: 12px; }
+.pos-exit-menu .qty-row + .qty-row { border-top: none; }
+.pos-exit-menu .armed-exit-list { margin-top: 6px; }
+
 /* ── ? overlay — keys/gestures/marks reference ── */
 .help-backdrop {
   position: fixed;

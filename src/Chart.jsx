@@ -26,6 +26,7 @@ import { drawMarkers } from './chart/draw/markers.js';
 import { drawBusStops } from './chart/draw/busstops.js';
 import {
   buildArmedAxisGroups,
+  resolveArmedExitRetargetDrop,
   resolveArmedGuideGrab,
   resolveArmedRetargetDrop,
   resolveChartClickIntent,
@@ -97,6 +98,7 @@ export default function Chart({
   onCancelArmPlacement = null,
   armedExits = [],
   onDisarmArmedExit = null,
+  onRetargetArmedExit = null,
   armedExitAuthorityStatus = 'READY',
   onDisarmArmed = null,
   onAddArmedQty = null,
@@ -112,6 +114,7 @@ export default function Chart({
   showGridlines = true,
   beLine = null,
   onMenu = null,
+  onPositionMenu = null,
   apiRef = null,
   fillFlash = null,
   seriesIdentity = 'default'
@@ -448,20 +451,21 @@ export default function Chart({
       e.preventDefault();
       return;
     }
-    if (onRetargetArmed && layout && view) {
+    if ((onRetargetArmed || onRetargetArmedExit) && layout && view) {
       const rect = canvasRef.current?.getBoundingClientRect();
       if (rect) {
-        const grab = resolveArmedGuideGrab({
-          x: e.clientX - rect.left,
-          y: e.clientY - rect.top,
-          armed,
-          layout,
-          priceToY,
-        });
+        const at = { x: e.clientX - rect.left, y: e.clientY - rect.top, layout, priceToY };
+        // Entry and exit guides are separate books with separate commands, so
+        // grab each and let the nearest line win — never both.
+        const grabEntry = onRetargetArmed ? resolveArmedGuideGrab({ ...at, armed }) : null;
+        const grabExit = onRetargetArmedExit ? resolveArmedGuideGrab({ ...at, armed: armedExits }) : null;
+        const grab = grabEntry && grabExit
+          ? (grabExit.dist < grabEntry.dist ? grabExit : grabEntry)
+          : grabEntry ?? grabExit;
         if (grab) {
           e.preventDefault();
           canvasRef.current?.setPointerCapture?.(e.pointerId);
-          setArmedRetarget({ arm: grab.arm, candidate: grab.arm.level });
+          setArmedRetarget({ arm: grab.arm, candidate: grab.arm.level, exit: grab === grabExit });
           clearStrikeHover();
           return;
         }
@@ -470,6 +474,33 @@ export default function Chart({
     canvasRef.current?.setPointerCapture?.(e.pointerId);
     startDrag(e.clientX, e.clientY);
   };
+
+  // The axis LABEL is the primary drag handle — the dotted guide line is a
+  // hard 8px target, the tag is not. Pointer capture redirects the rest of the
+  // gesture to the canvas, whose move/up handlers already own retarget drags.
+  // Only a group holding exactly one live ARMED row is draggable: with stacked
+  // rows under one tag there is no honest answer to "which one moved".
+  const beginLabelRetarget = (e, group, isExit) => {
+    if (e.pointerType !== 'mouse' || e.button !== 0) return;
+    const handler = isExit ? onRetargetArmedExit : onRetargetArmed;
+    if (!handler || !layout || !view) return;
+    const live = group.items.filter(({ arm }) => (
+      arm.liveAuthorization === true && (arm.status || 'ARMED') === 'ARMED'
+    ));
+    if (live.length !== 1) return;
+    e.preventDefault();
+    e.stopPropagation();
+    canvasRef.current?.setPointerCapture?.(e.pointerId);
+    setArmedRetarget({ arm: live[0].arm, candidate: live[0].arm.level, exit: isExit });
+    clearStrikeHover();
+  };
+
+  const labelDraggable = (group, isExit) => (
+    !!(isExit ? onRetargetArmedExit : onRetargetArmed)
+    && group.items.filter(({ arm }) => (
+      arm.liveAuthorization === true && (arm.status || 'ARMED') === 'ARMED'
+    )).length === 1
+  );
 
   const handlePointerMove = (e) => {
     if (e.pointerType !== 'mouse') return;
@@ -491,9 +522,17 @@ export default function Chart({
       if (!rect || !layout || !view) return;
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
-      const candidate = x >= 0 && x <= layout.chartW && y >= layout.priceTop && y <= layout.priceBot
-        ? snapArmedTrigger(yToPrice(y), strikeStep)
-        : null;
+      // The drag is exclusive, so only the vertical coordinate matters — a
+      // label-initiated drag starts (and may stay) in the axis gutter, and
+      // clamping x to the pane would read that natural gesture as "off chart".
+      const inPane = x >= 0 && x <= size.w && y >= layout.priceTop && y <= layout.priceBot;
+      // Entries live on the 5-pt trigger grid; exits are free cent levels,
+      // exactly like their placement click.
+      const candidate = !inPane
+        ? null
+        : armedRetarget.exit
+          ? Math.round(yToPrice(y) * 100) / 100
+          : snapArmedTrigger(yToPrice(y), strikeStep);
       setArmedRetarget((current) => current ? { ...current, candidate } : null);
       return;
     }
@@ -512,6 +551,15 @@ export default function Chart({
       const drag = armedRetarget;
       setArmedRetarget(null);
       suppressClickRef.current = performance.now() + 800;
+      if (drag.exit) {
+        const drop = resolveArmedExitRetargetDrop({
+          exit: drag.arm,
+          level: drag.candidate,
+          marketPrice: price,
+        });
+        if (drop.ok) onRetargetArmedExit?.(drag.arm, drop.level, drop.dir);
+        return;
+      }
       const drop = resolveArmedRetargetDrop({
         arm: drag.arm,
         level: drag.candidate,
@@ -771,6 +819,15 @@ export default function Chart({
             hits: currentHitLists()
           });
           if (!target || target.kind === 'blocked') return;
+          // A position label opens its exit menu — never a quick order and
+          // never the strike menu. Quick mode swallows the gesture entirely so
+          // no order path can run through a label right-click.
+          if (target.kind === 'position-label') {
+            if (!quickMode && onPositionMenu) {
+              onPositionMenu({ x: e.clientX, y: e.clientY, position: target.position });
+            }
+            return;
+          }
           // Two modes, one gesture: ⚡ armed = the instant quick order (unchanged);
           // ⚡ off = the strike menu (buy/sell C/P, alert here). Needs a real
           // price row under the cursor — the axis/time gutters get no menu.
@@ -850,9 +907,11 @@ export default function Chart({
           >
             <button
               type="button"
-              className={`armed-axis-label${authorityWarning ? ' withheld' : ''}`}
+              className={`armed-axis-label${authorityWarning ? ' withheld' : ''}${labelDraggable(group, false) ? ' draggable' : ''}`}
               aria-label={`${group.items.length} armed trigger${group.items.length === 1 ? '' : 's'} · ${armedAuthorityStatus} — show details`}
               aria-haspopup="true"
+              onPointerDown={(event) => beginLabelRetarget(event, group, false)}
+              data-tip={labelDraggable(group, false) ? 'Drag to move the trigger level' : undefined}
             >
               {label}
             </button>
@@ -957,9 +1016,11 @@ export default function Chart({
           >
             <button
               type="button"
-              className={`armed-axis-label${ready ? '' : ' withheld'}`}
+              className={`armed-axis-label${ready ? '' : ' withheld'}${labelDraggable(group, true) ? ' draggable' : ''}`}
               aria-label={`${group.items.length} armed exit${group.items.length === 1 ? '' : 's'} · ${armedExitAuthorityStatus} — show details`}
               aria-haspopup="true"
+              onPointerDown={(event) => beginLabelRetarget(event, group, true)}
+              data-tip={labelDraggable(group, true) ? 'Drag to move the exit level' : undefined}
             >
               {label}
             </button>
@@ -1039,7 +1100,7 @@ export default function Chart({
       )}
       {armedRetarget?.candidate != null && layout && view && (
         <div
-          className="arm-placement-line"
+          className={`arm-placement-line${armedRetarget.exit ? ' exit-preview' : ''}`}
           aria-hidden="true"
           style={{
             top: priceToY(armedRetarget.candidate),

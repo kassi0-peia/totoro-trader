@@ -16,6 +16,7 @@ import useAlerts from './useAlerts.js';
 import useWatchlist from './useWatchlist.js';
 import useBottomDrawer from './useBottomDrawer.js';
 import ChartMenu from './ChartMenu.jsx';
+import PositionExitMenu from './PositionExitMenu.jsx';
 import HelpOverlay from './HelpOverlay.jsx';
 import { useIbkrFeed, liveQuote } from './feed.js';
 import { nearestOtmStrike, replayVolAt } from './options.js';
@@ -154,6 +155,7 @@ export default function App() {
   // and the chart menu arms/disarms. Hook is called below, once its live-tape
   // and guest inputs (feed/guest/activeSymbol/showToast) are in scope.
   const [chartMenu, setChartMenu] = useState(null); // {x, y, price, alertId, alertPrice}
+  const [posExitMenu, setPosExitMenu] = useState(null); // {x, y, posId} — right-clicked position label
   const [armPlacement, dispatchArmPlacement] = useReducer(armedPlacementReducer, null);
   // ⚔̸ Exit-level placement: {posId, strike, right, expiry, action, qty, trail}.
   const [exitPlacement, setExitPlacement] = useState(null);
@@ -992,6 +994,17 @@ export default function App() {
     x.strike === p.strike && x.right === (p.type === 'call' ? 'C' : 'P') && x.expiry === p.expiry
   )), [armedExits]);
 
+  // The right-click label menu borrows the card's exit surface but anchors to
+  // a position id only — close it the moment that id stops being an open
+  // position or the cockpit leaves the live surface.
+  useEffect(() => {
+    if (!posExitMenu) return;
+    if (replaySurfaceOpen
+      || !inspectablePositions.some((p) => p.id === posExitMenu.posId && p.status === 'open')) {
+      setPosExitMenu(null);
+    }
+  }, [posExitMenu, replaySurfaceOpen, inspectablePositions]);
+
   // A placement draft belongs to one live SPX cockpit/expiry. Any seam change
   // cancels it before the old chart coordinate can be interpreted elsewhere.
   useEffect(() => {
@@ -1387,6 +1400,7 @@ export default function App() {
               onCancelArmPlacement={() => { if (exitPlacement) setExitPlacement(null); else cancelArmPlacement(); }}
               armedExits={replayActive || activeSymbol !== 'SPX' ? EMPTY_ARR : armedExits}
               onDisarmArmedExit={armedExitCanDisarm ? disarmArmedExit : null}
+              onRetargetArmedExit={armedExitCanMutate ? retargetArmedExit : null}
               armedExitAuthorityStatus={armedExitDisplay.status}
               onDisarmArmed={armedCanDisarm ? disarmArmed : null}
               onAddArmedQty={armedCanExecuteMutation ? addArmedQty : null}
@@ -1398,6 +1412,9 @@ export default function App() {
               alerts={chartAlerts}
               armed={replayActive || activeSymbol !== 'SPX' ? EMPTY_ARR : armed}
               onMenu={replayTransitionBlocked ? null : setChartMenu}
+              onPositionMenu={replayActive || replayTransitionBlocked
+                ? null
+                : ({ x, y, position }) => setPosExitMenu({ x, y, posId: position.id })}
               apiRef={chartApiRef}
               fillFlash={chartFillFlash}
               source={replayActive || guestActive ? 'SPX' : feed.live ? feed.source : 'SPX'}
@@ -1565,6 +1582,26 @@ export default function App() {
             onArm={beginArmTriggerPlacement}
             onDisarm={armedCanDisarm ? disarmArmed : null}
             onClose={() => setChartMenu(null)}
+          />
+        );
+      })()}
+      {posExitMenu && !pending && (() => {
+        const menuPos = inspectablePositions.find((p) => p.id === posExitMenu.posId && p.status === 'open') ?? null;
+        if (!menuPos) return null;
+        return (
+          <PositionExitMenu
+            menu={posExitMenu}
+            pos={menuPos}
+            theme={theme}
+            executionEnabled={orderSurfaceExecutionEnabled}
+            trailOk={!!feed.caps?.trail}
+            onAttachExit={attachExit}
+            armedExitOk={!!feed.caps?.armedExit && !replayActive && activeSymbol === 'SPX' && !guestActive && armedExitCanMutate}
+            armedExitMaxQty={10}
+            onArmExit={beginExitPlacement}
+            armedExitRows={armedExitRowsFor(menuPos)}
+            onDisarmExit={armedExitCanDisarm ? disarmArmedExit : null}
+            onClose={() => setPosExitMenu(null)}
           />
         );
       })()}

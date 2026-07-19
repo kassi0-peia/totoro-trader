@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { plDollars } from './pl.js';
+import ExitControls from './ExitControls.jsx';
 
 // Inspect panel for one position: IBKR-style contract info plus the option's
 // intraday premium graph (quote-mid line, including the overnight session).
@@ -37,10 +38,6 @@ export default function PositionModal({
   const dragRef = useRef(null);
   const hoverDragRef = useRef(null);
   const [hoverDragOffset, setHoverDragOffset] = useState(null); // {dx, dy} while dragging the hover card
-  const [tpStr, setTpStr] = useState('');
-  const [slStr, setSlStr] = useState('');
-  const [trailStr, setTrailStr] = useState('');
-  const [exitQtyStr, setExitQtyStr] = useState('');
   const [cursor, setCursor] = useState(null); // {x,y} over the premium graph
   const [view, setView] = useState(null);     // {lo,hi} times for the scroll-zoom window; null = full
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
@@ -48,7 +45,7 @@ export default function PositionModal({
   const displayIdentity = pos ?? identity;
 
   useEffect(() => {
-    setTpStr(''); setSlStr(''); setTrailStr(''); setView(null);
+    setView(null);
     hoverDragRef.current = null;
     setHoverDragOffset(null);
   }, [floating?.key, pos?.id]);
@@ -534,86 +531,19 @@ export default function PositionModal({
               </div>
             )}
 
-        {!anchor && onAttachExit && pos.status === 'open' && (() => {
-          const tp = tpStr.trim() === '' ? null : parseFloat(tpStr);
-          const sl = slStr.trim() === '' ? null : parseFloat(slStr);
-          const trail = trailStr.trim() === '' ? null : parseFloat(trailStr);
-          const valid = (tp != null || sl != null || trail != null) &&
-            (tp == null || (Number.isFinite(tp) && tp > 0)) &&
-            (sl == null || (Number.isFinite(sl) && sl > 0)) &&
-            (trail == null || (Number.isFinite(trail) && trail > 0));
-          return (
-            <div className="qty-row">
-              <span className="qty-label" data-tip="Resting exits — TP is a native limit (works overnight); SL is an IBKR-simulated stop; TRAIL is a stop that rides $X behind the premium's best price, moved at IBKR's servers. Sent legs OCA: one fills, the rest cancel.">Exit</span>
-              <div className="order-kind">
-                <input className="limit-input" type="number" step="0.05" min="0.05" inputMode="decimal"
-                  value={tpStr} placeholder="TP" onChange={(e) => setTpStr(e.target.value)} aria-label="take profit" />
-                <input className="limit-input" type="number" step="0.05" min="0.05" inputMode="decimal"
-                  value={slStr} placeholder="SL" onChange={(e) => setSlStr(e.target.value)} aria-label="stop loss" />
-                {trailOk && (
-                  <input className="limit-input" type="number" step="0.05" min="0.05" inputMode="decimal"
-                    value={trailStr} placeholder="TRL" onChange={(e) => setTrailStr(e.target.value)} aria-label="trailing stop amount" />
-                )}
-                <button
-                  className="kind-btn"
-                  disabled={!executionEnabled || !valid}
-                  style={valid && executionEnabled ? { color: color, borderColor: color } : undefined}
-                  onClick={() => valid && onAttachExit(pos, tp, sl, trail)}
-                >ATTACH</button>
-              </div>
-            </div>
-          );
-        })()}
-        {!anchor && armedExitOk && onArmExit && pos.status === 'open' && (() => {
-          // ⚔̸ Armed exits (spec-armed-exits.md): pick the action, then click
-          // the SPX level on the chart. TRAIL reads the TRL field above — the
-          // same regular typed-$ trail, just attached when SPX gets there.
-          const trail = trailStr.trim() === '' ? null : parseFloat(trailStr);
-          const qtyCap = Math.min(Number.isSafeInteger(pos.qty) && pos.qty >= 1 ? pos.qty : 1, armedExitMaxQty);
-          const qty = exitQtyStr.trim() === '' ? qtyCap : parseInt(exitQtyStr, 10);
-          const qtyValid = Number.isSafeInteger(qty) && qty >= 1 && qty <= qtyCap;
-          const trailValid = trail != null && Number.isFinite(trail) && trail > 0;
-          return (
-            <div className="qty-row">
-              <span className="qty-label" data-tip="Armed exits: CLOSE fires a fresh-bid marketable limit, TRAIL attaches the TRL $ above — when SPX reaches the level you pick on the chart. Server-owned: fires even with this browser closed. One-shot; never a market order.">@SPX</span>
-              <div className="order-kind">
-                <input className="limit-input exit-qty-input" type="text" inputMode="numeric"
-                  value={exitQtyStr} placeholder={`×${qtyCap}`} onChange={(e) => setExitQtyStr(e.target.value)} aria-label="armed exit quantity" />
-                <button
-                  className="kind-btn"
-                  disabled={!executionEnabled || !qtyValid}
-                  data-tip="Close ×qty when SPX reaches a level — click the level on the chart next"
-                  onClick={() => qtyValid && onArmExit(pos, 'close', qty, null)}
-                >CLOSE</button>
-                <button
-                  className="kind-btn"
-                  disabled={!executionEnabled || !qtyValid || !trailValid}
-                  data-tip={trailValid ? 'Attach the TRL $ above when SPX reaches a level — click the level on the chart next' : 'Type a TRL $ amount above first'}
-                  onClick={() => qtyValid && trailValid && onArmExit(pos, 'trail', qty, trail)}
-                >TRAIL</button>
-              </div>
-            </div>
-          );
-        })()}
-        {!anchor && Array.isArray(armedExitRows) && armedExitRows.length > 0 && (
-          <div className="armed-exit-list" aria-label="Armed exits on this position">
-            {armedExitRows.map((x) => (
-              <div className="armed-exit-row" key={x.id}>
-                <span>
-                  ⚔̸ SPX {x.dir === 'up' ? '↑' : '↓'} {Number(x.level).toFixed(2)} → {x.action === 'trail' ? `TRAIL $${Number(x.trail).toFixed(2)}` : 'CLOSE'} ×{x.qty}
-                </span>
-                <i className="armed-exit-status">{x.status}</i>
-                {onDisarmExit && (
-                  <button
-                    className="armed-exit-disarm"
-                    onClick={() => onDisarmExit(x.id)}
-                    aria-label="Disarm this exit"
-                    data-tip="Disarm"
-                  >✕</button>
-                )}
-              </div>
-            ))}
-          </div>
+        {!anchor && (
+          <ExitControls
+            pos={pos}
+            color={color}
+            executionEnabled={executionEnabled}
+            trailOk={trailOk}
+            onAttachExit={onAttachExit}
+            armedExitOk={armedExitOk}
+            armedExitMaxQty={armedExitMaxQty}
+            onArmExit={onArmExit}
+            armedExitRows={armedExitRows}
+            onDisarmExit={onDisarmExit}
+          />
         )}
           </>
         )}

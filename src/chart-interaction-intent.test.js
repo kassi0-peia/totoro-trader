@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildArmedAxisGroups,
+  resolveArmedExitRetargetDrop,
   resolveArmedGuideGrab,
   resolveArmedRetargetDrop,
   resolveArmPlacementClickIntent,
@@ -91,7 +92,7 @@ test('a retarget drag can only grab a live ARMED guide, exclusively and inside t
   const base = { armed: [armedRow], layout, priceToY, x: 25 };
 
   assert.deepEqual(resolveArmedGuideGrab({ ...base, y: 50 }), {
-    kind: 'grab-armed-guide', arm: armedRow,
+    kind: 'grab-armed-guide', arm: armedRow, dist: 0,
   });
   assert.equal(resolveArmedGuideGrab({ ...base, y: 47 })?.kind, 'grab-armed-guide', 'within threshold');
   assert.equal(resolveArmedGuideGrab({ ...base, y: 62 }), null, 'beyond the 8px grab threshold');
@@ -199,4 +200,54 @@ test('context target uses the current coordinate and blocks painter hits', () =>
     hits: { markers: [point({ x: 25, y: 25, position: 'covered' })] }
   }), { kind: 'blocked' });
   assert.equal(resolveChartContextTarget({ ...common, x: 25, y: 101, hits: {} }), null);
+});
+
+test('a position-label right-click resolves to its exit menu; every other hit still blocks', () => {
+  const common = {
+    layout, view, tfCandles: candles, price: 100, strikeStep: 5
+  };
+
+  const labelOnly = resolveChartContextTarget({
+    ...common, x: 50, y: 50, hits: { labels: [box('pos-1')] },
+  });
+  assert.equal(labelOnly.kind, 'position-label');
+  assert.equal(labelOnly.position, 'pos-1');
+
+  // A close/add control or marker covering the same point wins and blocks —
+  // the label never resolves through an order control.
+  for (const covering of [
+    { close: [box('x-close')], labels: [box('pos-1')] },
+    { add: [box('x-add')], labels: [box('pos-1')] },
+    { markers: [point({ position: 'covered' })], labels: [box('pos-1')] },
+    { buses: [point({ stop: 'bus' })], labels: [box('pos-1')] },
+  ]) {
+    assert.deepEqual(
+      resolveChartContextTarget({ ...common, x: 50, y: 50, hits: covering }),
+      { kind: 'blocked' },
+    );
+  }
+});
+
+test('an exit retarget drop keeps free cent levels and the placement fences', () => {
+  const exit = { id: 'x:1', level: 100, strike: 105, right: 'C', action: 'close', qty: 2 };
+
+  // Free level (no strike grid), rounded to cents; direction from the market.
+  assert.deepEqual(resolveArmedExitRetargetDrop({ exit, level: 103.456, marketPrice: 98 }), {
+    ok: true, level: 103.46, dir: 'up',
+  });
+  assert.deepEqual(resolveArmedExitRetargetDrop({ exit, level: 95.4, marketPrice: 98 }), {
+    ok: true, level: 95.4, dir: 'down',
+  });
+  // No OTM rule: an exit may sit past the strike on either side.
+  assert.equal(resolveArmedExitRetargetDrop({ exit, level: 107, marketPrice: 98 }).ok, true);
+
+  // Fences: ±10%, equals-market, unmoved, missing market, missing exit.
+  assert.equal(resolveArmedExitRetargetDrop({ exit, level: 80, marketPrice: 98 }).ok, false);
+  assert.equal(resolveArmedExitRetargetDrop({ exit, level: 98, marketPrice: 98 }).ok, false);
+  const unmoved = resolveArmedExitRetargetDrop({ exit, level: 100.004, marketPrice: 98 });
+  assert.equal(unmoved.ok, false);
+  assert.match(unmoved.reason, /did not move/);
+  assert.equal(resolveArmedExitRetargetDrop({ exit, level: 100.5, marketPrice: null }).ok, false);
+  assert.equal(resolveArmedExitRetargetDrop({ exit: null, level: 95, marketPrice: 98 }).ok, false);
+  assert.equal(resolveArmedExitRetargetDrop({ exit, level: NaN, marketPrice: 98 }).ok, false);
 });
