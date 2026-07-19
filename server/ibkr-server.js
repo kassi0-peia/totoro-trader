@@ -16,7 +16,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { IBApi, EventName } from '@stoqey/ib';
 import { WebSocketServer } from 'ws';
-import { computeSession } from './session.js';
+import { computeSession, etParts, ymd } from './session.js';
+import { createGuestActivationCache } from './guest-activation-cache.js';
 import { createBasisController } from './basis-controller.js';
 import { createHomeMarket } from './home-market.js';
 import { pickExpiry, deriveStrikeStep, strikeWindow, validateOrder as validateGuestOrder } from './guest-symbol.js';
@@ -162,6 +163,17 @@ const GUEST_STRIKE_WINDOW = 20;   // n strikes each side of spot — matches the
 const GUEST_RECENTRE_STEPS = 1;   // recenter once spot drifts a full step past the window edge
 const GUEST_HISTORY_CANDLES = 3000;
 const GUEST_START_TIMEOUT_MS = 15_000;
+// Day-scoped cache of guest activation metadata (contract shape, option secdef, a
+// trimmed candle series) so re-activating a symbol — or first-activating a warmed
+// watchlist symbol — skips the slow secdef/contract round trips. PLAIN DATA ONLY:
+// deep-copied in and out, never a live api/reqId/resource/series reference (see
+// server/guest-activation-cache.js). Survives an IB reconnect (module state, not
+// an IB subscription); the ET day key fences a stale day out.
+const guestActivationCache = createGuestActivationCache();
+function etDayKey(now = Date.now()) {
+  const e = etParts(new Date(now));
+  return ymd(e.y, e.mo, e.d);
+}
 const guestResources = new Map(); // resource generation -> starting/active handle
 const guestPendingStarts = new Map(); // resource generation -> unsettled start handle
 const guestHistoryTargets = new WeakMap();
@@ -186,6 +198,16 @@ const watchContracts = new Map(); // symbol -> resolved STK contract (conId cach
 const watchQuotes = new Map();    // symbol -> last good shaped quote { symbol, last, bid, ask, changePct, ts }
 const watchResolving = new Set(); // symbols with a reqContractDetails in flight (dedupe)
 const watchInFlight = new Map();  // symbol -> reqId of the snapshot currently on the wire
+// Watchlist warm-up: prefetch a resolved symbol's option secdef into the shared
+// guest-activation cache so the FIRST guest activation of a watchlist symbol is
+// warm. Metadata only (no market-data line) but still paced — at most one secdef
+// on the wire at a time, spaced, so it never contends with the quote cycle, guest
+// activation, or connection health. A failed warm is silently dropped.
+const WATCH_WARM_SPACING_MS = 500;   // gap between consecutive warm secdef requests
+const WATCH_WARM_TIMEOUT_MS = 8_000; // free the slot even if ...End never lands
+const watchWarmInFlight = new Map(); // symbol -> reqId of the warm secdef on the wire
+let watchWarmQueue = [];             // symbols queued for a warm secdef prefetch
+let watchWarmTimer = null;           // paces one warm request at a time
 
 // ── ⚔ Armed orders ─────────────────────────────────────────────────────────
 // The bridge is the sole authority. The store is created lazily once IBKR names
@@ -562,6 +584,13 @@ function wireHandlers(api) {
       console.log(`[ibkr] watchlist resolve ${wsub.symbol} failed ${code}: ${err?.message ?? err}`);
       return;
     }
+    // A failed warm secdef is dropped silently — it must never touch the quote
+    // cycle, guest activation, or connection health. Free the slot and pace on.
+    if (wsub && wsub.kind === 'watch-secdef') {
+      console.log(`[ibkr] watchlist warm ${wsub.symbol} secdef failed ${code}: ${err?.message ?? err}`);
+      finishWatchWarm(reqId, { drop: true });
+      return;
+    }
     console.log(`[ibkr] code=${code} req=${reqId}: ${err?.message ?? err}`);
     if (code === 502 || code === 504 || code === 1100 || code === 1300) {
       setStatus(false);
@@ -901,12 +930,18 @@ function wireHandlers(api) {
   api.on(EventName.securityDefinitionOptionParameter,
     (reqId, exchange, underlyingConId, tradingClass, multiplier, expirations, strikes) => {
       const s = subs.get(reqId);
+      if (s?.kind === 'watch-secdef') {
+        if (Number(underlyingConId) !== s.conId) return;
+        s.secdefRaw = pickBestSecDef(s.secdefRaw, { exchange, tradingClass, multiplier, expirations, strikes });
+        return;
+      }
       const resource = s?.kind === 'guest-secdef' ? guestResourceForSub(s, api) : null;
       if (!resource || resource.secdefReqId !== reqId || Number(underlyingConId) !== resource.conId) return;
       onGuestSecDef(resource, { exchange, tradingClass, multiplier, expirations, strikes });
     });
   api.on(EventName.securityDefinitionOptionParameterEnd, (reqId) => {
     const s = subs.get(reqId);
+    if (s?.kind === 'watch-secdef') { finishWatchWarm(reqId); return; }
     const resource = s?.kind === 'guest-secdef' ? guestResourceForSub(s, api) : null;
     if (!resource || resource.secdefReqId !== reqId) return;
     subs.delete(reqId);
@@ -1174,6 +1209,47 @@ function startGuestResource(token) {
   }, GUEST_START_TIMEOUT_MS);
   resource.startTimer.unref?.();
 
+  // Warm fast path: a same-day cache hit lets us skip the reqContractDetails round
+  // trip (and, when its expiry is still live, the slow reqSecDefOptParams too) and
+  // paint the chart instantly from cached bars. Fresh history is still fetched and
+  // the secdef is revalidated in the background; only the cold-start latency is cut.
+  const cached = guestActivationCache.recall(token.conId, etDayKey());
+  if (cached?.contract) {
+    try {
+      resource.contract = cached.contract; // already a deep copy out of the cache
+      const cachedBars = cached.series?.candles?.length ? cached.series.candles : null;
+      if (cachedBars) {
+        // Seed bars so the chart paints immediately; DO NOT set resource.price —
+        // price must come from a real tick (the MKT order paths need a fresh quote).
+        resource.series.candles = cachedBars;
+        resource.prevClose = cached.series.prevClose ?? null;
+      }
+      // Pause the home SPXW chain exactly as onGuestContractDetails does.
+      if (!homeMarket.isChainPaused()) homeMarket.pauseChain();
+      resource.pausedHome = true;
+      if (!subscribeGuestStock(resource)) return startPromise;
+      requestGuestHistory(resource); // merge semantics let seeded + fresh bars coexist
+      // Settle from cached secdef only if its expiry is still live today (guards a
+      // stale-expiry cache from failing the start), then revalidate in the
+      // background — the secdef handlers merge a bigger strike set and re-run
+      // finishGuestSecDef, which is idempotent once the start has settled.
+      const warmExpiry = cached.secdefRaw
+        ? pickExpiry(cached.secdefRaw.expirations, Date.now())
+        : null;
+      if (warmExpiry) {
+        resource.secdefRaw = cached.secdefRaw;
+        finishGuestSecDef(resource);
+        requestGuestSecDef(resource); // background revalidate (idempotent when settled)
+      } else {
+        requestGuestSecDef(resource); // no usable cached secdef — normal path settles
+      }
+      console.log(`[ibkr] guest activate (warm): ${token.symbol} (conId=${token.conId}, generation=${token.resourceGeneration}${cachedBars ? `, ${cachedBars.length} cached bars` : ''}${warmExpiry ? ', cached secdef' : ''})`);
+    } catch (error) {
+      failGuestStart(resource, `guest warm activation failed: ${error.message}`);
+    }
+    return startPromise;
+  }
+
   try {
     const reqId = nextRequestId();
     resource.contractReqId = reqId;
@@ -1220,6 +1296,7 @@ function onGuestContractDetails(resource, _sub, details) {
     primaryExch: c.primaryExch || c.exchange || undefined,
     currency: c.currency || 'USD',
   };
+  guestActivationCache.remember(resource.conId, etDayKey(), { contract: resource.contract });
   if (!homeMarket.isChainPaused()) homeMarket.pauseChain();
   resource.pausedHome = true;
   if (!subscribeGuestStock(resource)) return;
@@ -1277,19 +1354,24 @@ function requestGuestSecDef(resource) {
 }
 
 // Multiple secdef rows can arrive (one per listing exchange); keep the row with
-// the most strikes — usually the SMART/OCC-complete set.
-function onGuestSecDef(resource, { exchange, tradingClass, multiplier, expirations, strikes }) {
+// the most strikes — usually the SMART/OCC-complete set. Shared by the guest
+// activation path and the watchlist warm-up (both accumulate the best-so-far row).
+// Returns `prev` unchanged when the incoming row is not richer.
+function pickBestSecDef(prev, { exchange, tradingClass, multiplier, expirations, strikes }) {
   const n = Array.isArray(strikes) ? strikes.length : 0;
-  const bestN = resource.secdefRaw ? resource.secdefRaw.strikes.length : -1;
-  if (n > bestN) {
-    resource.secdefRaw = {
-      exchange,
-      tradingClass,
-      multiplier,
-      expirations: (expirations || []).map(String),
-      strikes: (strikes || []).map(Number).filter((strike) => Number.isFinite(strike) && strike > 0),
-    };
-  }
+  const bestN = prev ? prev.strikes.length : -1;
+  if (n <= bestN) return prev;
+  return {
+    exchange,
+    tradingClass,
+    multiplier,
+    expirations: (expirations || []).map(String),
+    strikes: (strikes || []).map(Number).filter((strike) => Number.isFinite(strike) && strike > 0),
+  };
+}
+
+function onGuestSecDef(resource, params) {
+  resource.secdefRaw = pickBestSecDef(resource.secdefRaw, params);
 }
 
 function finishGuestSecDef(resource) {
@@ -1308,6 +1390,7 @@ function finishGuestSecDef(resource) {
     resource.price ?? resource.strikes[Math.floor(resource.strikes.length / 2)],
   );
   if (!(resource.strikeStep > 0)) return failGuestStart(resource, `guest ${resource.symbol} has no usable strike grid`);
+  guestActivationCache.remember(resource.conId, etDayKey(), { secdefRaw: resource.secdefRaw });
   console.log(`[ibkr] guest ${resource.symbol}: expiry ${expiry}, step ${resource.strikeStep}, ${resource.strikes.length} strikes`);
   setGuestChain(resource);
   settleGuestStart(resource);
@@ -1351,6 +1434,15 @@ function stopGuestResource(descriptor, reason = 'guest-released') {
 
 function teardownGuestResource(resource, _reason) {
   if (!resource || resource.cleaned) return;
+  // Snapshot the accumulated bars into the day cache before clearing state, so a
+  // re-activation of this symbol today can paint instantly. Guard on >1 candle so
+  // a start that never really ran doesn't cache an empty/one-bar series (the store
+  // drops the possibly-partial last bar). Store handles the deep copy + trim.
+  if (resource.conId != null && resource.series?.candles?.length > 1) {
+    guestActivationCache.remember(resource.conId, etDayKey(), {
+      series: { candles: resource.series.candles, prevClose: resource.prevClose },
+    }, { seriesMax: GUEST_HISTORY_CANDLES });
+  }
   resource.stopped = true; // fence callbacks before attempting any cancellation
   resource.cleaned = true;
   clearTimeout(resource.startTimer);
@@ -1548,8 +1640,10 @@ function handleWatchlist(ws, msg) {
   for (const sym of [...watchQuotes.keys()]) if (!want.has(sym)) watchQuotes.delete(sym);
   for (const sym of [...watchResolving]) if (!want.has(sym)) watchResolving.delete(sym);
   for (const sym of [...watchInFlight.keys()]) if (!want.has(sym)) watchInFlight.delete(sym);
-  // Resolve contracts for the newcomers (conId cached for the session).
-  if (ib && connected) for (const sym of next) resolveWatchContract(sym);
+  // Resolve contracts for the newcomers (conId cached for the session), and warm
+  // the option secdef of any already-resolved symbol so its first guest activation
+  // is warm; newcomers warm once their contract resolves.
+  if (ib && connected) for (const sym of next) { resolveWatchContract(sym); queueWatchWarm(sym); }
   // Immediate paint from cache; a fresh cycle will follow within WATCH_POLL_MS.
   if (ws.readyState === 1) ws.send(JSON.stringify(watchQuotesMsg()));
 }
@@ -1582,6 +1676,7 @@ function onWatchContractDetails(s, details) {
     primaryExch: c.primaryExch || c.exchange || undefined,
     currency: c.currency || 'USD'
   });
+  queueWatchWarm(s.symbol); // newly resolved → warm its option secdef in the background
 }
 
 // One slow cycle: fire a one-shot snapshot per resolved symbol, staggered so the
@@ -1640,6 +1735,86 @@ function watchQuotesMsg() {
     if (q) quotes.push(q);
   }
   return { type: 'watchlistQuotes', quotes };
+}
+
+// ── Watchlist option-secdef warm-up ──────────────────────────────────────────
+// Queue a resolved watchlist symbol for a background secdef prefetch. Deduped
+// against what's queued, in flight, and already cached same-day; unresolved
+// symbols are re-queued from onWatchContractDetails once their contract lands.
+function queueWatchWarm(symbol) {
+  if (!ib || !connected) return;
+  if (typeof symbol !== 'string' || !symbol) return;
+  if (!watchlist.includes(symbol)) return;
+  const contract = watchContracts.get(symbol);
+  if (!contract) return;                       // not resolved yet → queued on resolve
+  if (watchWarmInFlight.has(symbol)) return;   // dedupe in flight
+  if (watchWarmQueue.includes(symbol)) return; // dedupe queued
+  const cached = guestActivationCache.recall(contract.conId, etDayKey());
+  if (cached?.secdefRaw) return;               // already warm for today
+  watchWarmQueue.push(symbol);
+  pumpWatchWarm();
+}
+
+// Fire the next queued warm secdef — one at a time, and only when no spacing
+// timer is pending. Drops stale queue heads (removed / now cached) as it goes.
+function pumpWatchWarm() {
+  if (watchWarmTimer) return;         // spacing gap in progress
+  if (watchWarmInFlight.size) return; // one secdef on the wire at a time
+  if (!ib || !connected) { watchWarmQueue = []; return; }
+  let symbol;
+  while ((symbol = watchWarmQueue.shift()) != null) {
+    if (!watchlist.includes(symbol)) continue;
+    const contract = watchContracts.get(symbol);
+    if (!contract) continue;
+    const cached = guestActivationCache.recall(contract.conId, etDayKey());
+    if (cached?.secdefRaw) continue;
+    fireWatchWarm(symbol, contract);
+    return;
+  }
+}
+
+function fireWatchWarm(symbol, contract) {
+  const reqId = nextRequestId();
+  watchWarmInFlight.set(symbol, reqId);
+  subs.set(reqId, { kind: 'watch-secdef', symbol, conId: contract.conId, contract, secdefRaw: null });
+  try {
+    ib.reqSecDefOptParams(reqId, symbol, '', 'STK', contract.conId);
+  } catch (e) {
+    console.log(`[ibkr] watchlist warm ${symbol} secdef request failed:`, e.message);
+    subs.delete(reqId);
+    watchWarmInFlight.delete(symbol);
+    scheduleNextWatchWarm();
+    return;
+  }
+  // Backstop: free the slot and cache whatever arrived even if ...End never lands.
+  setTimeout(() => finishWatchWarm(reqId), WATCH_WARM_TIMEOUT_MS);
+}
+
+function scheduleNextWatchWarm() {
+  if (watchWarmTimer) return;
+  watchWarmTimer = setTimeout(() => {
+    watchWarmTimer = null;
+    pumpWatchWarm();
+  }, WATCH_WARM_SPACING_MS);
+  watchWarmTimer.unref?.();
+}
+
+// Finalize a warm secdef: cache the shaped contract + secdef (unless dropped),
+// free the slot, and pace the next. Idempotent — a late timeout after ...End
+// already cleaned up is a no-op.
+function finishWatchWarm(reqId, { drop = false } = {}) {
+  const s = subs.get(reqId);
+  if (!s || s.kind !== 'watch-secdef') return;
+  subs.delete(reqId);
+  if (watchWarmInFlight.get(s.symbol) === reqId) watchWarmInFlight.delete(s.symbol);
+  if (!drop && s.secdefRaw && s.contract) {
+    guestActivationCache.remember(s.contract.conId, etDayKey(), {
+      contract: s.contract,
+      secdefRaw: s.secdefRaw,
+    });
+    console.log(`[ibkr] watchlist warm ${s.symbol}: cached secdef (${s.secdefRaw.strikes.length} strikes)`);
+  }
+  scheduleNextWatchWarm();
 }
 
 // ── ⚔ Durable armed-order authority ────────────────────────────────────────
@@ -2621,6 +2796,12 @@ function resetSubscriptions() {
   watchQuotes.clear();
   watchResolving.clear();
   watchInFlight.clear();
+  // Warm-up in-flight state is an IB subscription set — drop it. The day cache
+  // itself SURVIVES (module state, not an IB sub); the client re-sends its
+  // watchlist on reconnect, which lazily re-warms only what isn't already cached.
+  watchWarmInFlight.clear();
+  watchWarmQueue = [];
+  if (watchWarmTimer) { clearTimeout(watchWarmTimer); watchWarmTimer = null; }
   // ⚔ armed orders SURVIVE an IB reconnect (they're bridge state, not an IB
   // subscription) — but the crossing clock resets, so a level crossed during
   // the blackout can never fire retroactively (first tick back only primes).
