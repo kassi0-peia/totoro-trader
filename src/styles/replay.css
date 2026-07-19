@@ -1,6 +1,6 @@
 /* ============ DECISION-REPLAY GHOST LOG ============ */
 
-/* Floating tape log of her real fills revealed so far during replay. */
+/* Floating tape log of historical fills revealed so far during replay. */
 .ghost-log {
   position: fixed;
   right: 14px;
@@ -38,7 +38,7 @@
   margin-top: 4px;
 }
 
-/* ============ BUS STOP 🚏 (spec-bus-stop.md) ============ */
+/* ============ BUS STOP 🚏 ============ */
 
 /* Floating timetable card: the called coordinate, countdown/result, and the
    contract picks. Fixed on the right like the ghost log, above the fold. */
@@ -770,7 +770,7 @@
   .replay-bar, .tf-replay, .qs-replay, .ghost-log, .busstop-panel { display: none; } /* desktop-only by design */
 }
 
-/* The mascot doubles as the totoro-detector toggle. */
+/* Mascot button. */
 .mascot-btn {
   background: none;
   border: none;

@@ -327,7 +327,7 @@
 
 /* ── Multi-symbol Phase A: symbol search under the ATM quote strip ──
    One thin row: the 🔍/watchlist control + symbol tabs pinned hard LEFT
-   (kisa, 2026-07-16), account/🚏/⚡ cluster hard right. Guest/SPX chips
+   (owner, 2026-07-16), account/🚏/⚡ cluster hard right. Guest/SPX chips
    appear only when needed. Desktop-first — hidden on mobile. */
 .symbol-search-row {
   display: flex;
@@ -342,7 +342,7 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  /* Pin the 🔍/watchlist + symbol tabs to the row's LEFT edge (kisa,
+  /* Pin the 🔍/watchlist + symbol tabs to the row's LEFT edge (owner,
      2026-07-16); the auto margin pushes the account/🚏/⚡ cluster to the
      far right on its own. */
   margin-right: auto;
@@ -497,7 +497,7 @@
 
 /* ── Watchlist (multi-symbol Phase B) ── the starred-symbols panel, rendered
    inside the 🔍 popover (.sym-dropdown) while the query is empty — no chrome
-   of its own on the cockpit (kisa, 2026-07-09). */
+   of its own on the cockpit (owner, 2026-07-09). */
 .watch-add {
   display: block;
   width: 100%;

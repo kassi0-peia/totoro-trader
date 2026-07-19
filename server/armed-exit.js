@@ -1,4 +1,4 @@
-// ⚔̸ Armed exits — the mirror of server/armed.js (spec-armed-exits.md, kisa
+// ⚔̸ Armed exits — the mirror of server/armed.js (spec-armed-exits.md,
 // 2026-07-18): a pre-authorized EXIT on an exact open long position that fires
 // the moment the displayed home price crosses its trigger level. Two actions:
 //
