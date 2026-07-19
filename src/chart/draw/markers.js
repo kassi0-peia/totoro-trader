@@ -35,10 +35,6 @@ export function drawMarkers(ctx, { view, layout, theme, priceToY, indexToX, posi
     ctx.restore();
   };
 
-  // 🐾 Totoro pattern detector — parked in src/experimental/totoro-detector.js
-  // (decorative; lifted out of the render loop 2026-06-22 to slim this file).
-  // See that module's header to improve + re-add.
-
   for (const pos of (showMarkers ? positions : [])) {
     const color = pos.type === 'call' ? (theme.callLine ?? theme.up) : (theme.putLine ?? theme.down);
     const exitIdx = pos.status === 'closed' ? tToIdx(pos.closedAt) : -1;
@@ -133,10 +129,10 @@ export function drawMarkers(ctx, { view, layout, theme, priceToY, indexToX, posi
     }
   }
 
-  // Decision-replay ghosts: the fills she ACTUALLY took on the replayed day,
+  // Decision-replay ghosts: actual fills from the replayed day,
   // revealed by the replay clock (App gates which ones arrive). Accent-colored
   // so they can't be confused with the white sim chevrons, offset further from
-  // the bar so both stay readable when she re-trades the same candle: BUY is a
+  // the bar so both stay readable when replay trades share a candle: BUY is a
   // filled kite, SELL a hollow stroke.
   const ghostHits = [];
   const gHalf = Math.max(2.2, Math.min(9, (layout?.candleW ?? 8) * 0.5));

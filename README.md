@@ -141,7 +141,7 @@ so the chart shows front-month ES shifted to an SPX-equivalent scale
 
 - There are exactly **two naked-MKT path classes**. The **EXECUTE ticket** for a
   **BUY-to-open** opens with **MKT** selected on SPX and an exact active guest
-  (kisa's confirmed choice, 2026-07-13 — instant fill, uncapped slippage, IBKR-
+  (a deliberate design choice — instant fill, uncapped slippage, IBKR-
   simulated/held until ~00:10 outside RTH); a marketable limit prefilled at the
   ask is one toggle away. **Sell-to-open is limit-only on every symbol**
   (a market sell into a thin book is a blank check). The red ⚡ arm is the other

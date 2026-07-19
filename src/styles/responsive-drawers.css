@@ -131,7 +131,7 @@
 .trades-drawer .th-list { max-height: none; flex: 1; }
 
 /* Account badge + id overlaid on the chart's top-right corner */
-/* In-flow since 2026-07-09 (kisa): lives in the symbol-search-row beside the 🔍
+/* In-flow since 2026-07-09 (owner, 2026-07-09): lives in the symbol-search-row beside the 🔍
    instead of floating over the chart's top-right corner. */
 .chart-acct {
   order: 2;
@@ -352,7 +352,7 @@
   .title-block { display: none; }          /* drop "TotoroTrader" + "0DTE EXECUTION" subtitle */
   .expiry-word { display: none; }          /* drop "EXPIRY ·", keep the date */
   .acct-feed { display: flex; }            /* the feed dot survives; color = state */
-  .acct-feed .feed-word { display: none; } /* kisa 2026-07-13: the LIVE/OFFLINE word
+  .acct-feed .feed-word { display: none; } /* owner 2026-07-13: the LIVE/OFFLINE word
                                               eats header space a phone doesn't have —
                                               the dot carries the state, the tooltip
                                               carries the account */
@@ -371,7 +371,7 @@
   .expiry-label { font-size: 8px; }
   .symbol { font-size: 9px; }
 
-  /* The chart IS the mobile home (kisa 2026-07-05 declutter): it absorbs
+  /* The chart IS the mobile home (owner, 2026-07-05): it absorbs
      everything between the quote strip and the status strip. Positions live
      in the bottom sheet, not below the fold. */
   .chart-area { flex: 1; min-height: 0; display: flex; flex-direction: column; }
@@ -387,7 +387,7 @@
 
   .acct-quick-btn { display: none; }   /* quick mode is right-click → desktop only */
   .acct-bus-btn { display: none; }     /* bus stop is desktop-only (spec-bus-stop.md) */
-  /* Mobile de-busying (kisa 2026-07-10, "very busy"): pinch already zooms so
+  /* Mobile de-busying (owner, 2026-07-10): pinch already zooms so
      the ± buttons go; screen recording and axis premiums are desktop tools;
      the TIMEFRAME word is self-evident from its buttons; the header dot
      already tells the connection story, so of the action row only the panic
@@ -477,8 +477,7 @@
 
 /* ============ TRADES DRAWER — HISTORY VIEW (multi-day journal) ============ */
 
-/* One history glyph flips today ↔ journal (kisa 2026-07-10: the two-word
-   toggle was chrome; the header text already names the view). `.solo` = no
+/* One history glyph flips today ↔ journal (owner, 2026-07-10). `.solo` = no
    net-cash chip to its left, so it pushes itself to the right edge. */
 .th-hist {
   display: inline-flex;
