@@ -156,7 +156,9 @@ const subs = new Map();
 // stay client-owned. Its candle/chain state is isolated and the SPXW line-hog
 // yields while it is active; browser session intent reactivates after reconnect.
 // See server/guest-registry.js, server/guest-symbol.js, and spec-multi-symbol.md.
-const GUEST_STRIKE_WINDOW = 6;    // n strikes each side of spot (narrower than SPXW)
+const GUEST_STRIKE_WINDOW = 20;   // n strikes each side of spot — matches the SPXW
+                                  // chainHalfWidth on purpose: the guest lease pauses
+                                  // the SPXW chain, so this spends the same freed lines
 const GUEST_RECENTRE_STEPS = 1;   // recenter once spot drifts a full step past the window edge
 const GUEST_HISTORY_CANDLES = 3000;
 const GUEST_START_TIMEOUT_MS = 15_000;
