@@ -42,6 +42,50 @@ test('open deduplicates an exact contract and focuses the existing card', () => 
   assert.equal(topPinnedCard(state).height, PINNED_CARD_DEFAULT_HEIGHT);
 });
 
+test('open pins at the hover card point when given, clamped; a new card never teleports', () => {
+  let state = createPinnedCardState([], viewport);
+  state = pinnedCardReducer(state, { type: 'open', position: call(), at: { x: 300, y: 150 }, viewport });
+  let card = topPinnedCard(state);
+  assert.equal(card.x, 300);
+  assert.equal(card.y, 150);
+  assert.equal(card.width, PINNED_CARD_DEFAULT_WIDTH);
+
+  // Off-viewport drop points clamp back inside.
+  state = pinnedCardReducer(state, {
+    type: 'open', position: call({ type: 'put', strike: 7400 }), at: { x: -900, y: 9000 }, viewport,
+  });
+  card = topPinnedCard(state);
+  assert.equal(card.x, 8);
+  assert.equal(card.y, viewport.height - card.height - 8);
+
+  // A garbage point (e.g. a stray event object) falls back to the corner stack.
+  state = pinnedCardReducer(state, {
+    type: 'open', position: call({ symbol: 'SPY', strike: 600 }), at: { clientX: 10 }, viewport,
+  });
+  card = topPinnedCard(state);
+  assert.equal(card.x, viewport.width - PINNED_CARD_DEFAULT_WIDTH - 24 - 48);
+});
+
+test('re-opening an existing card: click only focuses in place, drag-drop relocates', () => {
+  let state = createPinnedCardState([], viewport);
+  state = pinnedCardReducer(state, { type: 'open', position: call(), at: { x: 200, y: 100 }, viewport });
+  state = pinnedCardReducer(state, { type: 'open', position: call({ type: 'put', strike: 7400 }), viewport });
+
+  // Plain click on the hover card of an already-pinned contract: the pinned
+  // card keeps the position the user gave it — the click point is ignored.
+  state = pinnedCardReducer(state, { type: 'open', position: call(), at: { x: 640, y: 300 }, viewport });
+  let card = topPinnedCard(state);
+  assert.equal(card.key, pinnedPositionKey(call()));
+  assert.equal(card.x, 200);
+  assert.equal(card.y, 100);
+
+  // Deliberate drag-drop moves it to the drop point.
+  state = pinnedCardReducer(state, { type: 'open', position: call(), at: { x: 640, y: 300 }, moved: true, viewport });
+  card = topPinnedCard(state);
+  assert.equal(card.x, 640);
+  assert.equal(card.y, 300);
+});
+
 test('focus, move, resize, close, and viewport changes keep layouts clamped', () => {
   let state = createPinnedCardState([], viewport);
   const a = call();

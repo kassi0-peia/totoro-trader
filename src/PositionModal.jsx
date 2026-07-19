@@ -35,6 +35,8 @@ export default function PositionModal({
   const canvasRef = useRef(null);
   const cardRef = useRef(null);
   const dragRef = useRef(null);
+  const hoverDragRef = useRef(null);
+  const [hoverDragOffset, setHoverDragOffset] = useState(null); // {dx, dy} while dragging the hover card
   const [tpStr, setTpStr] = useState('');
   const [slStr, setSlStr] = useState('');
   const [trailStr, setTrailStr] = useState('');
@@ -47,6 +49,8 @@ export default function PositionModal({
 
   useEffect(() => {
     setTpStr(''); setSlStr(''); setTrailStr(''); setView(null);
+    hoverDragRef.current = null;
+    setHoverDragOffset(null);
   }, [floating?.key, pos?.id]);
 
   // (Re)request the premium history while open — server caches for 60 s.
@@ -360,8 +364,58 @@ export default function PositionModal({
       // top-right origin moved right-side cards ~100 px away and made the short
       // hover-to-card hop miss its grace window.
       transformOrigin: onLeftHalf ? 'top left' : 'top right',
+      // Mid-drag: ride the pointer. The inline transform must restate the CSS
+      // scale(0.7) it overrides, and the pop-in animation must yield to it.
+      ...(hoverDragOffset ? {
+        transform: `translate(${hoverDragOffset.dx}px, ${hoverDragOffset.dy}px) scale(0.7)`,
+        animation: 'none',
+        cursor: 'grabbing',
+      } : {}),
     };
   })();
+
+  // Hover-card pinning is positional: a plain click pins the card exactly
+  // where it already sits, a click-drag carries it and pins it where dropped.
+  // Either way the pinned card appears at the hover card's final corner —
+  // never teleported to a default slot.
+  const beginHoverDrag = (event) => {
+    if (!anchor || event.button !== 0 || !onActivate) return;
+    event.preventDefault();
+    onHoverChange?.(true); // hold the card open for the whole drag
+    hoverDragRef.current = {
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      moved: false,
+    };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  };
+
+  const moveHoverDrag = (event) => {
+    const drag = hoverDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const dx = event.clientX - drag.startClientX;
+    const dy = event.clientY - drag.startClientY;
+    if (!drag.moved && Math.hypot(dx, dy) > 3) drag.moved = true;
+    if (drag.moved) setHoverDragOffset({ dx, dy });
+  };
+
+  const endHoverDrag = (event) => {
+    const drag = hoverDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    hoverDragRef.current = null;
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    const rect = cardRef.current?.getBoundingClientRect();
+    setHoverDragOffset(null);
+    onActivate?.(rect ? { x: rect.left, y: rect.top } : null, drag.moved);
+  };
+
+  const cancelHoverDrag = (event) => {
+    if (hoverDragRef.current?.pointerId !== event.pointerId) return;
+    hoverDragRef.current = null;
+    setHoverDragOffset(null);
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+  };
 
   const beginDrag = (event) => {
     if (!pinned || event.button !== 0) return;
@@ -396,10 +450,13 @@ export default function PositionModal({
       <div
         ref={cardRef}
         className={`modal pos-inspect${anchor ? ' pos-hover-card' : ''}${pinned ? ' pos-pinned-card' : ''}`}
-        onClick={anchor ? (e) => { e.stopPropagation(); onActivate?.(); } : (e) => e.stopPropagation()}
+        onClick={(e) => e.stopPropagation()}
         onMouseEnter={anchor ? () => onHoverChange?.(true) : undefined}
         onMouseLeave={anchor ? () => onHoverChange?.(false) : undefined}
-        onPointerDown={pinned ? () => onCardFocus?.(floating.key) : undefined}
+        onPointerDown={anchor ? beginHoverDrag : pinned ? () => onCardFocus?.(floating.key) : undefined}
+        onPointerMove={anchor ? moveHoverDrag : undefined}
+        onPointerUp={anchor ? endHoverDrag : undefined}
+        onPointerCancel={anchor ? cancelHoverDrag : undefined}
         onKeyDown={pinned ? (event) => {
           if (event.key !== 'Escape') return;
           event.stopPropagation();
