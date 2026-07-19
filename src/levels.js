@@ -1,5 +1,5 @@
-// Optional day levels provide the context lines a 0DTE open is traded against:
-// prior day high/low/close
+// Day levels (the owner 2026-07-13: "day levels have to have a toggle i guess") —
+// the context lines a 0DTE open is traded against: prior day high/low/close
 // and today's open. Derived from the 1D history bars the app already knows
 // how to fetch, relative to the ACTIVE trade date (the 16:15-rolled expiry),
 // so an overnight session shows the just-closed day as "prior" — Friday's

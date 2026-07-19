@@ -8,10 +8,11 @@ import WatchPanel from './Watchlist.jsx';
 export const searchPopover = { isOpen: () => false, close: () => {} };
 
 // Multi-symbol Phase A+B: symbol search, right-aligned under the ATM quote
-// strip. Collapsed to a bare 🔍 by default;
-// clicking it expands the input AND opens the popover. While the input is
+// strip. The 🔍 / watchlist control leads the group on the left; any active or
+// open-position symbol tabs follow it to the right. Clicking the collapsed 🔍
+// expands the input AND opens the popover. While the input is
 // empty the popover is the watchlist panel (SPX home + starred stocks with
-// quotes — folded in here so the row stays a lone magnifier);
+// quotes — folded in here 2026-07-09 so the row stays a lone magnifier);
 // typing swaps it for the debounced symbolSearch results, where ☆/★ toggles
 // a symbol in and out of the watchlist. Pick a result (or a watch row) =
 // activate a guest cockpit. When a guest is active the [SPX] home chip +
@@ -92,8 +93,80 @@ export default function SymbolSearch({
 
   return (
     <div className="symbol-search" ref={boxRef}>
+      <div className="sym-search-control">
+        {!expanded ? (
+          <button
+            className="sym-glass"
+            onClick={expand}
+            data-tip={live ? 'Symbols — search & watchlist' : 'Search needs the bridge connection'}
+            aria-label="Symbols — search & watchlist"
+          >
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <circle cx="10.5" cy="10.5" r="6.5" />
+              <line x1="15.5" y1="15.5" x2="21" y2="21" />
+            </svg>
+          </button>
+        ) : (
+          <input
+            ref={inputRef}
+            className="sym-input"
+            type="text"
+            value={text}
+            placeholder={live ? 'symbol…' : 'offline'}
+            disabled={!live}
+            onChange={(e) => setText(e.target.value.toUpperCase())}
+            onFocus={() => { if (matches.length) setOpen(true); }}
+            onKeyDown={(e) => { if (e.key === 'Escape') collapse(); }}
+            aria-label="Search a symbol"
+            spellCheck={false}
+            autoComplete="off"
+          />
+        )}
+        {(showPanel || showResults) && (
+          <div className="sym-dropdown" role="listbox">
+            {showPanel ? (
+              <WatchPanel
+                symbols={watchSymbols}
+                quotes={watchQuotes}
+                activeSymbol={activeSymbol}
+                spxQuote={spxQuote}
+                onActivate={(sym) => { onActivate(sym); collapse(); }}
+                onHome={() => { onHome(); collapse(); }}
+                onRemove={onRemoveWatch}
+                onAddActive={() => onAddWatch(activeSymbol)}
+                canAddActive={canAddActive}
+                live={live}
+                now={now}
+              />
+            ) : matches.length === 0 ? (
+              <div className="sym-empty">no matches</div>
+            ) : (
+              matches.map((m) => {
+                const starred = watchSymbols.includes(m.symbol);
+                return (
+                  <div className="sym-opt" key={`${m.conId}-${m.symbol}`} role="option">
+                    <button className="sym-opt-main" onClick={() => pick(m)}>
+                      <span className="sym-opt-tkr">{m.symbol}</span>
+                      <span className="sym-opt-name">{m.name}</span>
+                      <span className="sym-opt-exch">{m.exchange}</span>
+                    </button>
+                    <button
+                      className={`sym-opt-star${starred ? ' on' : ''}`}
+                      onClick={(e) => { e.stopPropagation(); (starred ? onRemoveWatch : onAddWatch)(m.symbol); }}
+                      data-tip={starred ? `Remove ${m.symbol} from the watchlist` : `Add ${m.symbol} to the watchlist`}
+                      aria-label={starred ? `Remove ${m.symbol} from the watchlist` : `Add ${m.symbol} to the watchlist`}
+                    >
+                      {starred ? '★' : '☆'}
+                    </button>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        )}
+      </div>
       {/* Chips only earn their space when a guest is active — collapsed-on-SPX
-          is just the bare 🔍. */}
+          is just the bare 🔍 (the owner's ask). */}
       {guestOn && (
         <>
           <button
@@ -109,8 +182,8 @@ export default function SymbolSearch({
           </span>
         </>
       )}
-      {/* Tabs for symbols holding an open position: a guest leg must never
-          strand its cockpit behind a fresh search — one click
+      {/* Tabs for symbols holding an open position (the owner 2026-07-10): a TSLA
+          leg must never strand its cockpit behind a fresh search — one click
           returns to it, and its marks only stream while it's active. */}
       {openGuestSymbols.filter((s) => s !== activeSymbol).map((s) => (
         <button
@@ -122,76 +195,6 @@ export default function SymbolSearch({
           {s}
         </button>
       ))}
-      {!expanded ? (
-        <button
-          className="sym-glass"
-          onClick={expand}
-          data-tip={live ? 'Symbols — search & watchlist' : 'Search needs the bridge connection'}
-          aria-label="Symbols — search & watchlist"
-        >
-          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-            <circle cx="10.5" cy="10.5" r="6.5" />
-            <line x1="15.5" y1="15.5" x2="21" y2="21" />
-          </svg>
-        </button>
-      ) : (
-      <input
-        ref={inputRef}
-        className="sym-input"
-        type="text"
-        value={text}
-        placeholder={live ? 'symbol…' : 'offline'}
-        disabled={!live}
-        onChange={(e) => setText(e.target.value.toUpperCase())}
-        onFocus={() => { if (matches.length) setOpen(true); }}
-        onKeyDown={(e) => { if (e.key === 'Escape') collapse(); }}
-        aria-label="Search a symbol"
-        spellCheck={false}
-        autoComplete="off"
-      />
-      )}
-      {(showPanel || showResults) && (
-        <div className="sym-dropdown" role="listbox">
-          {showPanel ? (
-            <WatchPanel
-              symbols={watchSymbols}
-              quotes={watchQuotes}
-              activeSymbol={activeSymbol}
-              spxQuote={spxQuote}
-              onActivate={(sym) => { onActivate(sym); collapse(); }}
-              onHome={() => { onHome(); collapse(); }}
-              onRemove={onRemoveWatch}
-              onAddActive={() => onAddWatch(activeSymbol)}
-              canAddActive={canAddActive}
-              live={live}
-              now={now}
-            />
-          ) : matches.length === 0 ? (
-            <div className="sym-empty">no matches</div>
-          ) : (
-            matches.map((m) => {
-              const starred = watchSymbols.includes(m.symbol);
-              return (
-                <div className="sym-opt" key={`${m.conId}-${m.symbol}`} role="option">
-                  <button className="sym-opt-main" onClick={() => pick(m)}>
-                    <span className="sym-opt-tkr">{m.symbol}</span>
-                    <span className="sym-opt-name">{m.name}</span>
-                    <span className="sym-opt-exch">{m.exchange}</span>
-                  </button>
-                  <button
-                    className={`sym-opt-star${starred ? ' on' : ''}`}
-                    onClick={(e) => { e.stopPropagation(); (starred ? onRemoveWatch : onAddWatch)(m.symbol); }}
-                    data-tip={starred ? `Remove ${m.symbol} from the watchlist` : `Add ${m.symbol} to the watchlist`}
-                    aria-label={starred ? `Remove ${m.symbol} from the watchlist` : `Add ${m.symbol} to the watchlist`}
-                  >
-                    {starred ? '★' : '☆'}
-                  </button>
-                </div>
-              );
-            })
-          )}
-        </div>
-      )}
     </div>
   );
 }

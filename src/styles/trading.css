@@ -171,9 +171,9 @@
   height: 28px;
   background: var(--c-surface);
   border-top: 1px solid var(--c-border);
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
-  justify-content: space-between;
   /* keep text above the iOS home indicator */
   padding: 0 max(16px, env(safe-area-inset-right)) env(safe-area-inset-bottom)
     max(16px, env(safe-area-inset-left));
@@ -181,6 +181,25 @@
   color: var(--c-muted);
   letter-spacing: 0.18em;
   z-index: 10;
+}
+.footer-status { justify-self: start; }
+.footer-version { justify-self: end; }
+.footer-timeframes {
+  justify-self: center;
+  display: flex;
+  align-items: center;
+}
+.footer-tf-group {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+.footer .tf-btn {
+  height: 22px;
+  min-width: 34px;
+  padding: 0 8px;
+  border-radius: 4px;
+  font-size: 9px;
 }
 
 /* ============ EXECUTION / ACCOUNT SAFETY ============ */
@@ -307,9 +326,9 @@
 }
 
 /* ── Multi-symbol Phase A: symbol search under the ATM quote strip ──
-   A thin right-aligned row collapsed to a bare
-   🔍 that expands to the input on click. Guest/SPX chips appear only when a
-   guest is active. Desktop-first — hidden on mobile. */
+   One thin row: the 🔍/watchlist control + symbol tabs pinned hard LEFT
+   (owner, 2026-07-16), account/🚏/⚡ cluster hard right. Guest/SPX chips
+   appear only when needed. Desktop-first — hidden on mobile. */
 .symbol-search-row {
   display: flex;
   justify-content: flex-end;
@@ -319,10 +338,19 @@
   min-height: 0;
 }
 .symbol-search {
-  position: relative;
+  order: 1;
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  /* Pin the 🔍/watchlist + symbol tabs to the row's LEFT edge (owner,
+     2026-07-16); the auto margin pushes the account/🚏/⚡ cluster to the
+     far right on its own. */
+  margin-right: auto;
+}
+.sym-search-control {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
 }
 .sym-glass {
   display: inline-flex;
@@ -339,9 +367,6 @@
   transition: color 160ms, border-color 160ms;
 }
 .sym-glass:hover { color: var(--c-accent); border-color: var(--c-accent); }
-/* Edge-anchor the 🔍 tooltip so it can't clip the right viewport edge. */
-.sym-glass[data-tip]::after { left: auto; right: -1px; transform: translateX(0) translateY(3px); }
-.sym-glass[data-tip]:hover::after { transform: translateX(0) translateY(0); }
 .sym-chip {
   font-size: 10px;
   font-weight: 700;
@@ -401,7 +426,9 @@
 .sym-dropdown {
   position: absolute;
   top: 100%;
-  right: 0;
+  /* The 🔍 control is pinned to the row's LEFT edge now — anchor the popover
+     to its left side so it opens rightward into the page, not off-screen. */
+  left: 0;
   margin-top: 4px;
   min-width: 220px;
   max-height: 300px;
@@ -469,8 +496,8 @@
 }
 
 /* ── Watchlist (multi-symbol Phase B) ── the starred-symbols panel, rendered
-   inside the 🔍 popover (.sym-dropdown) while the query is empty, with no
-   separate cockpit chrome. */
+   inside the 🔍 popover (.sym-dropdown) while the query is empty — no chrome
+   of its own on the cockpit (owner, 2026-07-09). */
 .watch-add {
   display: block;
   width: 100%;
@@ -652,3 +679,46 @@
   padding: 1px 6px;
   text-align: center;
 }
+
+/* ==== ⚔̸ armed exits (spec-armed-exits.md) ==== */
+/* The list under the position card's @SPX row. */
+.armed-exit-list {
+  margin-top: 6px;
+  border-top: 1px solid var(--c-border);
+  padding-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.armed-exit-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.armed-exit-row .armed-exit-status {
+  margin-left: auto;
+  font-style: normal;
+  font-size: 8px;
+  letter-spacing: 0.08em;
+  color: var(--c-muted);
+}
+.armed-exit-disarm {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--c-border);
+  border-radius: 4px;
+  background: none;
+  color: var(--c-loss);
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+}
+.armed-exit-disarm:hover { border-color: var(--c-loss); }
+/* Typed fields, no arrows: the exit qty is a plain text input; keep any
+   number-input spinners off the exit row. */
+.exit-qty-input::-webkit-outer-spin-button,
+.exit-qty-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }

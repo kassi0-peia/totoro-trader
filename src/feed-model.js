@@ -35,6 +35,10 @@ export function createInitialSnapshot() {
     // Server-owned close-then-reopen transaction. A partial/uncertain close
     // never becomes a browser-issued second order.
     reverseState: { phase: 'IDLE', active: false, transactionId: null, routingLocked: false },
+    // Server-authoritative, revisioned armed-entry state. Browser storage is a
+    // cache only; null means this bridge has not published authority yet.
+    armedState: null,
+    armedExitState: null,
     caps: {},              // bridge capability flags (e.g. trail) — empty until the snapshot says
     trades: [],            // today's fills (blotter)
     positions: [],         // IBKR-authoritative open option positions
@@ -121,6 +125,27 @@ function guestEnvelopeMatches(state, msg) {
     && Number(state.guest.conId) === Number(msg.conId);
 }
 
+function guestQuoteEnvelopeMatches(state, msg) {
+  return !!state?.guest
+    && state.guestResourceKey === msg?.guestResourceKey
+    && state.guestResourceGeneration === msg?.guestResourceGeneration
+    && state.guest.symbol === msg?.symbol
+    && Number(state.guest.conId) === Number(msg?.guestUnderlyingConId);
+}
+
+function invalidateQuoteTimestamps(greeksMap) {
+  const next = new Map();
+  for (const [key, row] of greeksMap || []) {
+    next.set(key, {
+      ...row,
+      bidTs: null,
+      askTs: null,
+      tickTs: null,
+    });
+  }
+  return next;
+}
+
 // Interpret one bridge message without owning any transport state. `clock` is
 // injectable so arrival timestamps are deterministic in tests.
 export function applyMessage(s, msg, clock = Date.now) {
@@ -136,6 +161,9 @@ export function applyMessage(s, msg, clock = Date.now) {
     const greeksMap = new Map();
     for (const g of msg.greeks || []) greeksMap.set(optionKey(g.strike, g.type), g);
     const goLive = !!msg.connected;
+    const connectionGreeksMap = goLive
+      ? greeksMap
+      : invalidateQuoteTimestamps(greeksMap.size ? greeksMap : s.greeksMap);
     return {
       ...s,
       live: goLive,
@@ -145,7 +173,10 @@ export function applyMessage(s, msg, clock = Date.now) {
       // used as a seed at connect. Live ticks below re-stamp it to arrival time.
       tickTs: msg.tickTs ?? s.tickTs,
       candles: goLive && msg.candles?.length ? msg.candles : s.candles,
-      greeksMap,
+      greeksMap: connectionGreeksMap,
+      guestGreeksMap: goLive
+        ? s.guestGreeksMap
+        : invalidateQuoteTimestamps(s.guestGreeksMap),
       source: msg.source || s.source,
       rth: typeof msg.rth === 'boolean' ? msg.rth : (goLive && msg.source === 'SPX'),
       expiry: msg.expiry ?? s.expiry,
@@ -165,6 +196,15 @@ export function applyMessage(s, msg, clock = Date.now) {
       reverseState: msg.reverseState && typeof msg.reverseState === 'object'
         ? { ...msg.reverseState }
         : s.reverseState,
+      // A snapshot is the authority envelope for this exact socket. Explicitly
+      // missing/null armed state must not preserve a prior bridge process's raw
+      // witness; App retains its separately normalized offline cache.
+      armedState: msg.armedState && typeof msg.armedState === 'object'
+        ? { ...msg.armedState }
+        : null,
+      armedExitState: msg.armedExitState && typeof msg.armedExitState === 'object'
+        ? { ...msg.armedExitState }
+        : null,
       // Bridge capability flags (absent on an old bridge = all false) — see
       // the snapshot builder's caps note. Gates order fields the bridge must
       // understand to route safely.
@@ -240,6 +280,16 @@ export function applyMessage(s, msg, clock = Date.now) {
       ...s,
       reverseState,
     };
+  }
+
+  if (msg.type === 'armedState') {
+    const { type: _messageType, ...armedState } = msg;
+    return { ...s, armedState };
+  }
+
+  if (msg.type === 'armedExitState') {
+    const { type: _messageType, ...armedExitState } = msg;
+    return { ...s, armedExitState };
   }
 
   if (msg.type === 'historyResult') {
@@ -338,8 +388,9 @@ export function applyMessage(s, msg, clock = Date.now) {
           updatedAt: nowMs(),
         }
         : s.reverseState,
+      greeksMap: invalidateQuoteTimestamps(s.greeksMap),
       guest: null,
-      guestGreeksMap: new Map(),
+      guestGreeksMap: invalidateQuoteTimestamps(s.guestGreeksMap),
       guestResourceKey: null,
       guestResourceGeneration: null,
       watchlistQuotes: {}
@@ -376,6 +427,35 @@ export function applyMessage(s, msg, clock = Date.now) {
   // One-shot snapshot quote for a strike outside the streamed chain — merge it
   // into the greeks map so tooltips/modals find it via the normal lookup.
   if (msg.type === 'quoteResult') {
+    // An exact active-guest snapshot (used by far strikes/rung) rejoins that
+    // guest's generation-fenced chain map. It must never fall into posQuotes or
+    // repaint a replacement resource that happens to share the same ticker.
+    if (msg.symbol && msg.symbol !== 'SPX' && msg.guestResourceKey != null) {
+      if (!guestQuoteEnvelopeMatches(s, msg)) return s;
+      const type = msg.right === 'C' ? 'call' : 'put';
+      const key = optionKey(msg.strike, type);
+      const prev = s.guestGreeksMap.get(key);
+      const next = new Map(s.guestGreeksMap);
+      next.set(key, {
+        strike: msg.strike,
+        type,
+        premium: msg.premium ?? prev?.premium ?? msg.last ?? null,
+        delta: msg.delta ?? prev?.delta,
+        gamma: msg.gamma ?? prev?.gamma,
+        theta: msg.theta ?? prev?.theta,
+        vega: msg.vega ?? prev?.vega,
+        iv: msg.iv ?? prev?.iv,
+        bid: msg.bid ?? null,
+        ask: msg.ask ?? null,
+        bidTs: msg.bidTs ?? null,
+        askTs: msg.askTs ?? null,
+        dayHigh: msg.dayHigh ?? prev?.dayHigh,
+        dayLow: msg.dayLow ?? prev?.dayLow,
+        tickTs: msg.tickTs ?? null,
+        snapshotTs: msg.snapshotTs ?? msg.ts,
+      });
+      return { ...s, guestGreeksMap: next };
+    }
     // A guest-position snapshot quote lives in its own map, keyed by the full
     // contract — never merged into the SPX greeks map (a TSLA 315C must not
     // collide with SPX strikes, and the expiry guard below is SPX-specific).

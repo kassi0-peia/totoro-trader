@@ -3,7 +3,7 @@
 
 import { optionExpiryCutoffMs } from '../market-time.js';
 
-import { freshQuoteMid } from '../order-payload.js';
+import { freshQuoteMid, QUOTE_TS_SKEW_MS } from '../order-payload.js';
 
 export const IVOL_FALLBACK = 0.18;
 export const MID_FRESH_MS = 60_000;
@@ -53,7 +53,10 @@ export const posKey = (strike, right, expiry) => `${strike}${right}:${expiry}`;
 export function inactivePositionSnapshotGreeks(quote, now = Date.now(), maxAgeMs = 90_000) {
   const stamp = Number(quote?.snapshotTs ?? quote?.ts ?? quote?.tickTs);
   const age = Number(now) - stamp;
-  const fresh = Number.isFinite(age) && age >= 0 && age <= maxAgeMs;
+  // Same skew tolerance as freshQuoteMid: the caller's witness clock (the
+  // ~800ms render tick, or a phone whose clock trails the bridge) may lag the
+  // stamp it is judging; slightly-future stamps are current, not stale.
+  const fresh = Number.isFinite(age) && age >= -QUOTE_TS_SKEW_MS && age <= maxAgeMs;
   const empty = {
     premium: null,
     delta: null,
@@ -73,7 +76,7 @@ export function inactivePositionSnapshotGreeks(quote, now = Date.now(), maxAgeMs
   // atomic snapshot timestamp remains the compatibility fallback.
   const greekStamp = Number(quote?.greeksTs ?? quote?.snapshotTs ?? quote?.ts ?? quote?.tickTs);
   const greekAge = Number(now) - greekStamp;
-  const greeksFresh = Number.isFinite(greekAge) && greekAge >= 0 && greekAge <= maxAgeMs;
+  const greeksFresh = Number.isFinite(greekAge) && greekAge >= -QUOTE_TS_SKEW_MS && greekAge <= maxAgeMs;
   const greek = (value) => greeksFresh ? finiteOrNull(value) : null;
   const mid = freshQuoteMid(quote, now, maxAgeMs);
   return {
@@ -85,20 +88,6 @@ export function inactivePositionSnapshotGreeks(quote, now = Date.now(), maxAgeMs
     iv: greek(quote?.iv),
     source: 'snapshot',
   };
-}
-
-// A completed opening fill already appears as a glow + toast; do not pull the
-// positions drawer over the chart just because a new position landed. Closing
-// fills (including bracket children) still reveal the drawer, and unknown fills
-// keep the old reveal behavior so a reconnect/backfill cannot disappear quietly.
-export function shouldPeekBottomForFill(msg, positions) {
-  const ref = typeof msg?.clientRef === 'string' && msg.clientRef ? msg.clientRef : null;
-  if (!ref) return true;
-  if (Array.isArray(positions) && positions.some((p) => (
-    p?.closeRef === ref || (Array.isArray(p?.closeRefs) && p.closeRefs.includes(ref))
-  ))) return true;
-  if (Array.isArray(positions) && positions.some((p) => p?.openRef === ref)) return false;
-  return true;
 }
 
 // The chart marker for a real fill needs the underlying price of THAT fill's
@@ -118,7 +107,7 @@ export function freshUnderlyingPriceForFill(
   const price = Number(witness?.price);
   const ts = Number(witness?.ts);
   const age = Number(now) - ts;
-  if (!(price > 0) || !Number.isFinite(age) || age < 0 || age > maxAgeMs) return null;
+  if (!(price > 0) || !Number.isFinite(age) || age < -QUOTE_TS_SKEW_MS || age > maxAgeMs) return null;
   return price;
 }
 

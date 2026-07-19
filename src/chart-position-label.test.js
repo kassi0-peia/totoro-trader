@@ -7,9 +7,9 @@ test('position chart label includes compact live call delta and P/L', () => {
     strike: 7600,
     type: 'call',
     qty: 5,
-    greeksLive: { source: 'ibkr', delta: 0.047 }
+    greeksLive: { source: 'ibkr', delta: 0.047, gamma: 0.0166 }
   };
-  assert.equal(formatPositionChartLabel(pos, -31), '7600C ×5  Δ.05  −$31');
+  assert.equal(formatPositionChartLabel(pos, -31), '7600C ×5  Δ.05  Γ.017  −$31');
 });
 
 test('position chart label shows put delta by magnitude, matching the established C/P convention', () => {
@@ -17,9 +17,9 @@ test('position chart label shows put delta by magnitude, matching the establishe
     strike: 7500,
     type: 'put',
     qty: 2,
-    greeksLive: { source: 'mid', delta: -0.314 }
+    greeksLive: { source: 'mid', delta: -0.314, gamma: 0.021 }
   };
-  assert.equal(formatPositionChartLabel(pos, 125), '7500P ×2  Δ.31  +$125');
+  assert.equal(formatPositionChartLabel(pos, 125), '7500P ×2  Δ.31  Γ.021  +$125');
 });
 
 test('position chart label uses an honest dash when no genuine live delta exists', () => {
@@ -29,7 +29,7 @@ test('position chart label uses an honest dash when no genuine live delta exists
     qty: 1,
     greeksLive: { source: 'snapshot', delta: 0 }
   };
-  assert.equal(formatPositionChartLabel(pos, 0), '7550C ×1  Δ—  +$0');
+  assert.equal(formatPositionChartLabel(pos, 0), '7550C ×1  Δ—  Γ—  +$0');
 });
 
 test('position chart label uses an honest P/L dash when no live mark exists', () => {
@@ -39,7 +39,7 @@ test('position chart label uses an honest P/L dash when no live mark exists', ()
     qty: 5,
     greeksLive: { source: 'nodata', premium: null, delta: 0 }
   };
-  assert.equal(formatPositionChartLabel(pos, null), '7600C ×5  Δ—  —');
+  assert.equal(formatPositionChartLabel(pos, null), '7600C ×5  Δ—  Γ—  —');
 });
 
 test('position painter measures the final delta-bearing label for its chip and hitbox', () => {
@@ -60,7 +60,7 @@ test('position painter measures the final delta-bearing label for its chip and h
   };
   const pos = {
     strike: 7600, type: 'call', side: 'long', qty: 5, status: 'open', entryPremium: 1,
-    greeksLive: { source: 'ibkr', premium: 0.938, delta: 0.047 }
+    greeksLive: { source: 'ibkr', premium: 0.938, delta: 0.047, gamma: 0.0166 }
   };
   const hits = drawPositions(ctx, {
     layout: { chartW: 900 },
@@ -70,11 +70,11 @@ test('position painter measures the final delta-bearing label for its chip and h
     showPositions: true
   });
 
-  assert.deepEqual(measured, ['7600C ×5  Δ.05', '−$31']);
+  assert.deepEqual(measured, ['7600C ×5  Δ.05  Γ.017', '−$31']);
   assert.equal(hits.label[0].x1 - hits.label[0].x0, measured[0].length + measured[1].length + 24);
   assert.equal(fills[0].color, '#call', 'main contract chip keeps the call color while losing');
   assert.deepEqual(texts.slice(0, 2), [
-    { color: '#0a0c12', text: '7600C ×5  Δ.05' },
+    { color: '#0a0c12', text: '7600C ×5  Δ.05  Γ.017' },
     { color: '#loss', text: '−$31' }
   ]);
 });
@@ -97,14 +97,14 @@ test('winning put keeps put identity while only its P/L suffix turns profit colo
     priceToY: () => 100,
     positions: [{
       strike: 7500, type: 'put', side: 'long', qty: 2, status: 'open', entryPremium: 1,
-      greeksLive: { source: 'ibkr', premium: 1.5, delta: -0.314 }
+      greeksLive: { source: 'ibkr', premium: 1.5, delta: -0.314, gamma: 0.021 }
     }],
     showPositions: true
   });
 
   assert.equal(fills[0].color, '#put');
   assert.deepEqual(texts.slice(0, 2), [
-    { color: '#0a0c12', text: '7500P ×2  Δ.31' },
+    { color: '#0a0c12', text: '7500P ×2  Δ.31  Γ.021' },
     { color: '#profit', text: '+$100' }
   ]);
 });

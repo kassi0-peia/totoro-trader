@@ -17,6 +17,15 @@ const rightOf = (type) => (type === 'call' ? 'C' : 'P');
 
 export const ORDER_QUOTE_FRESH_MS = 60_000;
 
+// Freshness witnesses are allowed to run slightly behind the tape. The app's
+// render clock ticks every ~800ms while quote-triggered renders carry stamps
+// newer than it, so a strict `age >= 0` rejected exactly the freshest quotes
+// and dropped marks back to the phantom-prone model (observed live
+// 2026-07-16: fresh 25.30×25.50 book, mark 26.33 = model). A small negative
+// age is "current", not stale; anything further in the future is a broken
+// clock and still refuses.
+export const QUOTE_TS_SKEW_MS = 5_000;
+
 function positiveFiniteNumber(value) {
   return typeof value === 'number' && Number.isFinite(value) && value > 0;
 }
@@ -41,7 +50,7 @@ function quoteSideTimestamp(quote, action) {
 function timestampIsFresh(ts, now, maxAgeMs) {
   if (ts == null) return false;
   const age = Number(now) - ts;
-  return Number.isFinite(age) && age >= 0 && age <= maxAgeMs;
+  return Number.isFinite(age) && age >= -QUOTE_TS_SKEW_MS && age <= maxAgeMs;
 }
 
 // A midpoint is trustworthy only when BOTH prices belong to a current,
@@ -81,8 +90,7 @@ export function marketableLimitForAction(quote, action, now = Date.now()) {
 // Ticket order (EXECUTE): BUY- or SELL-to-open, optional bracket exits.
 //
 // Guards (order matters — mirrors handleExecute):
-//   1. Guest orders MUST carry a limit — the bridge rejects a guest MKT.
-//   2. Sell-to-open is limit-only, same rule: with no limit the bridge routes
+//   1. Sell-to-open is limit-only: with no limit the bridge routes
 //      a real MKT, and a market SELL into the thin overnight book is a blank
 //      check in the worst direction.
 // Brackets (takeProfit/stopLoss) are BUY-to-open only (the bridge ignores them
@@ -100,12 +108,11 @@ export function buildOpenOrder({
   const limitPresent = limit !== null && limit !== undefined;
   const validLimit = limitPresent && positiveFiniteNumber(limit);
   if (limitPresent && !validLimit) return { ok: false, reason: 'Limit price must be positive' };
-  if (guestActive && !validLimit) return { ok: false, reason: 'Guest orders need a limit price' };
   const sell = side === 'sell';
   if (sell && !validLimit) return { ok: false, reason: 'Sell orders need a limit price' };
   if (takeProfit != null && !positiveFiniteNumber(takeProfit)) return { ok: false, reason: 'Take-profit price must be positive' };
   if (stopLoss != null && !positiveFiniteNumber(stopLoss)) return { ok: false, reason: 'Stop-loss price must be positive' };
-  // The deliberate SPX BUY-to-open MKT path still refuses to fire from a modal
+  // The deliberate BUY-to-open MKT path still refuses to fire from a modal
   // held on an old/missing quote. The ask is only a safety witness here; the
   // payload intentionally omits a limit so IBKR receives MKT.
   if (!sell && !validLimit && marketableLimitForAction(quote, 'BUY', now) == null) {
@@ -117,7 +124,7 @@ export function buildOpenOrder({
     ...(validLimit ? { limit } : {}),
     ...(!sell && takeProfit != null ? { takeProfit } : {}),
     ...(!sell && stopLoss != null ? { stopLoss } : {}),
-    // Fill-quality reference: the mid at the moment of send —
+    // Fill-quality reference (the owner 2026-07-11): the mid at the moment of send —
     // the bridge stamps it onto the fill row so slippage is measurable later.
     ...(Number.isFinite(refAtSend) && refAtSend > 0 ? { refAtSend } : {}),
   };
@@ -127,9 +134,8 @@ export function buildOpenOrder({
 // Quick mode (⚡ chart right-click): instant 1-lot BUY at the hovered strike.
 //
 // A live ask is required even in MARKET mode — the guard against firing blind
-// into a strike with no streaming quote. The ⚡ red MKT arm is SPX-only; in
-// guest mode it degrades to the amber marketable limit (a guest MKT would be
-// rejected anyway). Amber = ask + one tick (0.05 under $3, 0.10 at/above).
+// into a strike with no streaming quote. Amber = ask + one tick (0.05 under
+// $3, 0.10 at/above); red is a real MKT for SPX or an exact active guest.
 // MARKET mode omits the limit → the bridge routes a real MKT.
 //
 // Returns `market` and `limit` alongside the payload so the caller can build
@@ -153,16 +159,16 @@ export function buildQuickOrder({
     return { ok: false, reason: `No fresh ask for ${strike}${rightOf(type)} — hover until a quote loads` };
   }
   const ask = quote.ask;
-  const market = quickMode === 'market' && !guestActive;
+  const market = quickMode === 'market';
   const limit = market ? null : marketable;
   const payload = {
     intent: 'open', action: 'BUY', strike, right: rightOf(type), qty: 1, expiry: cockpitExpiry,
     ...(guestActive ? { symbol: activeSymbol } : {}),
     ...(market ? {} : { limit }),
-    // ⚡ orders exist for this moment only: `quick` asks the
+    // ⚡ orders exist for THIS moment only (the owner 2026-07-11): `quick` asks the
     // bridge to auto-cancel if still unfilled after its window — no chase, a
-    // self-repricing order is a robot; the UI shows a toast instead. refAtSend is
-    // the visible ask at send time, so the fill row records what hurrying cost.
+    // self-repricing order is a robot; she gets a toast instead. refAtSend is
+    // the ask she saw, so the fill row records what hurrying cost.
     quick: true,
     refAtSend: ask,
   };

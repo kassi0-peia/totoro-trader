@@ -1,5 +1,5 @@
-// Keyboard layer — invisible cockpit controls so new features earn zero
-// resting pixels. One window-level keydown listener dispatches:
+// Keyboard layer — invisible cockpit controls (the owner's clutter rule: new
+// features earn zero pixels). One window-level keydown listener dispatches:
 //
 //   1..N   → timeframe buttons, in tf-bar order
 //   Esc    → close the top-most transient thing (ONE per press; App owns the

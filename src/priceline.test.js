@@ -6,17 +6,19 @@ function recordingContext() {
   const dashCalls = [];
   const capCalls = [];
   const fillTextCalls = [];
+  const strokeCalls = [];
   const ctx = {
     dashCalls,
     capCalls,
     fillTextCalls,
+    strokeCalls,
     save() {},
     restore() {},
     setLineDash(value) { dashCalls.push(value); },
     beginPath() {},
     moveTo() {},
     lineTo() {},
-    stroke() {},
+    stroke() { strokeCalls.push(true); },
     fillRect() {},
     fillText(...args) { fillTextCalls.push(args); },
     rect() {},
@@ -27,6 +29,26 @@ function recordingContext() {
   });
   return ctx;
 }
+
+test('resting armed triggers do not paint permanent canvas lines', () => {
+  const ctx = recordingContext();
+  drawPriceLine(ctx, {
+    layout: { chartW: 800, priceBot: 500 },
+    theme: {
+      accent: '#fff', surface: '#111', muted: '#777', text: '#eee',
+      callLine: '#0f0', putLine: '#f00',
+    },
+    priceToY: () => 200,
+    price: null,
+    expectedMove: null,
+    alerts: null,
+    armed: [{ id: 'arm-1', level: 6000, right: 'P' }],
+    rightAxis: 64,
+    dayLevels: null,
+    beLine: null,
+  });
+  assert.equal(ctx.strokeCalls.length, 0);
+});
 
 test('hover breakeven paints a round-capped dotted guide', () => {
   const ctx = recordingContext();

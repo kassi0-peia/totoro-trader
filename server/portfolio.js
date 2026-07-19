@@ -103,6 +103,15 @@ function normalizeOptionPosition(accountValue, contractValue, qtyValue, avgCostV
   if (String(contract.secType).toUpperCase() !== 'OPT') {
     return { kind: 'ignored' };
   }
+  // IBKR position callbacks deliver the contract WITHOUT an exchange (the
+  // position itself is exchange-agnostic). Every downstream consumer of this
+  // stored contract needs a routable one: quote marks for inactive-guest legs
+  // failed at the broker with "Please enter exchange", and staged KILL's
+  // hasExactContractIdentity refused the leg outright (fail-closed PARTIAL —
+  // it could not flatten a guest position at all). The conId pins the exact
+  // contract; SMART is only the routing instruction and matches the app's own
+  // option contract builders. Never overwrite a real exchange.
+  if (!String(contract.exchange ?? '').trim()) contract.exchange = 'SMART';
   const contractKey = exactOptionContractKey(contract);
   const routeKey = optionRouteKey(contract);
   const qty = typeof qtyValue === 'number' ? qtyValue : NaN;
@@ -183,6 +192,8 @@ export function createPortfolioController({
 
   let account = null;
   let accountType = null;
+  let accountCount = 0;         // distinct managed accounts IBKR reported
+  let accountAmbiguous = false; // >1 account arrived; we route only the first
   let positionsReady = false;
   let positionsError = null;
   let positionsSubscribed = false;
@@ -270,6 +281,8 @@ export function createPortfolioController({
     return {
       account,
       accountType,
+      accountCount,
+      accountAmbiguous,
       // The account string alone is not authority.  New orders stay disabled
       // until the initial reqPositions/positionEnd barrier has completed.
       executionEnabled: isReady(),
@@ -356,6 +369,15 @@ export function createPortfolioController({
       : String(accountsValue ?? '').split(',');
     const first = normalizedAccount(values[0]) || null;
     if (!first) return false; // preserve the current account if an empty event arrives
+    // Selection is UNCHANGED (values[0]) — the owner's setups are single-account and
+    // fail-closing here could lock her out. Just surface the ambiguity loudly so
+    // the UI can warn; we still route the first account only.
+    const distinct = [...new Set(values.map(normalizedAccount).filter(Boolean))];
+    accountCount = distinct.length;
+    accountAmbiguous = distinct.length > 1;
+    if (accountAmbiguous) {
+      console.error(`[portfolio] MULTIPLE managed accounts reported (${distinct.length}: ${distinct.join(', ')}) — routing ONLY ${first}; the others are ignored`);
+    }
     const accountChanged = account !== first;
     if (account && accountChanged) {
       rejectAllRefreshes('ACCOUNT_CHANGED', `selected account changed from ${account} to ${first}`);
@@ -571,6 +593,8 @@ export function createPortfolioController({
     fundsByAccount.clear();
     account = null;
     accountType = null;
+    accountCount = 0;
+    accountAmbiguous = false;
     advancePositionAuthority(removed, { publishRevision: true });
     emit();
   }

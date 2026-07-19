@@ -8,7 +8,7 @@
 // Stocks are NOT SPX: no 16:15 roll, the expiry advances at the plain 16:00 ET
 // close on expiry day, and the strike grid is whatever the secdef reports (SPCX
 // is 2.5 or 5 — don't assume 5). The guest chain is deliberately narrower than
-// the SPXW chain to respect the configured market-data line budget.
+// the SPXW chain to respect the owner's market-data line budget.
 
 import { etParts } from './session.js';
 

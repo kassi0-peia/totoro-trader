@@ -10,7 +10,6 @@ import {
   posKey,
   randomPastWeekday,
   rightOf,
-  shouldPeekBottomForFill,
   timeToExpiryYearsAt,
   readGuestIntent,
   resolveExactGuestMatch,
@@ -69,6 +68,13 @@ test('inactive exact-contract snapshots preserve fresh model Greeks and never fa
   assert.deepEqual(inactivePositionSnapshotGreeks({ premium: 9, delta: 1, snapshotTs: 1 }, now, 100), {
     premium: null, delta: null, gamma: null, theta: null, vega: null, iv: null, source: 'nodata',
   });
+
+  // A snapshot stamped slightly after the witness clock (the ~800ms render
+  // tick) is current, not stale; a far-future stamp is a broken clock.
+  const justArrived = inactivePositionSnapshotGreeks({ premium: 1.5, snapshotTs: now + 800 }, now);
+  assert.equal(justArrived.source, 'snapshot');
+  assert.equal(justArrived.premium, 1.5);
+  assert.equal(inactivePositionSnapshotGreeks({ premium: 1.5, snapshotTs: now + 5001 }, now).source, 'nodata');
 });
 
 test('randomPastWeekday chooses a local weekday 3–60 days back', () => {
@@ -150,19 +156,6 @@ test('symbol-only shortcuts resolve only one exact conId and fail closed on ambi
     { symbol: 'SPY', conId: 2 },
   ]).status, 'ambiguous');
   assert.equal(resolveExactGuestMatch('SPY', [{ symbol: 'SPY', conId: 0 }]).status, 'none');
-});
-
-test('opening fills stay quiet while closing and unknown fills may reveal the bottom drawer', () => {
-  const positions = [
-    { openRef: 'open-1', closeRef: null },
-    { openRef: 'open-2', closeRef: 'close-2', closeRefs: ['close-2', 'stop-2'] },
-  ];
-  assert.equal(shouldPeekBottomForFill({ clientRef: 'open-1' }, positions), false);
-  assert.equal(shouldPeekBottomForFill({ clientRef: 'close-2' }, positions), true);
-  assert.equal(shouldPeekBottomForFill({ clientRef: 'stop-2' }, positions), true);
-  assert.equal(shouldPeekBottomForFill({ clientRef: 'open-1:tp' }, positions), true);
-  assert.equal(shouldPeekBottomForFill({ clientRef: 'recovered-fill' }, positions), true);
-  assert.equal(shouldPeekBottomForFill({}, positions), true);
 });
 
 test('fill marker underlying price is symbol-specific and freshness-gated', () => {

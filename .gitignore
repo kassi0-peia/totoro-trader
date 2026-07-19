@@ -12,6 +12,8 @@ server/.journal.json
 server/.journal-shots/
 server/.kill-lock.json
 server/.reverse-lock.json
+server/.armed-state.json
+server/.armed-exit-state.json
 
 # machine-local agent settings
 .claude/settings.local.json
@@ -30,6 +32,8 @@ Screenshot from *.png
 
 # local session recaps
 RECAP-*.md
+*-HANDOFF-*.md
+totoro-handoff.md
 
 # Local agent and planning docs
 AGENTS.md
@@ -61,3 +65,19 @@ totoro-review-tasks.md
 # personal launch helper (hardcodes ~/ibc paths)
 start-all.sh
 .claude/
+
+# local diagnostic artifacts
+server/.basis-cache.json.bak-*
+server/mark-audit-*.csv
+
+# personal workshop artifacts (local only)
+AGENTS.md
+BACKLOG.md
+spec-*.md
+server/mark-audit.js
+deploy/claude-click.sh
+deploy/launch-totoro.sh
+deploy/set-window-icon.py
+deploy/totoro-click.sh
+scripts/check-basis.mjs
+scripts/fetch-fri-close.mjs

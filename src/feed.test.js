@@ -13,9 +13,11 @@ import {
   canSendReplayRequest,
   createClientRefGenerator,
   getOrCreateTabClientId,
+  persistArmedCommandBeforeSend,
   sendWsJson,
 } from './feed.js';
 import { replayAccess } from './app/replayAccess.js';
+import { marketableLimitForAction } from './order-payload.js';
 
 test('feed.js preserves the reducer export while transport and model stay separate', () => {
   assert.equal(reexportedApplyMessage, applyMessage);
@@ -69,6 +71,7 @@ test('createInitialSnapshot returns the complete fail-closed shape with isolated
   assert.equal(a.source, 'SPX');
   assert.equal(a.rth, false);
   assert.equal(a.portfolioReady, false);
+  assert.equal(a.armedState, null);
   assert.equal(a.positionsRevision, 0);
   assert.equal(a.positionAuthoritySourceRevision, null);
   assert.deepEqual(a.killState, { phase: 'IDLE', active: false, transactionId: null });
@@ -127,6 +130,17 @@ test('snapshot rebuilds bridge-owned payloads and keeps the expected public shap
   const orders = [{ orderId: 201, clientRef: 'c1', status: 'Submitted' }];
   const trades = [{ id: 301, execId: 'exec-1', price: 4.2 }];
   const funds = { availableFunds: 1000, buyingPower: 2000, netLiquidation: 3000 };
+  const armedState = {
+    protocol: 1,
+    phase: 'READY',
+    lineageId: 'lineage-1',
+    sessionId: 'session-1',
+    revision: 0,
+    digest: '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
+    account: 'DU123',
+    expiry: '20260714',
+    orders: [],
+  };
 
   const s1 = applyMessage(s0, {
     type: 'snapshot', connected: true, delayed: true,
@@ -138,6 +152,7 @@ test('snapshot rebuilds bridge-owned payloads and keeps the expected public shap
     caps: { trail: true }, trades, positions, orders, funds, spxClose: 7488,
     killState: { phase: 'VERIFYING_CANCELS', active: true, transactionId: 'k1' },
     reverseState: { phase: 'QUOTING_CLOSE', active: true, transactionId: 'r1', routingLocked: true },
+    armedState,
     positionAuthorityRevision: 17,
   });
 
@@ -159,9 +174,33 @@ test('snapshot rebuilds bridge-owned payloads and keeps the expected public shap
   assert.equal(s1.funds, funds);
   assert.deepEqual(s1.killState, { phase: 'VERIFYING_CANCELS', active: true, transactionId: 'k1' });
   assert.deepEqual(s1.reverseState, { phase: 'QUOTING_CLOSE', active: true, transactionId: 'r1', routingLocked: true });
+  assert.deepEqual(s1.armedState, armedState);
   // Client-owned/cache payloads are not part of a bridge snapshot replacement.
   assert.equal(s1.histSeries, s0.histSeries);
   assert.equal(s1.replayDays, s0.replayDays);
+});
+
+test('armed state is a current-socket raw witness and a null snapshot cannot retain an older one', () => {
+  const first = applyMessage(createInitialSnapshot(), {
+    type: 'armedState',
+    protocol: 1,
+    phase: 'BLOCKED',
+    lineageId: null,
+    sessionId: 'session-old',
+    revision: null,
+    digest: null,
+    account: null,
+    expiry: null,
+    orders: [],
+    error: 'corrupt',
+  });
+  assert.equal(first.armedState.type, undefined);
+  assert.equal(first.armedState.sessionId, 'session-old');
+
+  const newSocketSnapshot = applyMessage(first, {
+    type: 'snapshot', connected: true, armedState: null,
+  });
+  assert.equal(newSocketSnapshot.armedState, null);
 });
 
 test('canonical execId trade upgrades a same-ID legacy aggregate in place', () => {
@@ -202,6 +241,82 @@ test('status connected:false immediately fails closed and clears stale account a
   // Positions stay IBKR-authoritative until the bridge's following positions
   // reset arrives; status itself does not invent or discard portfolio data.
   assert.equal(s1.positions, positions);
+});
+
+test('IBKR disconnect invalidates cached HOME and guest quote timestamps until fresh ticks arrive', () => {
+  const now = 10_000;
+  const homeRow = {
+    strike: 7500, type: 'call', premium: 6.4,
+    bid: 6.3, ask: 6.5, bidTs: now - 100, askTs: now - 90, tickTs: now - 80,
+  };
+  const guestRow = {
+    strike: 600, type: 'put', premium: 2.2,
+    bid: 2.1, ask: 2.3, bidTs: now - 70, askTs: now - 60, tickTs: now - 50,
+  };
+  const connected = {
+    ...createInitialSnapshot(),
+    live: true,
+    greeksMap: new Map([['7500C', homeRow]]),
+    guest: { symbol: 'SPY', conId: 999 },
+    guestGreeksMap: new Map([['600P', guestRow]]),
+  };
+
+  const disconnected = applyMessage(connected, { type: 'status', connected: false });
+  const staleHome = disconnected.greeksMap.get('7500C');
+  const staleGuest = disconnected.guestGreeksMap.get('600P');
+  assert.equal(staleHome.bid, 6.3);
+  assert.equal(staleHome.ask, 6.5);
+  assert.equal(staleHome.bidTs, null);
+  assert.equal(staleHome.askTs, null);
+  assert.equal(staleHome.tickTs, null);
+  assert.equal(staleGuest.bid, 2.1);
+  assert.equal(staleGuest.ask, 2.3);
+  assert.equal(staleGuest.bidTs, null);
+  assert.equal(staleGuest.askTs, null);
+  assert.equal(staleGuest.tickTs, null);
+  assert.equal(marketableLimitForAction(staleHome, 'SELL', now), null);
+
+  const reconnected = applyMessage(disconnected, { type: 'status', connected: true });
+  const fresh = applyMessage(reconnected, {
+    type: 'greeks',
+    strike: 7500,
+    optionType: 'call',
+    premium: 6.4,
+    bid: 6.3,
+    ask: 6.5,
+    bidTs: now + 10,
+    askTs: now + 11,
+    tickTs: now + 12,
+  });
+  assert.equal(marketableLimitForAction(fresh.greeksMap.get('7500C'), 'SELL', now + 20), 6.2);
+});
+
+test('disconnected snapshot keeps quote prices but invalidates HOME and guest timestamps', () => {
+  const s0 = {
+    ...createInitialSnapshot(),
+    guestGreeksMap: new Map([['600C', {
+      strike: 600, type: 'call', bid: 4.9, ask: 5.1, bidTs: 90, askTs: 91, tickTs: 92,
+    }]]),
+  };
+  const s1 = applyMessage(s0, {
+    type: 'snapshot',
+    connected: false,
+    greeks: [{
+      strike: 7500, type: 'put', bid: 5.3, ask: 5.5, bidTs: 100, askTs: 101, tickTs: 102,
+    }],
+  });
+
+  assert.deepEqual(
+    { bid: s1.greeksMap.get('7500P').bid, ask: s1.greeksMap.get('7500P').ask },
+    { bid: 5.3, ask: 5.5 },
+  );
+  assert.equal(s1.greeksMap.get('7500P').bidTs, null);
+  assert.equal(s1.greeksMap.get('7500P').askTs, null);
+  assert.equal(s1.greeksMap.get('7500P').tickTs, null);
+  assert.equal(s1.guestGreeksMap.get('600C').bid, 4.9);
+  assert.equal(s1.guestGreeksMap.get('600C').bidTs, null);
+  assert.equal(s1.guestGreeksMap.get('600C').askTs, null);
+  assert.equal(s1.guestGreeksMap.get('600C').tickTs, null);
 });
 
 test('status connected:true changes connectivity without inventing account authority', () => {
@@ -418,6 +533,61 @@ test('guestGreeks carries tickTs so the guest mark ladder has a freshness gate',
   const ts = 1_700_000_000_000;
   const s1 = applyMessage(s0, { type: 'guestGreeks', strike: 455, optionType: 'call', premium: 5.0, bid: 4.9, ask: 5.1, tickTs: ts });
   assert.equal(s1.guestGreeksMap.get('455C').tickTs, ts);
+});
+
+test('active guest quote snapshots merge only into the exact resource generation', () => {
+  const envelope = {
+    symbol: 'SPY',
+    conId: 756733,
+    resourceKey: 'SPY|756733',
+    resourceGeneration: 9,
+  };
+  const active = applyMessage({
+    ...createInitialSnapshot(),
+    caps: { guestRegistry: true },
+  }, {
+    type: 'guest',
+    ...envelope,
+    guest: {
+      symbol: 'SPY',
+      conId: 756733,
+      price: 600,
+      candles: [],
+      greeks: [],
+      expiry: '20260717',
+      strikes: [600, 605],
+      strikeStep: 5,
+      expirations: ['20260717'],
+      settlement: 'physical',
+      live: true,
+    },
+  });
+  const quote = {
+    type: 'quoteResult',
+    symbol: 'SPY',
+    strike: 605,
+    right: 'C',
+    expiry: '20260717',
+    bid: 1.9,
+    ask: 2.1,
+    bidTs: 100,
+    askTs: 101,
+    tickTs: 102,
+    guestResourceKey: envelope.resourceKey,
+    guestResourceGeneration: envelope.resourceGeneration,
+    guestUnderlyingConId: envelope.conId,
+  };
+  const merged = applyMessage(active, quote);
+  assert.equal(merged.guestGreeksMap.get('605C').ask, 2.1);
+  assert.deepEqual(merged.posQuotes, {});
+
+  const stale = applyMessage(merged, {
+    ...quote,
+    strike: 610,
+    guestResourceGeneration: 8,
+  });
+  assert.equal(stale, merged);
+  assert.equal(stale.guestGreeksMap.has('610C'), false);
 });
 
 test('guestTick appends/replaces the live guest candle', () => {
@@ -687,9 +857,47 @@ test('WebSocket command helper reports only bytes successfully handed to an open
   const sent = [];
   const open = { readyState: 1, send: (value) => sent.push(value) };
   assert.equal(sendWsJson(open, { type: 'order', qty: 1 }), true);
-  assert.deepEqual(sent, ['{"type":"order","qty":1}']);
+  assert.equal(sendWsJson(open, {
+    type: 'armedCommand', protocol: 1, requestId: 'req-1', sessionId: 'session-1',
+    lineageId: 'lineage-1', baseRevision: 4, baseDigest: 'a'.repeat(64),
+    account: 'DU123', expiry: '20260715',
+    operation: { type: 'ADD_QTY', id: 'arm-1', delta: 5 },
+  }), true);
+  assert.deepEqual(sent, [
+    '{"type":"order","qty":1}',
+    `{"type":"armedCommand","protocol":1,"requestId":"req-1","sessionId":"session-1","lineageId":"lineage-1","baseRevision":4,"baseDigest":"${'a'.repeat(64)}","account":"DU123","expiry":"20260715","operation":{"type":"ADD_QTY","id":"arm-1","delta":5}}`,
+  ]);
   assert.equal(sendWsJson({ readyState: 0, send: () => assert.fail('must not send') }, { type: 'order' }), false);
   assert.equal(sendWsJson({ readyState: 1, send: () => { throw new Error('closing race'); } }, { type: 'order' }), false);
   assert.equal(sendWsJson(open, { type: 'order', value: 1n }), false, 'serialization failures are unsent');
   assert.equal(sendWsJson(null, { type: 'order' }), false);
+});
+
+test('armed pending state is synchronously persisted and published before any socket send', () => {
+  const calls = [];
+  const storage = { setItem: (key, value) => calls.push(['persist', key, value]) };
+  const result = persistArmedCommandBeforeSend({
+    storage,
+    key: 'tt.armedAuthority.v1',
+    serialized: '{"pending":true}',
+    onPersisted: () => calls.push(['publish']),
+    send: () => { calls.push(['send']); return true; },
+  });
+  assert.deepEqual(result, { persisted: true, sent: true });
+  assert.deepEqual(calls, [
+    ['persist', 'tt.armedAuthority.v1', '{"pending":true}'],
+    ['publish'],
+    ['send'],
+  ]);
+
+  let sent = false;
+  const failed = persistArmedCommandBeforeSend({
+    storage: { setItem: () => { throw new Error('quota'); } },
+    key: 'tt.armedAuthority.v1',
+    serialized: '{}',
+    onPersisted: () => assert.fail('must not publish'),
+    send: () => { sent = true; return true; },
+  });
+  assert.deepEqual(failed, { persisted: false, sent: false });
+  assert.equal(sent, false);
 });

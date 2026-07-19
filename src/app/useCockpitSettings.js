@@ -18,18 +18,18 @@ export default function useCockpitSettings() {
     } catch {}
     return 'forest';
   });
-  const [neutralChrome, setNeutralChrome] = useState(() => storedBool('tt.neutralChrome', false));
   const [axisChain, setAxisChain] = useState(() => storedBool('tt.axischain', false));
   const [rungButton, setRungButton] = useState(() => storedBool('tt.rung', false));
   const [showOvn, setShowOvn] = useState(() => storedBool('tt.showOvn', true));
   const [showPositions, setShowPositions] = useState(() => storedBool('tt.showPositions', true));
   const [showMarkers, setShowMarkers] = useState(() => storedBool('tt.showMarkers', true));
   const [dayLevelsOn, setDayLevelsOn] = useState(() => storedBool('tt.dayLevels', false));
+  const [showGridlines, setShowGridlines] = useState(() => storedBool('tt.showGridlines', true));
 
   const theme = THEMES[themeKey];
   const chartTheme = useMemo(
-    () => (neutralChrome ? { ...theme, bg: '#0a0a0c', grid: '#17171a' } : theme),
-    [theme, neutralChrome],
+    () => ({ ...theme, bg: '#0a0a0c', grid: '#17171a' }),
+    [theme],
   );
 
   useEffect(() => {
@@ -37,20 +37,18 @@ export default function useCockpitSettings() {
     Object.entries(theme).forEach(([key, value]) => {
       if (typeof value === 'string') root.style.setProperty(`--c-${key}`, value);
     });
-    if (neutralChrome) {
-      root.style.setProperty('--c-bg', '#0a0a0b');
-      root.style.setProperty('--c-surface', '#101012');
-      root.style.setProperty('--c-surfaceAlt', '#161618');
-      root.style.setProperty('--c-border', '#242427');
-    }
-  }, [theme, neutralChrome]);
+    root.style.setProperty('--c-bg', '#0a0a0b');
+    root.style.setProperty('--c-surface', '#101012');
+    root.style.setProperty('--c-surfaceAlt', '#161618');
+    root.style.setProperty('--c-border', '#242427');
+  }, [theme]);
 
   useEffect(() => {
     try {
       localStorage.setItem('tt.theme', themeKey);
-      localStorage.setItem('tt.neutralChrome', neutralChrome ? '1' : '0');
+      localStorage.removeItem('tt.neutralChrome');
     } catch {}
-  }, [themeKey, neutralChrome]);
+  }, [themeKey]);
 
   useEffect(() => {
     try {
@@ -60,14 +58,13 @@ export default function useCockpitSettings() {
       localStorage.setItem('tt.showPositions', showPositions ? '1' : '0');
       localStorage.setItem('tt.showMarkers', showMarkers ? '1' : '0');
       localStorage.setItem('tt.dayLevels', dayLevelsOn ? '1' : '0');
+      localStorage.setItem('tt.showGridlines', showGridlines ? '1' : '0');
     } catch {}
-  }, [axisChain, rungButton, showOvn, showPositions, showMarkers, dayLevelsOn]);
+  }, [axisChain, rungButton, showOvn, showPositions, showMarkers, dayLevelsOn, showGridlines]);
 
   return {
     themeKey,
     setThemeKey,
-    neutralChrome,
-    setNeutralChrome,
     theme,
     chartTheme,
     axisChain,
@@ -82,5 +79,7 @@ export default function useCockpitSettings() {
     setShowMarkers,
     dayLevelsOn,
     setDayLevelsOn,
+    showGridlines,
+    setShowGridlines,
   };
 }

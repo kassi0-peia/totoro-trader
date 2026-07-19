@@ -4,8 +4,8 @@ import { fmtPrice } from '../format.js';
 // Pure paint; leaves ctx clean (both dashed blocks balance save/restore; the
 // chip's font/align/baseline are the last state set and are re-established by
 // later painters — kept verbatim from the original inline block).
-export function drawPriceLine(ctx, { layout, theme, priceToY, price, expectedMove, alerts, armed, rightAxis, dayLevels, beLine }) {
-  // Day levels (opt-in): PDH/PDL/PDC + today's open
+export function drawPriceLine(ctx, { layout, theme, priceToY, price, expectedMove, alerts, rightAxis, dayLevels, beLine }) {
+  // Day levels (the owner 2026-07-13, opt-in toggle): PDH/PDL/PDC + today's open
   // as the faintest lines here — context, not signals — drawn FIRST so every
   // other mark sits above them. Labels at the left edge, EM-style.
   if (dayLevels && dayLevels.length) {
@@ -81,7 +81,7 @@ export function drawPriceLine(ctx, { layout, theme, priceToY, price, expectedMov
     ctx.restore();
   }
 
-  // ⏰ armed price alerts: a fine dashed line + an outlined
+  // ⏰ armed price alerts (the owner 2026-07-09): a fine dashed line + an outlined
   // axis tag per alert — visible only while armed (the line IS the chrome).
   // One-shot: App removes the alert the moment the live tape crosses it.
   if (alerts && alerts.length) {
@@ -116,42 +116,8 @@ export function drawPriceLine(ctx, { layout, theme, priceToY, price, expectedMov
     }
   }
 
-  // ⚔ armed orders: a SOLID line — this level is
-  // loaded, not just watched — with an axis tag naming the contract it fires.
-  // One-shot; the client prunes it the moment the bridge fires or fails it.
-  if (armed && armed.length) {
-    for (const a of armed) {
-      const ya = priceToY(a.level);
-      if (!(ya > 4 && ya < layout.priceBot - 2)) continue;
-      ctx.save();
-      ctx.strokeStyle = theme.accent;
-      ctx.globalAlpha = 0.55;
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(0, ya + 0.5);
-      ctx.lineTo(layout.chartW, ya + 0.5);
-      ctx.stroke();
-      ctx.restore();
-      ctx.save();
-      ctx.globalAlpha = 0.95;
-      ctx.fillStyle = theme.surface;
-      ctx.strokeStyle = theme.accent;
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.rect(layout.chartW + 0.5, ya - 8.5, rightAxis - 1, 17);
-      ctx.fill();
-      ctx.stroke();
-      ctx.fillStyle = theme.text;
-      ctx.font = '9px "JetBrains Mono", monospace';
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(`⚔ ${a.strike}${a.right}`, layout.chartW + 4, ya);
-      ctx.restore();
-    }
-  }
-
-  // Breakeven, hover-only: while a position is hovered, its at-expiry
-  // breakeven — strike ±
+  // Breakeven, hover-only (the owner 2026-07-13: "breakeven only showing on
+  // hover"): while a position is hovered, its at-expiry breakeven — strike ±
   // the real entry premium — as a dotted line in the leg's own color, with an
   // axis tag. Drawn last: a hover is a question being asked right now, it
   // outranks everything resting. Unhover → gone; zero resting chrome.

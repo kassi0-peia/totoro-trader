@@ -65,6 +65,7 @@
   transition: left 280ms cubic-bezier(0.4, 0, 0.2, 1), opacity 140ms;
 }
 .trades-pull:hover { opacity: 1; }
+.trades-pull.open { z-index: 26; }
 
 /* Invisible left-edge strip — hover 2s (or click) to peek the drawer open. */
 .trades-hotzone {
@@ -81,7 +82,10 @@
 .trades-peek-layer {
   position: absolute;
   inset: 0;
-  z-index: 15;
+  /* An open side drawer is the top surface; its scrim must swallow the bottom
+     grab just as the open bottom drawer's z23 scrim swallows this drawer's
+     closed pull/hotzone. One outside click therefore dismisses only. */
+  z-index: 25;
   overflow: hidden;
 }
 .trades-scrim {
@@ -127,23 +131,20 @@
 .trades-drawer .th-list { max-height: none; flex: 1; }
 
 /* Account badge + id overlaid on the chart's top-right corner */
-/* In-flow: lives in the symbol-search-row beside the 🔍
+/* In-flow since 2026-07-09 (owner, 2026-07-09): lives in the symbol-search-row beside the 🔍
    instead of floating over the chart's top-right corner. */
 .chart-acct {
+  order: 2;
   display: flex;
   align-items: center;
   gap: 8px;
-  /* End the cluster left of the chart's ~64px price-label gutter; the old
-     float cleared it with right:72px, while the 🔍 stays at the edge. */
-  margin-right: 28px;
-  transition: margin-right 160ms;
+  /* The watchlist + symbol tabs now lead this right-aligned row; account,
+     bus-stop, and lightning controls own the far-right edge. */
+  margin-right: 0;
   font-size: 10px;
   letter-spacing: 0.08em;
 }
-/* Axis premiums add a second number column to the right gutter — slide the
-   cluster further left so PAPER/🚏/⚡ never sit over it (the old float's
-   right:110px, in row terms). */
-.chart-acct--axis { margin-right: 64px; }
+.chart-acct--axis { margin-right: 0; }
 .chart-acct-id {
   color: var(--c-muted);
   font-variant-numeric: tabular-nums;
@@ -335,6 +336,15 @@
 /* ============ MOBILE ============ */
 
 @media (max-width: 720px) {
+  /* The header's feed dot already carries connection safety on a phone. The
+     desktop account/search row and fixed footer repeat that information and
+     consume scarce vertical space, so mobile keeps only the real cockpit. */
+  .symbol-search-row,
+  .footer { display: none; }
+  /* Fixed-viewport cockpit, same as desktop: no page scroll. The mobile
+     status strip (last child of .app) carries the safe-area inset. */
+  .app { height: 100vh; height: 100dvh; overflow: hidden; padding-bottom: 0; }
+
   .header {
     padding: 10px 12px;
   }
@@ -342,7 +352,8 @@
   .title-block { display: none; }          /* drop "TotoroTrader" + "0DTE EXECUTION" subtitle */
   .expiry-word { display: none; }          /* drop "EXPIRY ·", keep the date */
   .acct-feed { display: flex; }            /* the feed dot survives; color = state */
-  .acct-feed .feed-word { display: none; } /* the LIVE/OFFLINE word consumes scarce phone space;
+  .acct-feed .feed-word { display: none; } /* owner 2026-07-13: the LIVE/OFFLINE word
+                                              eats header space a phone doesn't have —
                                               the dot carries the state, the tooltip
                                               carries the account */
   .acct-id { display: none; }              /* id is in the tooltip */
@@ -360,17 +371,23 @@
   .expiry-label { font-size: 8px; }
   .symbol { font-size: 9px; }
 
-  /* Near-fullscreen chart: fill the viewport below the header + quote strip,
-     leaving the timeframe bar just in view; positions/history scroll below. */
-  .chart-wrap {
-    height: calc((100vh - 150px) * 0.9);
-    height: calc((100dvh - 150px) * 0.9);
-    min-height: 300px;
-  }
+  /* The chart IS the mobile home (owner, 2026-07-05): it absorbs
+     everything between the quote strip and the status strip. Positions live
+     in the bottom sheet, not below the fold. */
+  .chart-area { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .chart-wrap { height: auto; flex: 1; min-height: 0; }
+
+  /* The strip's 📒 replaces the left-edge pull — a 22px hover hotzone is
+     hostile chrome on a phone (stray taps opened the drawer). */
+  .trades-pull, .trades-hotzone { display: none; }
+
+  /* Legend stays one line: drop volume, tighten the rest. */
+  .ohlc-legend { font-size: 10px; gap: 2px 8px; flex-wrap: nowrap; }
+  .ohlc-legend .ohlc-vol { display: none; }
 
   .acct-quick-btn { display: none; }   /* quick mode is right-click → desktop only */
-  .acct-bus-btn { display: none; }     /* bus stop is desktop-only */
-  /* Mobile decluttering: pinch already zooms so
+  .acct-bus-btn { display: none; }     /* bus stop is desktop-only (spec-bus-stop.md) */
+  /* Mobile de-busying (owner, 2026-07-10): pinch already zooms so
      the ± buttons go; screen recording and axis premiums are desktop tools;
      the TIMEFRAME word is self-evident from its buttons; the header dot
      already tells the connection story, so of the action row only the panic
@@ -379,16 +396,11 @@
   .cw-btn, .rec-btn, .axis-prem-btn { display: none; }
   .tf-label { display: none; }
   .tf-panic:not(.tf-replay) { display: none; }
-  .symbol-search-row { padding: 0 10px; }
-  /* The control line slims to just the acct badge on mobile: multi-symbol
-     search is desktop-first (Phase A), quick/bus hidden above. */
-  .symbol-search-row .symbol-search { display: none; }
-
   /* Move Close-all / IBKR to a full-width row under the timeframe buttons. */
   .tf-bar { flex-wrap: wrap; }
   .tf-actions { margin-left: 0; flex-basis: 100%; gap: 10px; }
   .tf-panic, .tf-closeall { flex: 1; }
-  .pl-summary { gap: 10px; padding: 8px 12px 4px; }
+  .pl-summary { gap: 8px 14px; padding: 8px 12px 4px; flex-wrap: wrap; }
   .pl-summary .pl-block b { font-size: 12px; }
 
   .pos-row {
@@ -414,10 +426,58 @@
   .chart-tooltip { display: none; }
 }
 
+/* ── Mobile status strip: the phone's one fixed bottom line (live P/L, open
+   count, account). Tapping it raises the positions sheet; 📒 slides the
+   trades drawer. Desktop never sees it. ── */
+.mobile-strip { display: none; }
+@media (max-width: 720px) {
+  .mobile-strip {
+    display: flex;
+    align-items: stretch;
+    gap: 8px;
+    flex: none;
+    padding: 6px 10px calc(6px + env(safe-area-inset-bottom));
+    background: var(--c-surface);
+    border-top: 1px solid var(--c-border);
+  }
+  .ms-status {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 40px;              /* phone-thumb sized */
+    padding: 0 6px;
+    background: none;
+    border: none;
+    color: var(--c-text);
+    font: inherit;
+    text-align: left;
+  }
+  .ms-caret { color: var(--c-muted); font-size: 10px; }
+  .ms-pl { font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .ms-count { color: var(--c-muted); font-size: 11px; letter-spacing: 0.06em; }
+  .ms-acct {
+    margin-left: auto;
+    font-size: 9px;
+    font-weight: 800;
+    letter-spacing: 0.12em;
+    padding: 2px 7px;
+    border-radius: 4px;
+    align-self: center;
+  }
+  .ms-trades {
+    flex: none;
+    width: 44px;
+    border: 1px solid var(--c-border);
+    border-radius: 8px;
+    background: none;
+    font-size: 16px;
+  }
+}
+
 /* ============ TRADES DRAWER — HISTORY VIEW (multi-day journal) ============ */
 
-/* One history glyph flips today ↔ journal; the header text already names the
-   view. `.solo` = no
+/* One history glyph flips today ↔ journal (owner, 2026-07-10). `.solo` = no
    net-cash chip to its left, so it pushes itself to the right edge. */
 .th-hist {
   display: inline-flex;

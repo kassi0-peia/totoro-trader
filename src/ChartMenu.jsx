@@ -1,7 +1,7 @@
 import React, { useEffect } from 'react';
 import { armedContractChoices } from './app/armedPlacement.js';
 
-// Right-click strike menu: the ⚡-off half of the chart's
+// Right-click strike menu (the owner 2026-07-09): the ⚡-off half of the chart's
 // right-click gesture. Buy/sell arm the SAME confirm ticket a strike click
 // opens — the menu never sends an order itself. Sells are hidden in replay
 // (replay practices longs) and offline; the alert items manage the one-shot
@@ -25,7 +25,7 @@ export default function ChartMenu({
   // The first arm step chooses one exact contract at this snapped strike. The
   // chart exclusively owns the second step: placing its independent SPX trigger.
   const showArm = canArm && !!onArm;
-  const armChoices = showArm ? armedContractChoices(strike) : [];
+  const armChoices = showArm ? armedContractChoices(strike, menu.marketPrice) : [];
   const rows = (canTrade ? 2 : 0) + (showSell ? 2 : 0) + (showAlert ? 1 : 0) +
     (menu.alertId != null ? 1 : 0) + armChoices.length + (menu.armedId != null ? 1 : 0);
   if (rows === 0) return null;

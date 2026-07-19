@@ -21,15 +21,24 @@
 
 /* ── Bottom drawer: chart runs edge-to-edge; tf-bar +
    positions live in a panel that slides up OVER the chart's bottom. The grab
-   band is invisible chrome — hover peeks, click pins, closing fills auto-peek. ── */
+   band is invisible chrome — hover peeks and click pins. ── */
 .bottom-zone {
   position: absolute;
   left: 0;
   right: 0;
   bottom: 0;
-  z-index: 20;
+  z-index: 24;
   display: flex;
   flex-direction: column;
+}
+.bottom-dismiss-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 23;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: default;
 }
 .bottom-grab {
   display: block;
@@ -39,6 +48,9 @@
   border: none;
   background: none;
   cursor: pointer;
+}
+.bottom-zone.interaction-blocked {
+  pointer-events: none;
 }
 .bottom-grab[data-tip]::after { left: 50%; }
 .bottom-panel {
@@ -64,19 +76,18 @@
   border-top: 1px solid var(--c-border);
 }
 @media (max-width: 720px) {
-  /* Touch has no hover, and positions must never hide behind a gesture on
-     the phone — the drawer is statically open, exactly the old layout. */
-  .bottom-zone { position: static; }
+  /* Touch has no hover — the grab band goes; the mobile status strip under
+     the chart is the toggle. Open = a bottom SHEET over the chart's lower
+     half, tape still visible above it (never navigate away mid-trade). The
+     strip always shows P/L + open count, so positions are one thumb-tap
+     away, never fewer taps than the old scroll-below-the-fold layout. The
+     transparent dismiss layer still swallows the click-off. */
   .bottom-grab { display: none; }
-  .bottom-panel {
-    height: auto;
-    max-height: none;
-    overflow: visible;
-    opacity: 1;
-    visibility: visible;
-    pointer-events: auto;
+  .bottom-zone.open .bottom-panel {
+    max-height: 58vh;
+    border-radius: 12px 12px 0 0;
+    box-shadow: 0 -12px 30px rgba(0, 0, 0, 0.45);
   }
-
 }
 
 .tf-bar {
@@ -160,6 +171,15 @@
   .chart-area { flex: 1; min-height: 0; display: flex; flex-direction: column; }
   .chart-wrap { height: auto; flex: 1; min-height: 0; }
   .footer { cursor: pointer; } /* the footer is the drawer's big trigger */
+  /* Desktop timeframes live in the footer. Keep only the position/action
+     controls in the revealed drawer; mobile restores the full bar below. */
+  .bottom-panel .tf-label,
+  .bottom-panel .tf-group { display: none; }
+  .bottom-panel .tf-actions {
+    width: 100%;
+    margin-left: 0;
+    justify-content: flex-end;
+  }
 }
 
 .snap-now-btn,
@@ -169,8 +189,7 @@
 .rec-btn,
 .quick-btn,
 .cw-btn,
-.rung-btn,
-.daylevels-btn {
+.rung-btn {
   position: absolute;
   bottom: 30px;
   width: 34px;
@@ -198,15 +217,12 @@
 .cw-btn:hover { color: var(--c-accent); border-color: var(--c-accent); }
 .rung-btn { right: 264px; }                 /* one-click ladder rung (toggle in gear panel) */
 .rung-btn:hover { color: var(--c-accent); border-color: var(--c-accent); }
-.daylevels-btn { right: 306px; }            /* day-levels overlay (SPX-only, opt-in) */
 .snap-now-btn:hover,
 .fs-btn:hover,
 .axis-prem-btn:hover,
 .axis-prem-btn.active,
 .vol-btn:hover,
 .vol-btn.active,
-.daylevels-btn:hover,
-.daylevels-btn.active,
 .rec-btn:hover {
   color: var(--c-accent);
   border-color: var(--c-accent);
@@ -400,6 +416,217 @@
 }
 
 .arm-placement-chip.invalid { max-width: 250px; }
+
+/* Resting ⚔ triggers keep only their right-axis tag. Hovering or keyboard-
+   focusing the tag reveals dotted, right-colored guides plus routing truth and
+   a safe per-trigger disarm action. Nearby labels collapse into one ×N control. */
+.armed-axis-control {
+  position: absolute;
+  z-index: 8;
+  height: 17px;
+  pointer-events: auto;
+}
+
+.armed-axis-label {
+  width: 100%;
+  height: 17px;
+  padding: 0 3px;
+  overflow: hidden;
+  border: 1px solid var(--armed-axis-color, var(--c-accent));
+  border-radius: 0;
+  background: var(--c-surface);
+  color: var(--armed-axis-color, var(--c-text));
+  font-family: "JetBrains Mono", monospace;
+  font-size: 9px;
+  line-height: 15px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.armed-axis-label:hover,
+.armed-axis-label:focus-visible,
+.armed-axis-control:focus-within .armed-axis-label {
+  background: color-mix(in srgb, var(--armed-axis-color, var(--c-accent)) 14%, var(--c-surface));
+  outline: none;
+}
+
+.armed-axis-label.withheld {
+  border-style: dashed;
+  opacity: 0.72;
+}
+
+.armed-axis-guide {
+  position: absolute;
+  right: 100%;
+  height: 0;
+  border-top: 1px dotted;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 90ms ease;
+}
+
+/* ⚔̸ armed exits share the axis furniture; dashed reads as "leaving". */
+.armed-exit-guide { border-top-style: dashed; }
+
+.armed-axis-label:hover ~ .armed-axis-guide,
+.armed-axis-control:focus-within .armed-axis-guide {
+  opacity: 0.72;
+}
+
+.armed-axis-popover {
+  position: absolute;
+  top: var(--armed-popover-top);
+  right: calc(100% - 1px);
+  width: 236px;
+  padding: 8px;
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  border: 1px solid var(--c-accent);
+  border-radius: 7px 0 7px 7px;
+  background: color-mix(in srgb, var(--c-bg) 96%, transparent);
+  color: var(--c-text);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.48);
+  backdrop-filter: blur(8px);
+  transition: opacity 120ms ease, visibility 120ms ease;
+}
+
+.armed-axis-control:hover .armed-axis-popover,
+.armed-axis-control:focus-within .armed-axis-popover {
+  visibility: visible;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.armed-axis-head,
+.armed-axis-contract {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.armed-axis-head {
+  padding: 0 2px 6px;
+  color: var(--c-accent);
+  font-size: 9px;
+  letter-spacing: 0.14em;
+}
+
+.armed-axis-head span,
+.armed-axis-contract span,
+.armed-axis-order,
+.armed-axis-hint {
+  color: var(--c-muted);
+}
+
+.armed-axis-item {
+  padding: 7px 2px;
+  border-top: 1px solid var(--c-border);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 10px;
+}
+
+.armed-axis-contract b {
+  font-size: 12px;
+}
+
+.armed-axis-route {
+  padding-top: 4px;
+  font-weight: 700;
+}
+
+.armed-axis-order {
+  padding-top: 3px;
+  font-size: 9px;
+  letter-spacing: 0.03em;
+}
+
+.armed-axis-sync-warning {
+  padding-top: 6px;
+  color: var(--c-loss);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.armed-axis-qty {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--c-border);
+  color: var(--c-muted);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+}
+
+.armed-axis-qty > span b {
+  color: var(--c-text);
+  font-size: 11px;
+}
+
+.armed-axis-qty-actions {
+  display: flex;
+  gap: 3px;
+}
+
+.armed-axis-qty-actions button {
+  min-width: 32px;
+  height: 23px;
+  padding: 0 5px;
+  border: 1px solid var(--c-border);
+  border-radius: 4px;
+  background: var(--c-surfaceAlt);
+  color: var(--c-text);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 9px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.armed-axis-qty-actions button:hover:not(:disabled),
+.armed-axis-qty-actions button:focus-visible {
+  border-color: var(--armed-axis-color, var(--c-accent));
+  color: var(--armed-axis-color, var(--c-accent));
+  outline: none;
+}
+
+.armed-axis-qty-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.28;
+}
+
+.armed-axis-disarm {
+  width: 100%;
+  margin-top: 6px;
+  padding: 4px 6px;
+  border: 1px solid var(--c-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--c-loss);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  cursor: pointer;
+}
+
+.armed-axis-disarm:hover,
+.armed-axis-disarm:focus-visible {
+  border-color: var(--c-loss);
+  outline: none;
+}
+
+.armed-axis-hint {
+  padding: 6px 2px 0;
+  border-top: 1px solid var(--c-border);
+  font-size: 8px;
+  letter-spacing: 0.07em;
+  text-align: center;
+}
 
 @media (max-width: 720px) {
   .arm-placement-instruction {

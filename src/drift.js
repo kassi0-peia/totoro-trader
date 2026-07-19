@@ -1,4 +1,4 @@
-// Delta drift: a 0.31-delta lotto quietly becoming a
+// Delta drift (the owner 2026-07-13): a 0.31-delta lotto quietly becoming a
 // 0.12-delta lotto is the earliest honest sign it's dying — before the
 // premium fully admits it. Entry delta is stamped on each fill row by the
 // bridge AT fill time (IBKR's own delta, never modeled after the fact);
@@ -40,4 +40,16 @@ export function deltaDecayed(entry, now) {
 // already carries direction; a signed put delta would just be noise here.
 export function fmtDelta(d) {
   return Math.abs(d).toFixed(2).replace(/^0/, '');
+}
+
+// Gamma under the same genuine-source guard as liveDeltaOf: the 0 stamped on
+// snapshot/nodata/expired rows is a placeholder, not a gamma.
+export function liveGammaOf(g) {
+  if (!g || (g.source !== 'ibkr' && g.source !== 'mid')) return null;
+  return Number.isFinite(g.gamma) ? g.gamma : null;
+}
+
+// ".017" — gamma runs an order of magnitude under delta, so three decimals.
+export function fmtGamma(g) {
+  return Math.abs(g).toFixed(3).replace(/^0/, '');
 }

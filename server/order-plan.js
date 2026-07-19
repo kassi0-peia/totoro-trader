@@ -87,9 +87,6 @@ export function planOrderRequest(msg, { currentExpiry, guest, account, routingLo
       { strikes: guest.strikes, expirations: guest.expirations },
     );
     if (!valid.ok) return valid;
-    if (!positiveFiniteNumber(msg.limit)) {
-      return { ok: false, reason: 'guest orders require a positive limit (no MKT)' };
-    }
     orderSymbol = guestSym;
     contract = guestOptionContract(guest, strike, right, expiry);
   } else {
@@ -122,12 +119,19 @@ export function planOrderRequest(msg, { currentExpiry, guest, account, routingLo
   if (msg.stop != null && !positiveFiniteNumber(stop)) {
     return { ok: false, reason: 'invalid stop price' };
   }
-  const isStop = !isLimit && positiveFiniteNumber(stop);
   const trail = msg.trail;
   if (msg.trail != null && !positiveFiniteNumber(trail)) {
     return { ok: false, reason: 'invalid trail amount' };
   }
-  const isTrail = !isLimit && !isStop && positiveFiniteNumber(trail);
+  // A stop or trailing ENTRY (BUY/SELL-to-open STP/TRAIL) is a deferred market
+  // order — nothing in the UI ever sends one; STP/SL and TRAIL are attached only
+  // as close-side exits (intent: 'close'). Refuse them on open so a forged/replayed
+  // open cannot smuggle a deferred market order onto the route.
+  if (intent !== 'close' && (msg.stop != null || msg.trail != null)) {
+    return { ok: false, reason: 'stop and trail orders are close-only' };
+  }
+  const isStop = intent === 'close' && !isLimit && positiveFiniteNumber(stop);
+  const isTrail = intent === 'close' && !isLimit && !isStop && positiveFiniteNumber(trail);
   if (intent === 'open' && action === 'SELL' && !isLimit) {
     return { ok: false, reason: 'SELL-to-open requires a positive limit' };
   }
@@ -140,6 +144,22 @@ export function planOrderRequest(msg, { currentExpiry, guest, account, routingLo
   const quick = msg.quick === true;
   const orderType = isLimit ? 'LMT' : isStop ? 'STP' : isTrail ? 'TRAIL' : 'MKT';
   const routePrice = isLimit ? limit : isStop ? stop : isTrail ? trail : null;
+
+  // `quick` opts an order into the ten-second broker deadline/recovery
+  // protocol. It is intentionally narrower than the general order route:
+  // only unbracketed BUY-to-open lightning shapes (market or positive limit)
+  // and server-fired armed entries may use it. Exact guest ownership was
+  // already proven above. Never let a forged flag alter close, bracket, stop,
+  // or trailing-order semantics.
+  if (quick && (
+    intent !== 'open'
+    || action !== 'BUY'
+    || wantTp
+    || wantSl
+    || (orderType !== 'LMT' && orderType !== 'MKT')
+  )) {
+    return { ok: false, reason: 'quick is supported only for unbracketed BUY-to-open orders' };
+  }
 
   const order = {
     action,
@@ -215,12 +235,17 @@ export function parentOrderRecord(plan, reduceOnly = null) {
 // forge an old ask. Non-MKT plans are unaffected.
 export function marketOrderHasFreshAsk(plan, { streamed = null, snapshot = null, now = Date.now(), maxAgeMs = 60_000 } = {}) {
   if (plan?.orderType !== 'MKT') return true;
-  if (plan.intent !== 'open' || plan.action !== 'BUY' || plan.orderSymbol !== 'SPX') return false;
+  if (plan.intent !== 'open' || plan.action !== 'BUY' || !plan.orderSymbol) return false;
   return [streamed, snapshot].some((quote) => {
     const ask = Number(quote?.ask);
     const bid = Number(quote?.bid);
     const askTs = Number(quote?.askTs);
     const age = Number(now) - askTs;
+    const symbolMatches = !quote?.symbol
+      || String(quote.symbol).toUpperCase() === plan.orderSymbol;
+    const strikeMatches = quote?.strike == null || Number(quote.strike) === plan.strike;
+    const rightMatches = !quote?.right || quote.right === plan.right;
+    const expiryMatches = !quote?.expiry || quote.expiry === plan.expiry;
     return ask > 0
       // A crossed positive book is not a trustworthy market witness. A
       // one-sided ask is still usable; some thin SPXW strikes have no bid.
@@ -228,7 +253,10 @@ export function marketOrderHasFreshAsk(plan, { streamed = null, snapshot = null,
       && Number.isFinite(age)
       && age >= 0
       && age <= maxAgeMs
-      && (!quote?.expiry || quote.expiry === plan.expiry);
+      && symbolMatches
+      && strikeMatches
+      && rightMatches
+      && expiryMatches;
   });
 }
 
@@ -273,6 +301,26 @@ export function findCancelableOrderId(orders, msg = {}) {
   return matches.length === 1 ? matches[0][0] : null;
 }
 
+// IB treats same-parentId bracket children as one-cancels-other, so their true
+// resting closing exposure is the max of the legs, not the sum. The broker order
+// objects carry only parentId (adding ocaGroup there would change IBKR routing);
+// the guard-facing RECORDS get a synthetic OCA key derived from the shared parent
+// so assessReduceOnlyOrder collapses TP+SL into one OCA unit instead of double-
+// counting them. Never sent to the broker or the browser order list.
+export function bracketOcaGroup(parentId) {
+  return `bracket:${parentId}`;
+}
+
+// openOrder merge for a record's guard-facing ocaGroup. The @stoqey/ib decoder
+// reads an UNSET broker group as the EMPTY STRING, and IBKR echoes openOrder
+// right at placement — a bare `broker ?? existing` would let that '' survive
+// and silently wipe the synthetic bracket group off a child record, reverting
+// the OCA-max exposure fix to double-counting. Treat '' as absent; a REAL
+// broker group (attached-exit OCA legs carry one) still wins over the record.
+export function mergeBrokerOcaGroup(brokerValue, existingValue) {
+  return (brokerValue || existingValue) || null;
+}
+
 export function bracketChild(plan, kind, parentId, account) {
   const takeProfit = kind === 'tp';
   const price = takeProfit ? plan.takeProfit : plan.stopLoss;
@@ -290,7 +338,7 @@ export function bracketChild(plan, kind, parentId, account) {
       qty: plan.qty,
       orderType,
       limit: price,
-      ocaGroup: null,
+      ocaGroup: bracketOcaGroup(parentId),
       status: 'submitted',
       filled: 0,
       remaining: plan.qty,

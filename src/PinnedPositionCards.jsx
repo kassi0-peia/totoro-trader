@@ -23,6 +23,11 @@ export default function PinnedPositionCards({
   onRefresh,
   canRefresh,
   onAttachExit,
+  armedExitOk = false,
+  armedExitRowsFor = null,
+  armedExitMaxQty = 10,
+  onArmExit = null,
+  onDisarmExit = null,
 }) {
   const positionTruth = replayActive || portfolioReady ? positions : [];
   const resolved = useMemo(
@@ -55,6 +60,11 @@ export default function PinnedPositionCards({
           onAttachExit={position && !replayActive ? onAttachExit : null}
           executionEnabled={!!position && executionEnabled}
           trailOk={trailOk}
+          armedExitOk={!!position && !replayActive && armedExitOk}
+          armedExitRows={position && armedExitRowsFor ? armedExitRowsFor(position) : null}
+          armedExitMaxQty={armedExitMaxQty}
+          onArmExit={position && !replayActive ? onArmExit : null}
+          onDisarmExit={position && !replayActive ? onDisarmExit : null}
           onClose={() => onDismiss(card.key)}
           onCardFocus={onFocus}
           onCardMove={onMove}

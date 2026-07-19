@@ -3,8 +3,12 @@ import { plDollars, plSign } from './pl.js';
 import { unrepresentedWorkingOrders } from './app/positionModel.js';
 
 function plOf(pos) {
-  // No live feed for this symbol right now (inactive guest) → no honest mark.
-  if (pos.greeksLive?.source === 'nodata') return { live: null, dollars: null, pct: null };
+  // A missing, unsupported, or settled quote has no honest mark. In particular,
+  // never turn a settled-but-unreconciled broker row into fake $0 P/L by falling
+  // back to its entry premium.
+  if (['nodata', 'unavailable', 'settled'].includes(pos.greeksLive?.source)) {
+    return { live: null, dollars: null, pct: null };
+  }
   const live = pos.greeksLive?.premium ?? pos.entryPremium ?? 0;
   const entry = pos.entryPremium ?? 0;
   const dollars = plDollars(pos, live, entry);
@@ -41,19 +45,21 @@ export default function Positions({ positions, theme, onClose, onReverse, onCanc
     .reduce((s, p) => s + (plOf(p).dollars ?? 0), 0);
   const closedPL = done.reduce((s, p) => s + (p.closedPL || 0), 0);
 
-  // Net greeks of the open book use one summary line, visible only while
-  // something is open. Per-contract
+  // Net greeks of the open book (roadmap #6, the owner's clutter rule: one line in
+  // this summary row, visible only while something is open). Per-contract
   // greeks × 100 × qty, sign-flipped for shorts: Δ in SPX-point dollars-ish
   // share equivalents, Θ in $/day, ν in $/vol-point.
   const net = positions.reduce((acc, p) => {
     if (p.status !== 'open' || !p.greeksLive) return acc;
+    if (['nodata', 'unavailable', 'settled'].includes(p.greeksLive.source)) return acc;
     const m = 100 * (p.qty || 0) * plSign(p);
     acc.on = true;
     acc.delta += (p.greeksLive.delta || 0) * m;
+    acc.gamma += (p.greeksLive.gamma || 0) * m;
     acc.theta += (p.greeksLive.theta || 0) * m;
     acc.vega += (p.greeksLive.vega || 0) * m;
     return acc;
-  }, { on: false, delta: 0, theta: 0, vega: 0 });
+  }, { on: false, delta: 0, gamma: 0, theta: 0, vega: 0 });
   const fmtG = (v, dp = 0) => `${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(dp)}`;
 
   return (
@@ -91,7 +97,7 @@ export default function Positions({ positions, theme, onClose, onReverse, onCanc
           <div className="pl-block" data-tip="Net greeks of the open book: Δ share-equivalents · Θ $/day · ν $/vol pt (shorts flip sign)">
             <span>Greeks</span>
             <b className="net-greeks">
-              Δ{fmtG(net.delta)} · Θ{fmtG(net.theta)} · ν{fmtG(net.vega)}
+              Δ{fmtG(net.delta)} · Γ{fmtG(net.gamma, 1)} · Θ{fmtG(net.theta)} · ν{fmtG(net.vega)}
             </b>
           </div>
         )}
@@ -107,7 +113,13 @@ export default function Positions({ positions, theme, onClose, onReverse, onCanc
             <span className="pos-cell"><span className="cell-label">QTY</span>×{o.qty}</span>
             <span className="pos-cell">
               <span className="cell-label">{o.action}</span>
-              {o.limit != null ? `${o.orderType || 'LMT'} $${Number(o.limit).toFixed(2)}` : o.orderType || 'MKT'}
+              {/* STP/TRAIL price their trigger from auxPrice; IBKR echoes lmtPrice 0
+                  for them, which used to render as a bogus "$0.00". */}
+              {(o.orderType === 'STP' || o.orderType === 'TRAIL') && o.aux != null && Number(o.aux) > 0
+                ? `${o.orderType} $${Number(o.aux).toFixed(2)}`
+                : o.limit != null && Number(o.limit) > 0
+                  ? `${o.orderType || 'LMT'} $${Number(o.limit).toFixed(2)}`
+                  : o.orderType || 'MKT'}
             </span>
             <span className="pos-cell pos-status" style={{ color: theme.muted }}>
               <span className="cell-label">ORDER</span>{o.status}
@@ -133,6 +145,11 @@ export default function Positions({ positions, theme, onClose, onReverse, onCanc
           const inflight = p.status === 'pending' || p.status === 'closing';
           const tag = p.status === 'pending' ? 'FILLING' : p.status === 'closing' ? 'CLOSING' : null;
           const { live, dollars, pct } = plOf(p);
+          const unavailableTip = p.greeksLive?.source === 'settled'
+            ? 'Contract has reached its exchange settlement cutoff — awaiting broker reconciliation'
+            : p.greeksLive?.source === 'unavailable'
+              ? 'Exact contract quote is unavailable'
+              : `No live feed for ${p.symbol ?? 'this symbol'} — open its tab for live marks`;
           const flash = flashOf(p);
           return (
             <div
@@ -163,7 +180,7 @@ export default function Positions({ positions, theme, onClose, onReverse, onCanc
                   </span>
                   <span className="pos-cell pos-pl" style={{ color: dollars == null ? theme.muted : dollars >= 0 ? theme.profit : theme.loss }}>
                     {dollars == null ? (
-                      <span data-tip={`No live feed for ${p.symbol ?? 'this symbol'} — open its tab for live marks`}>—</span>
+                      <span data-tip={unavailableTip}>—</span>
                     ) : (
                       <>
                         {dollars >= 0 ? '+' : '−'}${Math.abs(dollars).toFixed(2)}

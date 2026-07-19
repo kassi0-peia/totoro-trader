@@ -1,7 +1,7 @@
 import React from 'react';
 
-// The ? overlay keeps every key, gesture, and mark discoverable at a glance.
-// Zero resting chrome —
+// The ? overlay (the owner 2026-07-13, after forgetting two features in three
+// days): every key, gesture, and mark in one glance. Zero resting chrome —
 // it exists only while open; ? toggles, Esc or click-away closes. Curated,
 // not exhaustive: the things worth re-finding, not a manual.
 const KEYS = [
@@ -29,7 +29,7 @@ const MOUSE = [
 
 const MARKS = [
   ['⏰ dashed line', 'price alert — one-shot, chimes and vanishes'],
-  ['⚔ solid line', 'armed order — fires 1 lot when crossed'],
+  ['⚔ axis label', 'armed order — hover for quantity; fires when crossed'],
   ['±EM dashed pair', 'expected move priced by the ATM straddle'],
   ['↗ TREND / ⇄ CHOP', 'regime meter (hidden when unsure)'],
   ['dimmed price', 'no ticks for 5s — feed may be stalled'],

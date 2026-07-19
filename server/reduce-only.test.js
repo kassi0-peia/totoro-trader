@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { assessReduceOnlyOrder, optionRouteKey } from './reduce-only.js';
+import { assessReduceOnlyOrder, isTerminalOrderStatus, optionRouteKey } from './reduce-only.js';
 
 function contract(overrides = {}) {
   return {
@@ -141,6 +141,35 @@ test('OCA siblings reserve their maximum, while independent exits add', () => {
   assert.equal(independent.reservedQty, 6);
 });
 
+test('a bracket TP+SL reserves as one OCA unit, not the sum of both legs', () => {
+  // long 2 with a 1-lot bracket: TP 1 and SL 1 share a synthetic bracket group
+  // (server/order-plan.js bracketChild). True resting exposure is max(1,1)=1.
+  const bracket = [
+    order({ qty: 1, remaining: 1, ocaGroup: 'bracket:80' }),
+    order({ qty: 1, remaining: 1, ocaGroup: 'bracket:80', status: 'PreSubmitted' }),
+  ];
+  const long2 = authority({ position: { account: 'DU111', qty: 2, contract: contract() } });
+
+  // A manual partial CLOSE 1 is safe: max(1,1) + 1 = 2 <= 2.
+  const partial = assessReduceOnlyOrder({ plan: plan({ qty: 1 }), authority: long2, orders: bracket });
+  assert.equal(partial.ok, true);
+  assert.equal(partial.reservedQty, 2);
+
+  // A full CLOSE 2 would over-commit: max(1,1) + 2 = 3 > 2.
+  const full = assessReduceOnlyOrder({ plan: plan({ qty: 2 }), authority: long2, orders: bracket });
+  assert.equal(full.ok, false);
+  assert.equal(full.reservedQty, 3);
+
+  // Two UNRELATED standalone SELLs (no shared group) still sum, unchanged.
+  const standalone = assessReduceOnlyOrder({
+    plan: plan({ qty: 1 }),
+    authority: long2,
+    orders: [order({ qty: 1, remaining: 1 }), order({ qty: 1, remaining: 1 })],
+  });
+  assert.equal(standalone.ok, false);
+  assert.equal(standalone.reservedQty, 3);
+});
+
 test('a Filled callback stays reserved until exact-contract position authority advances', () => {
   const witness = {
     account: 'DU111', routeKey: optionRouteKey(contract()), contractRevision: 7, positionQty: 5,
@@ -162,6 +191,55 @@ test('a Filled callback stays reserved until exact-contract position authority a
   });
   assert.equal(afterPosition.ok, true);
   assert.equal(afterPosition.reservedQty, 3);
+});
+
+test('isTerminalOrderStatus normalizes every IBKR terminal spelling', () => {
+  for (const s of ['Filled', 'Cancelled', 'ApiCancelled', 'api_cancelled', 'Inactive', 'error', 'IN ACTIVE']) {
+    assert.equal(isTerminalOrderStatus(s), true, String(s));
+  }
+  for (const s of ['Submitted', 'PreSubmitted', 'PendingSubmit', 'submission-uncertain', '', null]) {
+    assert.equal(isTerminalOrderStatus(s), false, String(s));
+  }
+});
+
+test('a terminal foreign fill with no revision witness reserves 0 (the fails-open the bridge stamp closes)', () => {
+  // A manual TWS SELL 1 that just filled on the same account+exact contract, as
+  // the reduce-only module sees it before the bridge stamps a witness. Long 2
+  // with a CLOSE SELL 2 is wrongly accepted because the fill reserves nothing.
+  const unstamped = order({ qty: 1, remaining: 0, filled: 1, status: 'Filled' });
+  const overClose = assessReduceOnlyOrder({
+    plan: plan({ qty: 2 }),
+    authority: authority({ position: { account: 'DU111', qty: 2, contract: contract() } }),
+    orders: [unstamped],
+  });
+  assert.equal(overClose.ok, true, 'without a witness the pure guard cannot reserve this fill — the bridge must stamp one');
+  assert.equal(overClose.reservedQty, 2);
+});
+
+test('a foreign fill stamped with a revision witness stays reserved until the exact-contract position advances', () => {
+  const witness = { account: 'DU111', routeKey: optionRouteKey(contract()), contractRevision: 7 };
+  // The same manual SELL 1, now stamped by the bridge at the moment it went
+  // terminal with a fill (revision 7, before the position callback lands).
+  const foreignFill = order({ qty: 1, remaining: 0, filled: 1, status: 'Filled', reduceOnly: witness });
+
+  // Long 2, callback gap: a CLOSE SELL 2 must be refused (foreign 1 + plan 2 = 3 > 2).
+  const callbackGap = assessReduceOnlyOrder({
+    plan: plan({ qty: 2 }),
+    authority: authority({ contractRevision: 7, position: { account: 'DU111', qty: 2, contract: contract() } }),
+    orders: [foreignFill],
+  });
+  assert.equal(callbackGap.ok, false);
+  assert.equal(callbackGap.reservedQty, 3);
+
+  // Once the position callback reflects the manual fill (long 1, revision 8),
+  // the stale foreign fill releases and a CLOSE SELL 1 is accepted.
+  const afterPosition = assessReduceOnlyOrder({
+    plan: plan({ qty: 1 }),
+    authority: authority({ contractRevision: 8, position: { account: 'DU111', qty: 1, contract: contract() } }),
+    orders: [foreignFill],
+  });
+  assert.equal(afterPosition.ok, true);
+  assert.equal(afterPosition.reservedQty, 1);
 });
 
 test('an already-filled OCA leg is exposure, not protection for a late sibling', () => {

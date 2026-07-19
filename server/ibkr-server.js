@@ -16,28 +16,41 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { IBApi, EventName } from '@stoqey/ib';
 import { WebSocketServer } from 'ws';
-import { computeSession, etParts, ymd, lastCloseEt } from './session.js';
-import { computeOptionsForward } from './options-forward.js';
+import { computeSession } from './session.js';
+import { createBasisController } from './basis-controller.js';
+import { createHomeMarket } from './home-market.js';
 import { pickExpiry, deriveStrikeStep, strikeWindow, validateOrder as validateGuestOrder } from './guest-symbol.js';
 import { normalizeWatchlist, shapeWatchQuote } from './watchlist.js';
-import { validateArmedOrder, armedTriggered, ARMED_MAX } from './armed.js';
+import {
+  addArmedOrderQuantity,
+  armedTriggered,
+  retargetArmedOrder,
+  ARMED_MAX,
+  ARMED_QTY_MAX,
+  validateArmedOrder,
+} from './armed.js';
+import {
+  ARMED_EXIT_MAX,
+  ARMED_EXIT_QTY_MAX,
+  armedExitTriggered,
+  planArmedExitFire,
+} from './armed-exit.js';
+import { createArmedExitStateStore } from './armed-exit-store.js';
+import {
+  ARMED_STATE_BLOCKED,
+  ARMED_STATE_READY,
+  createArmedStateStore,
+} from './armed-state-store.js';
 import {
   CANDLE_MS,
-  feedCandleSeries,
   finishHistoricalSeed,
   newCandleSeries,
-  nextCandleEdge,
   parseHistTime,
 } from './candle-series.js';
 import { parseExecTime } from './execution-time.js';
 import { createStaticServer, defaultCARoot } from './http-server.js';
 import {
-  bracketChild,
-  findCancelableOrderId,
   guestOptionContract,
-  marketOrderHasFreshAsk,
-  parentOrderRecord,
-  planOrderRequest,
   isValidExpiry,
   spxwContract,
 } from './order-plan.js';
@@ -47,16 +60,13 @@ import { createHistoryService } from './history.js';
 import { createIbIdAllocator, REQUEST_ID_FLOOR } from './id-allocator.js';
 import { createKillOrderService } from './kill-order-service.js';
 import { createKillSwitchCoordinator } from './kill-switch.js';
+import { createOrderGateway } from './order-gateway.js';
 import { createOrderRequestRegistry, fingerprintOrderRequest } from './order-request-registry.js';
-import {
-  brokerOrderIdentity,
-  orderIsCancellableByClient,
-  ordersForAccount,
-} from './order-scope.js';
 import { createPortfolioController } from './portfolio.js';
 import { isPortfolioReady, portfolioMessage } from './portfolio-sync.js';
 import { createQuoteService } from './quote-service.js';
-import { assessReduceOnlyOrder, optionRouteKey } from './reduce-only.js';
+import { recoverQuickOrders } from './quick-order-recovery.js';
+import { optionRouteKey } from './reduce-only.js';
 import { createReverseCoordinator } from './reverse.js';
 import { waitForPositionAuthority } from './position-authority-fence.js';
 import { createRoutingLockStore } from './routing-lock-store.js';
@@ -79,6 +89,8 @@ const TRADES_FILE = path.join(__dirname, '.trades.json');
 const JOURNAL_FILE = path.join(__dirname, '.journal.json');
 const KILL_LOCK_FILE = path.join(__dirname, '.kill-lock.json');
 const REVERSE_LOCK_FILE = path.join(__dirname, '.reverse-lock.json');
+const ARMED_STATE_FILE = path.join(__dirname, '.armed-state.json');
+const ARMED_EXIT_STATE_FILE = path.join(__dirname, '.armed-exit-state.json');
 const SHOTS_DIR = path.join(__dirname, '.journal-shots'); // 📸 fill snapshots (client-rendered chart stills)
 
 // HTTPS is opt-in (TLS=1 or explicit TLS_CERT/TLS_KEY) so the default HTTP mode
@@ -112,86 +124,38 @@ const MARKET_DATA_TYPE = parseInt(process.env.IBKR_MD_TYPE || '3', 10);
 // SIMULTANEOUS snapshot of live ES minus live SPX, then frozen and applied to all
 // overnight ES ticks. The cold-start fallback (see coldStartBasis) only matters
 // when the server starts overnight with no captured/persisted basis at all.
-// COLD_START_BASIS_ENV is an explicit operator override; COLD_START_BASIS_LITERAL
-// is the last-resort constant (ES≈7540 − SPX≈7520) used only when nothing is known.
+// COLD_START_BASIS_ENV is an explicit operator override handed to the basis
+// controller (which owns the last-resort literal, the 4:00 capture minute, and the
+// rest of the ladder). See server/basis-controller.js.
 const COLD_START_BASIS_ENV = process.env.COLD_START_BASIS != null ? parseFloat(process.env.COLD_START_BASIS) : null;
-const COLD_START_BASIS_LITERAL = 20;
-const BASIS_CAPTURE_MIN = 16 * 60; // 4:00 PM ET — when SPX cash settles and both feeds are live
-
-const STRIKE_STEP = 5;
-// ±20 strikes (±100 pts) — 82 option subs + SPX/ES/VIX = 85 lines, under IBKR's
-// default 100-line market-data cap. Covers far-OTM strikes on wide-range days.
-const CHAIN_HALF_WIDTH = 20;
-const RECENTRE_THRESHOLD = 2;
-// ~2 days of 1-min bars (ES trades ~23h/day ≈ 1380/day). Snapshot payload at
-// this size is ~250 KB — fine for the LAN websocket.
-const HISTORY_CANDLES = 3000;
 
 let connected = false;
 
-// Two independent 1-min candle series. `edge` is the next bucket boundary.
-const spx = newCandleSeries();
-const es = newCandleSeries();
-let spxPrice = null;
+// The SPX/ES/VIX/SPY candle+chain state, the ES-SPX basis witnesses, the SPXW
+// chain, the front-month ES contract, the per-source candle-runaway monitor, and
+// the feed/history watchdog all live in the home-market controller
+// (server/home-market.js), instantiated below once `session` + `nextRequestId`
+// exist. The coordinator delegates each IB event to it and reads its snapshot; it
+// never mutates that state directly. Likewise the ES-SPX basis state + fallback
+// ladder are owned by the basis controller (server/basis-controller.js).
 
-// SPY volume proxy: SPX is a cash index with no traded volume, so we paint SPY's
-// (the ETF) per-minute share volume onto the SPX candles' `.volume` field — a
-// historical seed backfills it, real-time bars extend it forward. Keyed by 1-min
-// bucket (ms). Costs one extra market-data line for the real-time stream.
-const SPY_CONTRACT = { symbol: 'SPY', secType: 'STK', exchange: 'SMART', currency: 'USD' };
-const spyVol = new Map(); // minuteBucketMs -> share volume
-let esPrice = null;
-let vixLast = null;   // VIX index level
-let vixClose = null;  // prior close (for the day change + color)
-
-// ES-SPX basis. Live during RTH, frozen otherwise.
-let basis = null;
-let basisFrozen = true;
-let basisEstimated = false; // true when from the cold-start fallback, not a real 4:00 capture
-let basisCaptureDate = null; // YYYYMMDD of the day we captured the 4:00 basis
-let basisEsExpiry = null;    // ES contract expiry the basis was measured against (persisted)
-let esClose = null;          // raw ES price at the 4:00 capture (persisted)
-let spxClose = null;         // raw SPX price at the 4:00 capture (persisted)
-
-// Watchdog: catches a stalled mkt-data feed or a runaway candle builder (e.g. after
-// the IBKR session is kicked when the mobile app logs in) and forces a reconnect.
-const watchdogState = {
-  lastSpxTick: 0,
-  lastEsTick: 0,
-  recentBars: { SPX: [], ES: [] },
-  // History-seed health: if a request was issued (Requested != 0) and the
-  // matching "finished" event never landed (Seeded < Requested) within
-  // HIST_SEED_TIMEOUT_MS, the watchdog re-requests against a (hopefully now
-  // healthy) HMDS farm.
-  spxHistRequestedAt: 0,
-  spxHistSeededAt: 0,
-  esHistRequestedAt: 0,
-  esHistSeededAt: 0
-};
-const SPX_STALE_MS = 120_000;        // > 2 min with no SPX tick during RTH = stall
-const ES_STALE_MS = 300_000;         // > 5 min with no ES tick when ES is the source = stall
-const BAR_RUNAWAY = 3;               // > 3 new bars in any 60s window = runaway
-const HIST_SEED_TIMEOUT_MS = 60_000; // hist seed never finishes within 60s = retry
+const BAR_RUNAWAY = 3;               // > 3 new bars in any 60s window (guest inline monitor)
 const PORTFOLIO_SYNC_TIMEOUT_MS = 30_000;
 let lastWatchdogAction = 0;
 let portfolioRecoveryStartedAt = 0;
 
 let session = computeSession();
-let currentExpiry = null; // SPXW expiry the chain is currently subscribed to
 
-let esContract = null;     // resolved front-month ES FUT
-let esExpiry = null;
-
+// Request-id subs for the guest / watchlist / symbol-search layers. Home-market
+// keeps its own disjoint sub map; the id-allocator unions both for liveness.
 const subs = new Map();
-const chain = new Map();
-let chainCenter = null;
 
 // ── Guest-symbol layer (multi-symbol Phase A) ────────────────────────────────
 // One exact guest resource (symbol+conId) may run beside the SPX home instrument.
 // Multiple browser tabs may share it, but delivery and order/history authority
 // stay client-owned. Its candle/chain state is isolated and the SPXW line-hog
 // yields while it is active; browser session intent reactivates after reconnect.
-// See server/guest-registry.js and server/guest-symbol.js.
+// See server/guest-registry.js, server/guest-symbol.js, and spec-multi-symbol.md.
 const GUEST_STRIKE_WINDOW = 6;    // n strikes each side of spot (narrower than SPXW)
 const GUEST_RECENTRE_STEPS = 1;   // recenter once spot drifts a full step past the window edge
 const GUEST_HISTORY_CANDLES = 3000;
@@ -207,11 +171,11 @@ function newGuestSeries() {
 // ── Watchlist layer (multi-symbol Phase B) ───────────────────────────────────
 // A client-owned list of US stock tickers polled for QUOTES ONLY — no chart, no
 // chain, no orders. The bridge never streams these: it fires one-shot snapshot
-// reqMktData on a slow, staggered cycle because the market-data line budget
+// reqMktData on a slow, staggered cycle, because the owner's market-data line budget
 // is already spent on the SPXW (or guest) chain. The client is the source of
 // truth for the list and re-sends it on (re)connect; the bridge does NOT persist
 // it. SPX is excluded (home instrument, already streaming — the client pins it
-// from the live feed). See server/watchlist.js.
+// from the live feed). See server/watchlist.js and spec-multi-symbol.md.
 const WATCH_POLL_MS = 25_000;     // full refresh cycle per symbol (slow, budget-friendly)
 const WATCH_STAGGER_MS = 350;     // spacing between the symbols' snapshots within a cycle
 const WATCH_SNAP_TIMEOUT_MS = 8_000; // finalize a snapshot even if tickSnapshotEnd never lands
@@ -221,13 +185,15 @@ const watchQuotes = new Map();    // symbol -> last good shaped quote { symbol, 
 const watchResolving = new Set(); // symbols with a reqContractDetails in flight (dedupe)
 const watchInFlight = new Map();  // symbol -> reqId of the snapshot currently on the wire
 
-// ── ⚔ Armed orders (see server/armed.js) ────────────────────────────────────
-// Client-owned list, wholesale-set like the watchlist; NOT persisted (a bridge
-// restart fails safe to disarmed until a client re-sends). firedIds guards a
-// stale client list from re-arming something that already fired this session.
-let armedOrders = [];
+// ── ⚔ Armed orders ─────────────────────────────────────────────────────────
+// The bridge is the sole authority. The store is created lazily once IBKR names
+// the selected account, then persists the exact account/expiry/order set before
+// any mutation becomes visible. Browser storage is only a display cache and is
+// never replayed into this authority.
+let armedStateStore = null;
 let armedPrevPrice = null;        // previous displayed price for crossing detection
-const armedFiredIds = new Set();
+let armedExitStateStore = null;
+let armedExitPrevPrice = null;    // the exit book keeps its own crossing witness
 const killLockStore = createRoutingLockStore({ file: KILL_LOCK_FILE });
 let killRoutingLocked = killLockStore.isLocked(); // staged KILL bypasses normal browser/armed routes
 if (killRoutingLocked) {
@@ -242,16 +208,10 @@ if (reverseRoutingLocked) {
 }
 
 // Order execution state. Account/position/funds authority lives in the
-// portfolio controller below; working-order lifecycle remains here until the
-// order gateway extraction is connected.
-const QUICK_CANCEL_MS = 10_000; // ⚡ unfilled-order lifetime before auto-cancel
-// This bridge's own orders keep their numeric key because every placement/error
-// call made by this API client uses that namespace. reqAllOpenOrders also returns
-// foreign/manual rows whose numeric IDs are client-scoped, so those live in a
-// separate composite-key map and are visible but never individually cancellable
-// from client 17.
-const orders = new Map();        // own client orderId -> order record
-const foreignOrders = new Map(); // clientId+orderId (or permId fallback) -> read-only record
+// portfolio controller below; the non-KILL working-order lifecycle (both order
+// maps, placement, cancel, and the IBKR order callbacks) belongs to
+// `server/order-gateway.js` — this file only dispatches to it and publishes
+// what it returns.
 const orderRequestRegistry = createOrderRequestRegistry();
 const reverseRequestRegistry = createOrderRequestRegistry();
 // `connected` alone is not portfolio authority: after a reconnect IBKR streams
@@ -272,9 +232,10 @@ let dataDelayed = false;         // true after 10197: a competing live session h
 // Error callbacks only carry one numeric id, so sharing a counter could let a
 // request failure masquerade as a rejection of an unrelated recovered order.
 const ids = createIbIdAllocator({
-  isOrderIdActive: (id) => orders.has(id),
+  isOrderIdActive: (id) => orderGateway.hasOwnOrder(id),
   isRequestIdActive: (id) => (
     subs.has(id)
+    || homeMarket.ownsRequestId(id)
     || quoteService?.ownsRequestId(id)
     || portfolio?.ownsRequestId(id)
     || historyService?.ownsRequestId(id)
@@ -293,9 +254,61 @@ const portfolio = createPortfolioController({
 const quoteService = createQuoteService({
   getBroker: () => ib,
   allocateReqId: nextRequestId,
-  publish: (target, message) => {
-    if (target?.readyState === 1) target.send(JSON.stringify(message));
+  publish: (target, message, context) => {
+    if (target?.readyState === 1) target.send(JSON.stringify(context ? { ...message, ...context } : message));
   },
+});
+
+// The single owner of the non-KILL broker order lifecycle: both order maps,
+// placement/cancel, quick auto-cancel, and the openOrder/orderStatus/error
+// correlation that keeps those records true. Everything it needs from the
+// bridge arrives through these ports; it never reaches back.
+const orderGateway = createOrderGateway({
+  getBroker: () => (ib && connected ? ib : null),
+  clientId: IBKR_CLIENT_ID,
+  allocateOrderId: nextOrderId,
+  registry: orderRequestRegistry,
+  getAccount: () => portfolio.publicSnapshot().account,
+  getPositionAuthority: (account, contract) => portfolio.positionAuthorityForContract(account, contract),
+  peekQuote: (contract, options) => quoteService.peekQuote(contract, options),
+  getStreamedQuote: (plan, context = {}) => {
+    if (plan.orderSymbol === 'SPX') return homeMarket.getChainEntry(`${plan.strike}${plan.right}`);
+    const resource = context.guest;
+    if (!resource || resource.symbol !== plan.orderSymbol) return null;
+    const entry = resource.chain.get(`${plan.strike}${plan.right}`);
+    return entry ? { ...entry, symbol: resource.symbol } : null;
+  },
+  getCurrentExpiry: () => homeMarket.getCurrentExpiry(),
+  getGuestContext: (ws) => guestRegistry.getClientContext(ws),
+  isExecutionReady: () => executionReady(),
+  getRoutingLock: () => (killRoutingLocked ? 'KILL' : reverseRoutingLocked ? 'REVERSE' : null),
+  broadcast,
+  publish: (target, message) => {
+    if (target?.readyState !== 1) return;
+    try { target.send(JSON.stringify(message)); } catch (error) {
+      console.error('[ibkr] order acknowledgement delivery failed:', error?.message || error);
+    }
+  },
+  onOrderFilled: ({ orderId, order, filled, avgFillPrice }) => {
+    tradeJournal.recordOrderStatus(orderId, order, filled, avgFillPrice);
+  },
+  onQuickRecoveryHazard: (hazard) => {
+    // A TTQ1 row whose broker deadline can no longer be trusted must never sit
+    // behind an execution-ready UI. The correlated recovery pipeline below is
+    // the only code allowed to cancel it; this callback only drops readiness.
+    ordersReady = false;
+    if (!portfolioRecoveryStartedAt) portfolioRecoveryStartedAt = Date.now();
+    const gtdDetail = hazard?.code === 'GTD_MISMATCH'
+      ? ` (broker echoed '${hazard?.receivedGoodTillDate ?? ''}', deadline is '${hazard?.expectedGoodTillDate ?? ''}' UTC)`
+      : '';
+    console.error(`[ibkr] quick-order recovery hazard ${hazard?.orderId ?? '?'}: ${hazard?.code || 'UNKNOWN'} — ${hazard?.reason || 'unsafe TTQ1 metadata'}${gtdDetail}`);
+    try { broadcastPortfolio(); } catch { /* startup/event reporting only */ }
+    // Start the exact snapshot/cancel/proof path immediately. If this callback
+    // arose inside an already-running recovery snapshot, the existing promise
+    // is reused and no second uncorrelated scan is started.
+    queueMicrotask(() => requestOpenOrderRecovery());
+  },
+  log: (message) => console.log(message),
 });
 
 const killOrderService = createKillOrderService({
@@ -321,11 +334,7 @@ const killCoordinator = createKillSwitchCoordinator({
     }
   },
   getAccount: () => (ib && connected ? portfolio.publicSnapshot().account : null),
-  clearArmed: () => {
-    armedOrders = [];
-    armedPrevPrice = null;
-    broadcast({ type: 'armedCleared', reason: 'KILL transaction' });
-  },
+  clearArmed: () => { clearArmedAuthorityForKill(); clearArmedExitAuthorityForKill(); return true; },
   snapshotOpenOrders: (context) => killOrderService.snapshotOpenOrders(context),
   cancelOrder: (orderId, context) => killOrderService.cancelOrder(orderId, context),
   waitForCancellations: (orderIds, context) => killOrderService.waitForCancellations(orderIds, context),
@@ -381,13 +390,41 @@ const tradeJournal = createTradeJournal({
   today: () => session.expiry,
   tradeDateAt: (ts) => computeSession(new Date(ts)).expiry,
   parseExecutionTime: parseExecTime,
-  getOrder: (orderId) => orders.get(orderId),
+  getOrder: (orderId) => orderGateway.getOwnOrder(orderId),
   deltaAtFill,
   broadcast,
 });
 
-loadBasis();
+// The single owner of the ES↔SPX basis and its fallback ladder. Injected clock +
+// persistence keep it unit-testable (server/basis-controller.test.js); the
+// coordinator feeds it witnesses and publishes basisCtl.snapshot().
+const basisCtl = createBasisController({
+  session: () => session,
+  coldStartEnv: COLD_START_BASIS_ENV,
+  persist: (obj) => atomicWriteSync(BASIS_FILE, JSON.stringify(obj)),
+  readCache: () => JSON.parse(fs.readFileSync(BASIS_FILE, 'utf8')),
+});
+
+basisCtl.load();
 tradeJournal.load();
+
+// The single owner of the home-market data domain: the SPX/ES/VIX/SPY/SPXW
+// subscription lifecycle, the two candle series, the SPXW chain, the front-month
+// ES contract, its own request-id map, the candle-runaway/feed watchdog, and the
+// basis witnesses it feeds `basisCtl`. The coordinator keeps IB connection,
+// snapshot composition, the `session` timer, and the guest/watchlist/armed layers,
+// and delegates each IB event to this controller first. See server/home-market.js.
+const homeMarket = createHomeMarket({
+  getBroker: () => ib,
+  isConnected: () => connected,
+  allocateReqId: nextRequestId,
+  getSession: () => session,
+  basis: basisCtl,
+  broadcast,
+  publishSnapshot: () => broadcast(snapshotMsg()),
+  onDisplayPriceTick: () => { checkArmedOrders(); checkArmedExitOrders(); },
+  requestReconnect: () => { try { ib?.disconnect(); } catch { /* already gone */ } },
+});
 
 // ── HTTP(S) + WebSocket server ────────────────────────────────────────────────
 
@@ -421,21 +458,23 @@ wss.on('connection', (ws) => {
     try { msg = JSON.parse(data); } catch { return; }
     if (!msg) return;
     if (msg.type === 'clientHello') handleClientHello(ws, msg);
-    else if (msg.type === 'order') handleOrderRequest(ws, msg);
+    else if (msg.type === 'order') orderGateway.placeOrderRequest(ws, msg);
     else if (msg.type === 'history') handleHistoryRequest(ws, msg);
     else if (msg.type === 'optHistory') handleOptHistoryRequest(ws, msg);
     else if (msg.type === 'replayDay') handleReplayDayRequest(ws, msg);
     else if (msg.type === 'journal') { if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'journalResult', days: tradeJournal.days() })); }
     else if (msg.type === 'quote') handleQuoteRequest(ws, msg);
-    else if (msg.type === 'cancel') handleCancel(ws, msg);
-    else if (msg.type === 'cancelAll') handleCancelAll(ws, msg);
+    else if (msg.type === 'cancel') orderGateway.cancelOrder(ws, msg);
+    else if (msg.type === 'cancelAll') orderGateway.cancelAllOrders(ws, msg);
     else if (msg.type === 'symbolSearch') handleSymbolSearch(ws, msg);
     else if (msg.type === 'activateSymbol') handleActivateSymbol(ws, msg);
     else if (msg.type === 'deactivateSymbol') handleDeactivateSymbol(ws, msg);
     else if (msg.type === 'watchlist') handleWatchlist(ws, msg);
     else if (msg.type === 'fillNote') tradeJournal.handleFillNote(msg);
     else if (msg.type === 'fillShot') tradeJournal.handleFillShot(msg);
-    else if (msg.type === 'armed') handleArmed(ws, msg);
+    else if (msg.type === 'armedCommand') handleArmedCommand(ws, msg);
+    else if (msg.type === 'armedExitCommand') handleArmedExitCommand(ws, msg);
+    else if (msg.type === 'armed' || msg.type === 'armedQtyAdd') handleLegacyArmedCommand(ws, msg);
     else if (msg.type === 'kill') handleKill(ws, msg);
     else if (msg.type === 'reverse') handleReverse(ws, msg);
   });
@@ -472,12 +511,6 @@ async function pickPort() {
   return null;
 }
 
-// Hard order rejections (everything else on the order error channel is a warning).
-// 161 means a cancellation was not accepted in the order's current state. It
-// is not proof that the order is terminal; keep it visible until a subsequent
-// openOrder/orderStatus snapshot establishes truth.
-const ORDER_REJECT_CODES = new Set([201, 202, 203, 321, 110, 463]);
-
 function wireHandlers(api) {
   // Benign/transient codes that otherwise FLOOD the log (and grew it unbounded):
   // 300 = "Can't find EId" (cancelling mkt-data for a tickerId already gone on
@@ -500,24 +533,10 @@ function wireHandlers(api) {
     }
     const requestScoped = Number.isInteger(reqId) && reqId >= REQUEST_ID_FLOOR;
     const killHandled = !requestScoped && killOrderService.onError(err, code, reqId);
-    // Order-related messages arrive with reqId = the orderId. IBKR sends both hard
-    // rejections AND non-fatal warnings (e.g. 399 "held until the open") on this
-    // channel — only the former should fail the order; orderStatus is the source
-    // of truth for live state.
-    if (!requestScoped && orders.has(reqId)) {
-      const o = orders.get(reqId);
-      const reason = String(err?.message ?? err);
-      const rejected = ORDER_REJECT_CODES.has(code) || code >= 10000;
-      if (rejected) {
-        o.status = 'error';
-        console.log(`[ibkr] order ${reqId} (${o.action} ${o.strike}${o.right}) REJECTED ${code}: ${reason}`);
-        broadcast({ type: 'orderError', clientRef: o.clientRef, orderId: reqId, code, reason });
-      } else {
-        console.log(`[ibkr] order ${reqId} (${o.action} ${o.strike}${o.right}) warning ${code}: ${reason}`);
-        broadcast({ type: 'orderWarning', clientRef: o.clientRef, orderId: reqId, code, reason });
-      }
-      return;
-    }
+    // Order-related messages arrive with reqId = the orderId. The gateway owns
+    // the own-order records, so it decides rejection vs warning and answers
+    // whether this id was one of its orders at all.
+    if (!requestScoped && orderGateway.onOrderError(reqId, code, err)) return;
     if (killHandled) return;
     // Totoro allocates request IDs in a reserved high namespace. Never let a
     // request failure mutate a real order merely because IB reports both through
@@ -584,62 +603,7 @@ function wireHandlers(api) {
       }
     }
 
-    const identity = brokerOrderIdentity(orderId, order);
-    // Never infer ownership from a bare numeric orderId. reqAllOpenOrders can
-    // report another client's row with the same number; missing clientId means
-    // read-only/unknown even if this bridge already has that numeric key.
-    const own = orderIsCancellableByClient(identity, IBKR_CLIENT_ID);
-    const stableKey = own
-      ? `client:${IBKR_CLIENT_ID}:order:${identity.orderId}`
-      : identity.key ?? [
-        'unknown',
-        String(orderId),
-        String(order?.account ?? ''),
-        String(contract?.conId ?? ''),
-        String(contract?.symbol ?? ''),
-        String(contract?.lastTradeDateOrContractMonth ?? ''),
-        String(contract?.strike ?? ''),
-        String(contract?.right ?? ''),
-      ].join(':');
-    const target = own ? orders : foreignOrders;
-    const mapKey = own ? identity.orderId : stableKey;
-    let existing = target.get(mapKey);
-    if (!own && identity.clientId != null && identity.orderId != null && identity.permId != null) {
-      const legacyKey = `client:${identity.clientId}:order:${identity.orderId}`;
-      existing ??= foreignOrders.get(legacyKey);
-      foreignOrders.delete(legacyKey);
-    }
-    const record = {
-      ...existing,
-      clientRef: existing?.clientRef ?? `recovered-${stableKey}`,
-      orderKey: stableKey,
-      orderId: identity.orderId,
-      account: String(order?.account ?? existing?.account ?? '').trim() || null,
-      clientId: own ? IBKR_CLIENT_ID : identity.clientId,
-      permId: identity.permId ?? existing?.permId ?? null,
-      cancellable: own,
-      intent: existing?.intent ?? null,
-      symbol: contract?.symbol ?? existing?.symbol ?? 'SPX',
-      action: order?.action ?? existing?.action,
-      strike: contract?.strike ?? existing?.strike,
-      right: contract?.right ?? existing?.right,
-      expiry: String(contract?.lastTradeDateOrContractMonth || existing?.expiry || '').slice(0, 8),
-      qty: order?.totalQuantity ?? existing?.qty,
-      orderType: order?.orderType ?? existing?.orderType,
-      limit: order?.lmtPrice ?? existing?.limit ?? null,
-      ocaGroup: order?.ocaGroup ?? existing?.ocaGroup ?? null,
-      status: orderState?.status || existing?.status || 'open',
-      filled: existing?.filled ?? 0,
-      // reqAllOpenOrders does not provide a trustworthy remaining quantity.
-      // Preserve a live orderStatus witness when one exists; otherwise the
-      // reduce-only gate conservatively treats the recovered total as remaining.
-      remaining: existing?.remaining ?? order?.totalQuantity ?? existing?.qty,
-      avgFillPrice: existing?.avgFillPrice ?? 0,
-      contract: contract ? { ...contract } : existing?.contract ?? null,
-    };
-    target.set(mapKey, record);
-    console.log(`[ibkr] recovered ${own ? 'own' : 'read-only foreign'} order ${stableKey}: ${record.action} ${record.strike}${record.right} (${record.status})`);
-    broadcastOrders();
+    orderGateway.onOpenOrder(orderId, contract, order, orderState);
   });
   api.on(EventName.openOrderEnd, () => {
     if (api !== ib) return;
@@ -669,66 +633,17 @@ function wireHandlers(api) {
       lastFillPrice,
       clientId,
     );
-    const identity = brokerOrderIdentity(orderId, { clientId, permId });
-    let o = null;
-    let own = false;
-    if (identity.clientId != null) {
-      if (identity.clientId === IBKR_CLIENT_ID) {
-        o = orders.get(identity.orderId);
-        own = !!o;
-      } else if (identity.key) {
-        o = foreignOrders.get(identity.key) ?? null;
-        if (!o) {
-          const candidates = [...foreignOrders.values()].filter((row) => (
-            row.clientId === identity.clientId
-            && row.orderId === identity.orderId
-            && (identity.permId == null || row.permId === identity.permId)
-          ));
-          if (candidates.length === 1) o = candidates[0];
-        }
-      }
-    } else {
-      // Older/missing callbacks can be accepted only when their remaining
-      // witness identifies exactly one row. A bare numeric ID shared by two API
-      // clients is deliberately ignored rather than cross-updating lifecycle.
-      const candidates = [];
-      const ownCandidate = orders.get(identity.orderId);
-      if (ownCandidate && (identity.permId == null || ownCandidate.permId === identity.permId)) {
-        candidates.push({ row: ownCandidate, own: true });
-      }
-      for (const row of foreignOrders.values()) {
-        const orderMatches = row.orderId === identity.orderId;
-        const permMatches = identity.permId != null && row.permId === identity.permId;
-        if (identity.permId != null ? permMatches : orderMatches) candidates.push({ row, own: false });
-      }
-      if (candidates.length === 1) ({ row: o, own } = candidates[0]);
-    }
-    if (!o) return;
-    o.status = status;
-    o.filled = filled;
-    o.remaining = remaining;
-    o.avgFillPrice = avgFillPrice;
-    if (identity.permId != null) o.permId = identity.permId;
-    broadcastOrders();
-    if (!own) return;
-    broadcast({
-      type: 'fill',
-      clientRef: o.clientRef,
+    orderGateway.onOrderStatus(
       orderId,
-      symbol: o.symbol ?? 'SPX', // absent-in-old-rows defaults to SPXW
-      action: o.action,
-      strike: o.strike,
-      right: o.right,
-      expiry: o.expiry,
       status,
       filled,
       remaining,
-      avgFillPrice
-    });
-    if (status === 'Filled' && remaining === 0) {
-      tradeJournal.recordOrderStatus(orderId, o, filled, avgFillPrice);
-      console.log(`[ibkr] FILLED order ${orderId}: ${o.action} ${filled} ${o.strike}${o.right} @ ${avgFillPrice}`);
-    }
+      avgFillPrice,
+      permId,
+      parentId,
+      lastFillPrice,
+      clientId,
+    );
   });
 
   // Executions are the authoritative fill ledger: they arrive live AND can be
@@ -800,22 +715,13 @@ function wireHandlers(api) {
       code: 'DISCONNECTED',
     });
     resetSubscriptions();
-    resetBasisFill();
     ib = null;
     connectedPort = null;
     mktDataTypeSent = false;
     dataDelayed = false;
-    orders.clear();
-    foreignOrders.clear();
+    orderGateway.disconnect();
     orderIdNamespaceSafe = true;
     acctSummaryReqId = null;
-    watchdogState.lastSpxTick = 0;
-    watchdogState.lastEsTick = 0;
-    watchdogState.recentBars = { SPX: [], ES: [] };
-    watchdogState.spxHistRequestedAt = 0;
-    watchdogState.spxHistSeededAt = 0;
-    watchdogState.esHistRequestedAt = 0;
-    watchdogState.esHistSeededAt = 0;
     // Clear both collections in one fail-closed message. portfolioReady=false
     // tells clients that the empty arrays mean "unknown until recovery", not
     // "confirmed flat".
@@ -827,13 +733,25 @@ function wireHandlers(api) {
     if (api !== ib) return;
     ids.observeNextValidId(id);
     console.log(`[ibkr] handshake complete, nextValidId=${id}`);
+    // Every bring-up step below runs isolated: portfolio/kill emits invoke
+    // coordinator listeners INLINE, so one throwing listener used to unwind
+    // this whole handler and silently skip the home-market subscriptions —
+    // seen live 2026-07-15 (empty chain, no ticks, watchdog blind because a
+    // never-ticked source skipped its stale check). markConnected() is stamped
+    // first so the first-tick watchdog reconnects even if everything after
+    // it fails.
+    homeMarket.markConnected();
     ordersReady = false;
     orderIdNamespaceSafe = true;
     openOrderRecoveryPromise = null;
-    killOrderService.reconnect();
     portfolioRecoveryStartedAt = Date.now();
-    setStatus(true);
-    broadcastPortfolio();
+    const step = (name, fn) => {
+      try { fn(); } catch (e) {
+        console.error(`[ibkr] connect bring-up step failed (${name}):`, e?.message || e);
+      }
+    };
+    step('kill-order-service reconnect', () => killOrderService.reconnect());
+    step('status broadcast', () => { setStatus(true); broadcastPortfolio(); });
     if (!mktDataTypeSent) {
       try {
         api.reqMarketDataType(MARKET_DATA_TYPE);
@@ -843,16 +761,11 @@ function wireHandlers(api) {
       }
     }
     try { api.reqManagedAccts(); } catch {}
-    portfolio.beginInitialSync();            // authoritative positions for all accounts
+    step('portfolio initial sync', () => portfolio.beginInitialSync()); // authoritative positions for all accounts
     try { api.reqExecutions(nextRequestId(), {}); } catch {} // backfill fills missed while disconnected
-    requestAccountSummary();                 // funds / buying power
-    subscribeSpx();
-    requestSpxHistory();
-    subscribeSpyVolume();    // SPY real-time bars → volume proxy for SPX
-    requestSpyVolHistory();  // backfill SPY per-minute volume
-    subscribeVix();
-    resolveEs();          // contractDetails -> subscribe ES + history
-    evaluateSession();    // establish currentExpiry (chain subscribes once a price arrives)
+    step('account summary', () => requestAccountSummary());  // funds / buying power
+    step('home-market subscriptions', () => homeMarket.start()); // SPX/ES/VIX/SPY subs + history seeds
+    step('session evaluation', () => evaluateSession()); // establish currentExpiry (chain subscribes once a price arrives)
   });
 
   // TWS reports the type actually served per subscription (1 live, 2 frozen,
@@ -860,12 +773,13 @@ function wireHandlers(api) {
   // Only the SPX sub drives the flag: it sits on the entitlement 10197 takes
   // away, and per-farm mixes (e.g. CME live while CBOE delayed) must not flap it.
   api.on(EventName.marketDataType, (reqId, mdType) => {
-    if (subs.get(reqId)?.kind !== 'spx') return;
+    if (!homeMarket.ownsSpxSub(reqId)) return;
     setDelayed(mdType === 3 || mdType === 4);
   });
 
   api.on(EventName.tickPrice, (tickerId, field, value) => {
     if (quoteService.onTickPrice(tickerId, field, value)) return;
+    if (homeMarket.onTickPrice(tickerId, field, value)) return;
     const s = subs.get(tickerId);
     if (!s) return;
     // 4=LAST, 9=CLOSE, 68=DELAYED_LAST, 75=DELAYED_CLOSE; 1/2=BID/ASK, 66/67=DELAYED_BID/ASK.
@@ -879,26 +793,7 @@ function wireHandlers(api) {
       else if (field === 9 || field === 75) s.close = value;
       return;
     }
-    if (s.kind === 'spx') {
-      if (!(value > 0)) return;
-      if (field === 4 || field === 68) feedSpxTick(value);
-      else if ((field === 9 || field === 75) && spxPrice == null) feedSpxTick(value);
-    } else if (s.kind === 'es') {
-      if (!(value > 0)) return;
-      if (field === 4 || field === 68) feedEsTick(value);
-      else if ((field === 9 || field === 75) && esPrice == null) feedEsTick(value);
-    } else if (s.kind === 'option') {
-      const entry = chain.get(s.key);
-      if (!entry || entry.expiry !== currentExpiry || value < 0) return; // -1 = no quote
-      if (field === 1 || field === 66) { entry.bid = value; entry.bidTs = entry.tickTs = Date.now(); broadcast(chainPayload(entry)); }
-      else if (field === 2 || field === 67) { entry.ask = value; entry.askTs = entry.tickTs = Date.now(); broadcast(chainPayload(entry)); }
-      else if (field === 6 || field === 72) { entry.dayHigh = value; broadcast(chainPayload(entry)); }
-      else if (field === 7 || field === 73) { entry.dayLow = value; broadcast(chainPayload(entry)); }
-    } else if (s.kind === 'vix') {
-      if (!(value > 0)) return;
-      if (field === 4 || field === 68) { vixLast = value; broadcastVix(); }
-      else if (field === 9 || field === 75) { vixClose = value; broadcastVix(); }
-    } else if (s.kind === 'guest-stk') {
+    if (s.kind === 'guest-stk') {
       const resource = guestResourceForSub(s, api);
       if (!resource || value <= 0) return;
       if (field === 4 || field === 68) feedGuestTick(resource, value);
@@ -928,6 +823,9 @@ function wireHandlers(api) {
       if (quoteService.onTickOptionComputation(
         tickerId, tickType, iv, delta, optPrice, _pvDiv, gamma, vega, theta, undPrice,
       )) return;
+      if (homeMarket.onTickOptionComputation(
+        tickerId, tickType, iv, delta, optPrice, _pvDiv, gamma, vega, theta, undPrice,
+      )) return;
       const s = subs.get(tickerId);
       if (!s) return;
       if (tickType !== 13 && tickType !== 53) return; // MODEL_OPTION / DELAYED_MODEL_OPTION
@@ -940,22 +838,12 @@ function wireHandlers(api) {
         entry.premium = optPrice; entry.delta = delta; entry.gamma = gamma;
         entry.theta = theta; entry.vega = vega; entry.iv = iv;
         publishGuestResource(resource, guestChainPayload(entry));
-        return;
       }
-      if (s.kind !== 'option') return;
-      const entry = chain.get(s.key);
-      if (!entry || entry.expiry !== currentExpiry) return; // stale (post-roll) ticks
-      entry.premium = optPrice;
-      entry.delta = delta;
-      entry.gamma = gamma;
-      entry.theta = theta;
-      entry.vega = vega;
-      entry.iv = iv;
-      broadcast(chainPayload(entry));
     }
   );
 
   api.on(EventName.contractDetails, (reqId, details) => {
+    if (homeMarket.onContractDetails(reqId, details)) return;
     const s = subs.get(reqId);
     if (!s) return;
     if (s.kind === 'guest-cd') {
@@ -964,20 +852,6 @@ function wireHandlers(api) {
       return;
     }
     if (s.kind === 'watch-cd') { subs.delete(reqId); onWatchContractDetails(s, details); return; }
-    if (s.kind !== 'es-cd' || esContract) return;
-    const c = details.contract;
-    esContract = {
-      conId: c.conId,
-      symbol: 'ES',
-      secType: 'FUT',
-      exchange: c.exchange || 'CME',
-      currency: c.currency || 'USD',
-      multiplier: c.multiplier
-    };
-    esExpiry = String(c.lastTradeDateOrContractMonth || '').slice(0, 8);
-    console.log(`[ibkr] ES front month: ${c.localSymbol} (${esExpiry}) conId=${c.conId}`);
-    subscribeEs();
-    requestEsHistory();
   });
 
   api.on(EventName.contractDetailsEnd, (reqId) => {
@@ -1042,6 +916,7 @@ function wireHandlers(api) {
     // One IB event router, one on-demand history owner. Live seeds/basis/guest
     // histories continue through the coordinator branches below.
     if (historyService.handleData(reqId, time, open, high, low, close, volume)) return;
+    if (homeMarket.onHistoricalData(reqId, time, open, high, low, close, volume)) return;
     const s = subs.get(reqId);
     if (!s) return;
     if (s.kind === 'guest-hist') {
@@ -1052,245 +927,30 @@ function wireHandlers(api) {
       if (typeof time === 'string' && time.startsWith('finished')) {
         subs.delete(reqId);
         resource.historyReqId = null;
-        s.series.edge = nextCandleEdge(Date.now());
-        if (resource.price == null && s.series.candles.length) resource.price = s.series.candles[s.series.candles.length - 1].close;
+        finishHistoricalSeed(resource.series, s.bars, { maxCandles: GUEST_HISTORY_CANDLES });
+        const candles = resource.series.candles;
+        if (resource.price == null && candles.length) resource.price = candles[candles.length - 1].close;
         if (resource.expiry != null && resource.price != null && resource.chain.size === 0) {
           resource.strikeStep = deriveStrikeStep(resource.strikes, resource.price);
           setGuestChain(resource);
         }
         publishGuestResource(resource, guestMsg(resource));
-        console.log(`[ibkr] guest ${resource.symbol} history seed complete (${s.series.candles.length} bars)`);
+        console.log(`[ibkr] guest ${resource.symbol} history seed complete (${candles.length} bars)`);
         return;
       }
       const t = parseHistTime(time);
       if (t != null) {
-        s.series.candles.push({ t, open, high, low, close, volume: Math.max(volume, 0) });
-        if (s.series.candles.length > GUEST_HISTORY_CANDLES) s.series.candles = s.series.candles.slice(-GUEST_HISTORY_CANDLES);
+        s.bars.push({ t, open, high, low, close, volume: Math.max(volume, 0) });
+        if (s.bars.length > GUEST_HISTORY_CANDLES) s.bars = s.bars.slice(-GUEST_HISTORY_CANDLES);
       }
       return;
     }
-    if (s.kind === 'basis-fill-spx' || s.kind === 'basis-fill-es') {
-      if (typeof time === 'string' && time.startsWith('finished')) {
-        subs.delete(reqId);
-        finishBasisFill();
-        return;
-      }
-      const t = parseHistTime(time);
-      if (t == null || !basisFill.target) return;
-      if (t === basisFill.target.closeMs - 60_000) {
-        if (s.kind === 'basis-fill-spx') basisFill.spxBarClose = close;
-        else basisFill.esBarClose = close;
-      }
-      return;
-    }
-    if (s.kind === 'spy-hist') {
-      if (typeof time === 'string' && time.startsWith('finished')) {
-        subs.delete(reqId);
-        applySpyVolumeToSpx();
-        broadcast(snapshotMsg());
-        console.log(`[ibkr] SPY volume seed complete (${spyVol.size} minutes)`);
-        return;
-      }
-      const t = parseHistTime(time);
-      if (t != null) spyVol.set(t, Math.max(volume, 0));
-      return;
-    }
-    const series = s.kind === 'spx-hist' ? spx : s.kind === 'es-hist' ? es : null;
-    if (!series) return;
-    if (typeof time === 'string' && time.startsWith('finished')) {
-      finishHistoricalSeed(series, s.bars, { maxCandles: HISTORY_CANDLES });
-      const lastClose = series.candles.length ? series.candles[series.candles.length - 1].close : null;
-      if (s.kind === 'spx-hist' && spxPrice == null) spxPrice = lastClose;
-      if (s.kind === 'es-hist' && esPrice == null) { esPrice = lastClose; ensureOvernightBasis(); }
-      if (s.kind === 'spx-hist') watchdogState.spxHistSeededAt = Date.now();
-      if (s.kind === 'es-hist') watchdogState.esHistSeededAt = Date.now();
-      if (s.kind === 'spx-hist') applySpyVolumeToSpx(); // SPY volume may already be seeded
-      broadcast(snapshotMsg());
-      console.log(`[ibkr] ${s.kind} seed complete (${series.candles.length} bars)`);
-      maybeBackfillBasis(); // a missed 4:00 capture may now be reconstructable
-      return;
-    }
-    const t = parseHistTime(time);
-    if (t == null) return;
-    s.bars.push({ t, open, high, low, close, volume: Math.max(volume, 0) });
-    if (s.bars.length > HISTORY_CANDLES) s.bars = s.bars.slice(-HISTORY_CANDLES);
   });
 
   // SPY real-time bars (5 s) → accumulate per-minute share volume for the SPX proxy.
   api.on(EventName.realtimeBar, (reqId, time, open, high, low, close, volume) => {
-    const s = subs.get(reqId);
-    if (!s || s.kind !== 'spy-rtbar') return;
-    const bucket = Math.floor((time * 1000) / CANDLE_MS) * CANDLE_MS; // `time` is epoch seconds
-    spyVol.set(bucket, (spyVol.get(bucket) || 0) + Math.max(volume, 0));
-    // Reflect onto the current SPX candle so the live volume bar grows in real time.
-    const last = spx.candles[spx.candles.length - 1];
-    if (last && last.t === bucket) last.volume = spyVol.get(bucket);
+    homeMarket.onRealtimeBar(reqId, time, open, high, low, close, volume);
   });
-}
-
-// ── Subscriptions ───────────────────────────────────────────────────────────
-
-function subscribeSpx() {
-  if (!ib) return;
-  const reqId = nextRequestId();
-  subs.set(reqId, { kind: 'spx' });
-  try {
-    ib.reqMktData(reqId, { symbol: 'SPX', secType: 'IND', exchange: 'CBOE', currency: 'USD' }, '', false, false, []);
-  } catch (e) {
-    console.log('[ibkr] SPX reqMktData failed:', e.message);
-  }
-}
-
-// Sum SPY volume across the 1-min buckets a candle spans, [t, t+spanMs). For the
-// 1-min series this is just the single bucket; for tf-hist it rolls them up.
-function spyVolForRange(t, spanMs = CANDLE_MS) {
-  let v = 0;
-  for (let b = Math.floor(t / CANDLE_MS) * CANDLE_MS; b < t + spanMs; b += CANDLE_MS) {
-    const m = spyVol.get(b);
-    if (m != null) v += m;
-  }
-  return v;
-}
-
-// Repaint SPY volume onto the SPX 1-min candles — called after either the SPX or
-// the SPY history seed lands, since they can arrive in either order.
-function applySpyVolumeToSpx() {
-  for (const c of spx.candles) {
-    const v = spyVol.get(c.t);
-    if (v != null) c.volume = v;
-  }
-}
-
-function subscribeSpyVolume() {
-  if (!ib) return;
-  const reqId = nextRequestId();
-  subs.set(reqId, { kind: 'spy-rtbar' });
-  try {
-    ib.reqRealTimeBars(reqId, SPY_CONTRACT, 5, 'TRADES', false, []);
-  } catch (e) {
-    console.log('[ibkr] SPY reqRealTimeBars failed:', e.message);
-  }
-}
-
-function requestSpyVolHistory() {
-  if (!ib) return;
-  const reqId = nextRequestId();
-  subs.set(reqId, { kind: 'spy-hist' });
-  try {
-    ib.reqHistoricalData(reqId, SPY_CONTRACT, '', '2 D', '1 min', 'TRADES', 1, 2, false);
-  } catch (e) {
-    console.log('[ibkr] SPY reqHistoricalData failed:', e.message);
-  }
-}
-
-function subscribeVix() {
-  if (!ib) return;
-  const reqId = nextRequestId();
-  subs.set(reqId, { kind: 'vix' });
-  try {
-    ib.reqMktData(reqId, { symbol: 'VIX', secType: 'IND', exchange: 'CBOE', currency: 'USD' }, '', false, false, []);
-  } catch (e) {
-    console.log('[ibkr] VIX reqMktData failed:', e.message);
-  }
-}
-
-function broadcastVix() {
-  broadcast({ type: 'vix', last: vixLast, close: vixClose });
-}
-
-function requestSpxHistory() {
-  if (!ib) return;
-  spx.candles = []; // fresh seed — avoid stacking duplicates on reconnect/re-seed
-  watchdogState.spxHistRequestedAt = Date.now();
-  watchdogState.spxHistSeededAt = 0;
-  const reqId = nextRequestId();
-  subs.set(reqId, { kind: 'spx-hist', bars: [] });
-  try {
-    ib.reqHistoricalData(
-      reqId,
-      { symbol: 'SPX', secType: 'IND', exchange: 'CBOE', currency: 'USD' },
-      '', '2 D', '1 min', 'TRADES', 1, 2, false
-    );
-  } catch (e) {
-    console.log('[ibkr] SPX reqHistoricalData failed:', e.message);
-  }
-}
-
-function resolveEs() {
-  if (!ib) return;
-  const reqId = nextRequestId();
-  subs.set(reqId, { kind: 'es-cd' });
-  try {
-    // CONTFUT can't stream, but contractDetails on it resolves the front-month FUT.
-    ib.reqContractDetails(reqId, { symbol: 'ES', secType: 'CONTFUT', exchange: 'CME', currency: 'USD' });
-  } catch (e) {
-    console.log('[ibkr] ES reqContractDetails failed:', e.message);
-  }
-}
-
-function subscribeEs() {
-  if (!ib || !esContract) return;
-  const reqId = nextRequestId();
-  subs.set(reqId, { kind: 'es' });
-  try {
-    ib.reqMktData(reqId, esContract, '', false, false, []);
-  } catch (e) {
-    console.log('[ibkr] ES reqMktData failed:', e.message);
-  }
-}
-
-function requestEsHistory() {
-  if (!ib || !esContract) return;
-  es.candles = []; // fresh seed — avoid stacking duplicates on reconnect/re-seed
-  watchdogState.esHistRequestedAt = Date.now();
-  watchdogState.esHistSeededAt = 0;
-  const reqId = nextRequestId();
-  subs.set(reqId, { kind: 'es-hist', bars: [] });
-  try {
-    // useRTH=0 to include the overnight Globex session.
-    ib.reqHistoricalData(reqId, esContract, '', '2 D', '1 min', 'TRADES', 0, 2, false);
-  } catch (e) {
-    console.log('[ibkr] ES reqHistoricalData failed:', e.message);
-  }
-}
-
-// ── Tick handling, candles, basis ─────────────────────────────────────────────
-
-function feedSeries(series, price, source) {
-  return feedCandleSeries(series, price, {
-    maxCandles: HISTORY_CANDLES + 32,
-    onNewBar: (now) => watchdogState.recentBars[source].push(now),
-  });
-}
-
-function feedSpxTick(price) {
-  spxPrice = price;
-  watchdogState.lastSpxTick = Date.now();
-  // Only build SPX cash candles during RTH, when cash actually trades. Overnight,
-  // IBKR occasionally emits a stray/frozen SPX print; before this guard it became
-  // a phantom 1-tick candle — a lone dash floating above the ES proxy once the
-  // overnight+RTH merge started showing SPX bars overnight. spxPrice still updates
-  // (the basis capture and displayPrice read it); we just don't make a bar.
-  if (session.source === 'SPX') {
-    const candle = feedSeries(spx, price, 'SPX');
-    candle.volume = spyVol.get(candle.t) || 0; // SPX has no volume of its own — show SPY's
-    broadcast({ type: 'tick', source: 'SPX', price: spxPrice, candle: { ...candle, src: 'SPX' } });
-  }
-  maybeRecenterChain(displayPrice());
-  checkArmedOrders();
-}
-
-function feedEsTick(price) {
-  esPrice = price;
-  watchdogState.lastEsTick = Date.now();
-  const candle = feedSeries(es, price, 'ES');
-  ensureOvernightBasis();
-  if (session.source === 'ES') {
-    const b = effectiveBasis();
-    broadcast({ type: 'tick', source: 'ES', price: esPrice - b, candle: shiftCandle(candle, b) });
-  }
-  maybeRecenterChain(displayPrice());
-  checkArmedOrders();
 }
 
 // Watchdog: every 15s, check for (a) stalled mkt-data for the active source and
@@ -1315,473 +975,22 @@ function watchdogTick() {
     return;
   }
 
-  if (session.source === 'SPX' && session.rth && watchdogState.lastSpxTick &&
-      now - watchdogState.lastSpxTick > SPX_STALE_MS) {
-    console.log(`[watchdog] SPX feed stalled ${Math.round((now - watchdogState.lastSpxTick) / 1000)}s — reconnecting`);
-    lastWatchdogAction = now;
-    try { ib.disconnect(); } catch {}
-    return;
-  }
-  if (session.source === 'ES' && watchdogState.lastEsTick &&
-      now - watchdogState.lastEsTick > ES_STALE_MS) {
-    console.log(`[watchdog] ES feed stalled ${Math.round((now - watchdogState.lastEsTick) / 1000)}s — reconnecting`);
-    lastWatchdogAction = now;
-    try { ib.disconnect(); } catch {}
-    return;
-  }
-  for (const source of ['SPX', 'ES']) {
-    const recent = watchdogState.recentBars[source].filter((t) => now - t < 60_000);
-    watchdogState.recentBars[source] = recent;
-    if (recent.length > BAR_RUNAWAY) {
-      console.log(`[watchdog] ${source} candle runaway (${recent.length} bars/min) — reconnecting`);
-      lastWatchdogAction = now;
-      watchdogState.recentBars = { SPX: [], ES: [] };
-      try { ib.disconnect(); } catch {}
-      return;
-    }
-  }
-
-  // History-seed stall: HMDS can silently no-reply on slow days. If a request
-  // went out but "finished" never arrived within HIST_SEED_TIMEOUT_MS, re-issue.
-  // We don't disconnect for this — just retry the historical request itself.
-  if (watchdogState.spxHistRequestedAt &&
-      watchdogState.spxHistSeededAt < watchdogState.spxHistRequestedAt &&
-      now - watchdogState.spxHistRequestedAt > HIST_SEED_TIMEOUT_MS) {
-    console.log('[watchdog] spx-hist seed stalled — re-requesting');
-    lastWatchdogAction = now;
-    requestSpxHistory();
-    return;
-  }
-  if (esContract && watchdogState.esHistRequestedAt &&
-      watchdogState.esHistSeededAt < watchdogState.esHistRequestedAt &&
-      now - watchdogState.esHistRequestedAt > HIST_SEED_TIMEOUT_MS) {
-    console.log('[watchdog] es-hist seed stalled — re-requesting');
-    lastWatchdogAction = now;
-    requestEsHistory();
-  }
+  // Home-market feed-stall / candle-runaway / history-seed-stall checks (SPX/ES
+  // ticks, the bar-runaway monitor, and hist re-requests) are owned by the
+  // controller. It performs at most one action per call (reconnect via the
+  // injected requestReconnect, or a preserve-live hist re-request) and reports
+  // whether it acted so the single shared throttle stays honest.
+  if (homeMarket.watchdog(now)) lastWatchdogAction = now;
 }
 setInterval(watchdogTick, 15_000);
 
-// Authoritative basis: a SIMULTANEOUS snapshot of live ES and live SPX taken at
-// 4:00 PM ET. Both feeds are live at the cash close, so this is a true ES−SPX
-// reading (not ES settlement at 4:15, and not ES-vs-stale-SPX-close). Captured
-// once per day; frozen and applied to every overnight ES tick. Evaluated on the
-// 5s session timer, so it fires within a few seconds of 4:00.
-function captureCloseBasis() {
-  const e = etParts();
-  const mins = e.hh * 60 + e.mm;
-  const today = ymd(e.y, e.mo, e.d);
-  // session.rth is true only on weekdays in [09:30, 16:15); gate to the close window.
-  // Freshness guard: if a watchdog-driven reconnect lands just before 4:00 PM
-  // the cached esPrice/spxPrice can be stale ticks from before the stall.
-  // Capturing them would freeze a wrong basis for the next session, so we
-  // defer until a fresh tick (< 30 s old) is available on each leg. The 5-s
-  // session timer keeps retrying through the 16:00–16:15 window.
-  const now = Date.now();
-  const spxFresh = watchdogState.lastSpxTick && now - watchdogState.lastSpxTick < 30_000;
-  const esFresh = watchdogState.lastEsTick && now - watchdogState.lastEsTick < 30_000;
-  if (session.rth && mins >= BASIS_CAPTURE_MIN && basisCaptureDate !== today &&
-      esPrice != null && spxPrice != null && spxFresh && esFresh) {
-    basis = esPrice - spxPrice;
-    basisFrozen = true;
-    basisEstimated = false;
-    basisCaptureDate = today;
-    basisEsExpiry = esExpiry; // the front month this basis is valid for
-    esClose = esPrice;
-    spxClose = spxPrice;
-    saveBasis();
-    console.log(`[ibkr] 4:00 PM basis captured = ${basis.toFixed(2)} (ES ${esPrice.toFixed(2)} − SPX ${spxPrice.toFixed(2)}, simultaneous, ${esExpiry})`);
-  }
-}
-
-// Resolve the cold-start basis, preferring real information over the literal:
-//   1. an explicit COLD_START_BASIS env override (operator knows best);
-//   2. the most recent persisted 4:00 capture — basis, or recomputed from the
-//      persisted ES/SPX closes. Even days-stale, the real premium tracks the
-//      price level far better than a fixed constant. (loadBasis already restores
-//      a trusted capture into `basis`, so this path is the belt-and-braces case
-//      where the file was rejected but still carries usable closes.)
-//   3. the literal constant — only when nothing at all is known.
-function coldStartBasis() {
-  if (COLD_START_BASIS_ENV != null && Number.isFinite(COLD_START_BASIS_ENV)) {
-    return { value: COLD_START_BASIS_ENV, from: 'env override' };
-  }
-  try {
-    const d = JSON.parse(fs.readFileSync(BASIS_FILE, 'utf8'));
-    // Only trust a real 4:00 capture (mirror loadBasis); ignore a persisted estimate.
-    if (typeof d.basis === 'number' && !d.basisEstimated) {
-      return { value: d.basis, from: 'persisted 4:00 capture' };
-    }
-    if (typeof d.esClose === 'number' && typeof d.spxClose === 'number') {
-      return { value: d.esClose - d.spxClose, from: 'persisted ES/SPX closes' };
-    }
-  } catch { /* no/old cache file */ }
-  return { value: COLD_START_BASIS_LITERAL, from: 'literal default' };
-}
-
-// Cold-start fallback: server started overnight with no trusted basis loaded.
-// Seed from coldStartBasis() and apply it to live ES. Replaced by the next 4:00
-// capture (or the backfill, which heals a stale value once SPX bars are available).
-function ensureOvernightBasis() {
-  if (!session.rth && basis == null && esPrice != null) {
-    const cs = coldStartBasis();
-    basis = cs.value;
-    basisEstimated = true;
-    basisFrozen = true;
-    saveBasis();
-    console.log(`[ibkr] cold-start basis = ${basis.toFixed(2)} (${cs.from}). SPX-equiv = ES − ${basis.toFixed(2)}. The next 4:00 capture replaces it.`);
-  }
-}
-
-// Basis backfill: if the 4:00 PM live capture was missed (e.g. delayed data
-// while a competing live session held the data line through the close), the
-// persisted snapshot silently goes a day stale — the header daily change and
-// expired-position settlement marks then measure against the wrong day's close.
-// Reconstruct the snapshot from the 1-min bars that close at 16:00 ET: the bar
-// closes of both legs are near-simultaneous, so this matches a live capture to
-// within ticks. Tries the seeded series first; falls back to a targeted 2-min
-// history request when the close minute fell outside the seed windows (the ES
-// seed keeps only the last 480 bars).
-let basisFillInFlight = false;
-let basisFillTimer = null;
-const basisFill = { target: null, spxBarClose: null, esBarClose: null };
-
-// Same-day audit of the live 16:00 capture. The capture is one tick-pair from
-// the most violent minute of the day; on a fast close the SPX print lags the
-// market and the frozen basis lands points wrong (24 pts on 2026-06-26). The
-// old guard below returned early whenever a same-day capture existed — so a bad
-// grab stamped the day and shielded itself from the corrective bar backfill.
-// Now the first backfill pass of the day runs even with a capture in hand and
-// arbitrates: agree within tolerance → keep the capture; disagree → adopt the
-// better witness. Once per day (barring restarts, which harmlessly re-audit).
-let basisAuditDate = null;
-let basisAuditWaitUntil = null; // grace window while waiting for the options arbiter
-const BASIS_AUDIT_TOLERANCE = 2.0; // pts — normal capture-vs-bar jitter is well under 0.5
-
-function maybeBackfillBasis() {
-  if (basisFillInFlight || !ib || !connected) return;
-  const target = lastCloseEt();
-  if (!target) return;
-  // A basis is stale if it's from an earlier day, an estimate, OR was measured
-  // against a different ES contract than the one we now stream. The last case is
-  // the front-month roll (e.g. ESM6 → ESU6): the calendar contract jumps ~60–80
-  // pts over the prior month, so a basis frozen on the old contract overstates
-  // SPX-equiv by the whole roll spread until re-derived. esExpiry==null (old
-  // cache, unknown contract) also re-derives, to be safe. Guard on esExpiry being
-  // resolved so we never invalidate before the front month is known.
-  const contractStale = !!esExpiry && basisEsExpiry !== esExpiry;
-  const current = basisCaptureDate === target.ymd && !basisEstimated && !contractStale;
-  if (current && basisAuditDate === target.ymd) return; // captured AND bar-audited
-  // Audit mode, strongest witness first: with a fresh options-implied basis in
-  // hand, arbitrate against parity directly — no bar fetch at all (HMDS goes
-  // quiet overnight and a silently dead request used to strand the audit).
-  if (current && !session.rth && basisLiveFresh()) {
-    basisAuditDate = target.ymd;
-    if (Math.abs(basisLive - basis) <= BASIS_AUDIT_TOLERANCE) {
-      console.log(`[ibkr] 4:00 basis audit ok: capture ${basis.toFixed(2)} vs options parity ${basisLive.toFixed(2)} — keeping the capture`);
-      return;
-    }
-    console.log(`[ibkr] 4:00 basis audit OVERRIDE: capture ${basis.toFixed(2)} vs options parity ${basisLive.toFixed(2)} (Δ ${(basis - basisLive).toFixed(2)}) — the live grab likely froze a lagging print; adopting the options value`);
-    basis = basisLive;
-    basisFrozen = true;
-    basisEstimated = false;
-    basisCaptureDate = target.ymd;
-    if (esExpiry) basisEsExpiry = esExpiry;
-    saveBasis();
-    broadcast(snapshotMsg());
-    return;
-  }
-  // No qualifying chain yet: hold a 45 s grace WINDOW (not a one-shot flag —
-  // both the SPX and ES seed completions call in here seconds apart, and a flag
-  // lets the second caller barge through to the bar witness while the chain is
-  // still warming). A dead chain — pre-8:15 GTH, weekend — just means the timed
-  // retry lands on the 15:59 bars, which is the correct fallback.
-  if (current && !session.rth) {
-    if (basisAuditWaitUntil == null) {
-      basisAuditWaitUntil = Date.now() + 45_000;
-      setTimeout(maybeBackfillBasis, 46_000);
-      return;
-    }
-    if (Date.now() < basisAuditWaitUntil) return; // inside the grace window — the timer retries
-    // window expired with no qualifying chain → fall through to the bar witness
-  }
-  if (contractStale) {
-    basisEstimated = true; // honest header until the re-derivation below lands
-    console.log(`[ibkr] basis contract roll detected (was ${basisEsExpiry ?? 'unknown'}, now ${esExpiry}) — re-deriving against the current front month`);
-  }
-  const barT = target.closeMs - 60_000; // 1-min bar covering 15:59–16:00 ET
-  const spxBar = spx.candles.find((c) => c.t === barT);
-  const esBar = es.candles.find((c) => c.t === barT);
-  if (spxBar && esBar) {
-    applyBackfilledBasis(target, spxBar.close, esBar.close, 'seeded');
-    return;
-  }
-  basisFillInFlight = true;
-  basisFill.target = target;
-  basisFill.spxBarClose = spxBar ? spxBar.close : null;
-  basisFill.esBarClose = esBar ? esBar.close : null;
-  const end = histEndUtc(target.closeMs);
-  if (basisFill.spxBarClose == null) {
-    requestCloseBar('basis-fill-spx', { symbol: 'SPX', secType: 'IND', exchange: 'CBOE', currency: 'USD' }, end, 1);
-  }
-  if (basisFill.esBarClose == null) {
-    if (!esContract) { resetBasisFill(); return; } // can't fetch the ES leg yet
-    requestCloseBar('basis-fill-es', esContract, end, 0);
-  }
-  // HMDS can silently no-reply (or error without a finished event) — don't let
-  // a dead request pin the in-flight flag forever.
-  clearTimeout(basisFillTimer);
-  basisFillTimer = setTimeout(resetBasisFill, 60_000);
-}
-
-function requestCloseBar(kind, contract, end, useRth) {
-  const reqId = nextRequestId();
-  subs.set(reqId, { kind });
-  try {
-    ib.reqHistoricalData(reqId, contract, end, '120 S', '1 min', 'TRADES', useRth, 2, false);
-  } catch (e) {
-    console.log(`[ibkr] ${kind} reqHistoricalData failed:`, e.message);
-  }
-}
-
-// IBKR endDateTime in instant form: "YYYYMMDD-HH:MM:SS" (UTC).
-function histEndUtc(ms) {
-  const d = new Date(ms);
-  const p = (n) => String(n).padStart(2, '0');
-  return `${d.getUTCFullYear()}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}-${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`;
-}
-
-function finishBasisFill() {
-  // Two legs may finish at different times — wait until no basis-fill request remains.
-  for (const s of subs.values()) {
-    if (s.kind === 'basis-fill-spx' || s.kind === 'basis-fill-es') return;
-  }
-  const t = basisFill.target;
-  if (t && basisFill.spxBarClose != null && basisFill.esBarClose != null) {
-    applyBackfilledBasis(t, basisFill.spxBarClose, basisFill.esBarClose, 'fetched');
-  } else if (t) {
-    console.log(`[ibkr] basis backfill for ${t.ymd}: 16:00 close bars unavailable (spx=${basisFill.spxBarClose}, es=${basisFill.esBarClose})`);
-  }
-  resetBasisFill();
-}
-
-function resetBasisFill() {
-  clearTimeout(basisFillTimer);
-  basisFillTimer = null;
-  basisFillInFlight = false;
-  basisFill.target = null;
-  basisFill.spxBarClose = null;
-  basisFill.esBarClose = null;
-  for (const [reqId, s] of [...subs]) {
-    if (s.kind === 'basis-fill-spx' || s.kind === 'basis-fill-es') subs.delete(reqId);
-  }
-}
-
-function applyBackfilledBasis(target, spxBarClose, esBarClose, how) {
-  const barBasis = esBarClose - spxBarClose;
-  const haveCapture = basisCaptureDate === target.ymd && !basisEstimated &&
-    (!esExpiry || basisEsExpiry === esExpiry);
-  if (haveCapture) {
-    basisAuditDate = target.ymd;
-    // Arbiter: a fresh options-implied basis is the strongest witness (parity is
-    // arbitrage-enforced and lag-immune); the 15:59 close bars are next-best.
-    const optionsFresh = !session.rth && basisLiveFresh();
-    const arbiter = optionsFresh ? basisLive : barBasis;
-    const witness = optionsFresh ? 'options parity' : `15:59 bars (ES ${esBarClose.toFixed(2)} − SPX ${spxBarClose.toFixed(2)})`;
-    if (Math.abs(arbiter - basis) <= BASIS_AUDIT_TOLERANCE) {
-      console.log(`[ibkr] 4:00 basis audit ok: capture ${basis.toFixed(2)} vs ${witness} ${arbiter.toFixed(2)} — keeping the capture`);
-      return;
-    }
-    console.log(`[ibkr] 4:00 basis audit OVERRIDE: capture ${basis.toFixed(2)} vs ${witness} ${arbiter.toFixed(2)} (Δ ${(basis - arbiter).toFixed(2)}) — the live grab likely froze a lagging print; adopting the ${optionsFresh ? 'options' : 'bar'} value`);
-    basis = arbiter;
-  } else {
-    basis = barBasis;
-    basisAuditDate = target.ymd; // freshly bar-derived — no separate audit needed
-  }
-  basisFrozen = true;
-  basisEstimated = false;
-  basisCaptureDate = target.ymd;
-  basisEsExpiry = esExpiry; // re-derived against the current front month
-  esClose = esBarClose;
-  spxClose = spxBarClose;
-  saveBasis();
-  console.log(`[ibkr] 4:00 basis backfilled (${how} bars, ${target.ymd}, ${esExpiry}) = ${basis.toFixed(2)} (ES ${esBarClose.toFixed(2)} − SPX ${spxBarClose.toFixed(2)})`);
-  broadcast(snapshotMsg());
-}
-
 // ── Options-implied live basis (overnight) ──────────────────────────────────
-// The frozen 4 PM basis is one tick-pair grabbed in the most violent minute of
-// the day — twice in five days (2026-06-26 recon, 2026-07-01 quarter turn) a
-// lagging close print froze it points wrong and the whole overnight chart read
-// off by that much. Overnight the SPXW chain trades live, and put-call parity
-// gives the true forward model-free — so keep a chain-anchored basis fresh and
-// prefer it; the frozen snapshot stays as the fallback, the daily-change
-// reference, and the cold-start seed.
-let basisLive = null;   // esPrice − optionsForward; never persisted
-let basisLiveTs = 0;    // Date.now() of the last good recompute
-const BASIS_LIVE_FRESH_MS = 30_000;    // trust window after a good recompute
+// The overnight recompute owner is the home-market controller (it holds the live
+// ES price + the active-expiry chain the parity math needs). It feeds the basis
+// controller on this cadence and re-levels the chart the moment the applied basis
+// flips. See spec-options-implied-basis.md.
 const BASIS_LIVE_THROTTLE_MS = 2_000;  // recompute cadence
-
-function basisLiveFresh() {
-  return basisLive != null && Date.now() - basisLiveTs < BASIS_LIVE_FRESH_MS;
-}
-
-// The number every overnight conversion uses: fresh options-implied when the
-// chain qualifies, else the frozen 4 PM capture (which coldStartBasis already
-// seeds when nothing better is known). RTH never reaches here for the price
-// (source is SPX cash), and the !rth guard keeps a lingering basisLive from
-// touching an RTH-built bar.
-function effectiveBasis() {
-  if (!session.rth && basisLiveFresh()) return basisLive;
-  return basis ?? 0;
-}
-
-function recomputeOptionsBasis() {
-  if (session.rth || esPrice == null || currentExpiry == null) return;
-  const frozenEstimate = esPrice - (basis ?? 0);
-  const f = computeOptionsForward(
-    [...chain.values()].filter((e) => e.expiry === currentExpiry),
-    // Anchor the strike band on the best current estimate so it survives a bad
-    // frozen basis; sanity-check against the frozen estimate so a corrupt or
-    // wrong-expiry chain can't drag the price somewhere wild.
-    { anchor: esPrice - effectiveBasis(), sanityAnchor: frozenEstimate }
-  );
-  if (!f) return; // fallback: effectiveBasis() degrades to frozen after the fresh window
-  if (!basisLiveFresh()) {
-    console.log(`[ibkr] options-implied basis live = ${(esPrice - f.forward).toFixed(2)} (fwd ${f.forward.toFixed(2)}, ${f.n} strikes; frozen ${basis == null ? 'none' : basis.toFixed(2)})`);
-  }
-  basisLive = esPrice - f.forward;
-  basisLiveTs = Date.now();
-}
-
-// Drive the recompute and re-level the chart the moment the applied basis flips
-// options↔frozen in either direction (a good chain appearing, or quotes going
-// quiet/stale) — otherwise old candles keep the previous level until the next
-// incidental snapshot broadcast.
-let basisLiveWasFresh = false;
-setInterval(() => {
-  recomputeOptionsBasis();
-  const fresh = !session.rth && basisLiveFresh();
-  if (fresh !== basisLiveWasFresh) {
-    basisLiveWasFresh = fresh;
-    if (!fresh) console.log('[ibkr] options-implied basis stale/unavailable — falling back to frozen');
-    broadcast(snapshotMsg());
-  }
-}, BASIS_LIVE_THROTTLE_MS);
-
-// Shift a raw ES bar into SPX-equivalent (minus the applied basis) and tag it as
-// the ES proxy. `est` carries whether the applied basis is itself an estimate
-// (cold start / mid-roll) so the chart can mark it as a proxy-on-an-estimate —
-// a fresh options-implied basis is chain-anchored, not an estimate.
-function shiftCandle(c, b) {
-  return { t: c.t, open: c.open - b, high: c.high - b, low: c.low - b, close: c.close - b, volume: c.volume, src: 'ES', est: basisEstimated && !basisLiveFresh() };
-}
-
-// SPX-equivalent price for the active source.
-function displayPrice() {
-  if (session.source === 'SPX') return spxPrice;
-  if (esPrice == null) return null;
-  return esPrice - effectiveBasis();
-}
-
-function displayCandles() {
-  const b = effectiveBasis();
-  // ALWAYS merge the overnight ES proxy (shifted to SPX-equiv) with the RTH SPX
-  // cash bars, in every session — so the full continuous history stays visible
-  // even overnight (previously overnight returned ES-only and the day's RTH bars
-  // vanished after 16:15, so you couldn't scroll back to them). Merge by timestamp;
-  // real SPX cash wins on collisions. ES-proxy bars carry src:'ES' so the chart can
-  // dim them and the client can hide them via the Show-overnight toggle.
-  const byT = new Map();
-  for (const c of es.candles) byT.set(c.t, shiftCandle(c, b));
-  for (const c of spx.candles) byT.set(c.t, { ...c, src: 'SPX' }); // real cash wins
-  return [...byT.values()].sort((a, b) => a.t - b.t);
-}
-
-// ── Option chain ──────────────────────────────────────────────────────────────
-
-function maybeRecenterChain(price) {
-  // Paused while a guest is active — the SPXW chain is the market-data line hog,
-  // so it yields the lines to the guest chain. SPX/ES/VIX index ticks and all
-  // basis machinery keep running; only the chain sleeps. Restored on deactivate.
-  if (spxwChainPaused) return;
-  if (price == null || currentExpiry == null) return;
-  const center = Math.round(price / STRIKE_STEP) * STRIKE_STEP;
-  if (chainCenter == null || Math.abs(center - chainCenter) >= STRIKE_STEP * RECENTRE_THRESHOLD) {
-    setChain(center);
-    chainCenter = center;
-  }
-}
-
-// Pause/restore the SPXW chain subscriptions (guest activate/deactivate). Cancels
-// the option mkt-data subs to free the lines; keeps `currentExpiry` so the roll
-// logic is untouched. Restoring re-subscribes at the current price. Consequence:
-// while paused overnight, the options-implied basis has no chain to qualify, so
-// effectiveBasis() falls back to the frozen 4 PM capture — acceptable, and
-// basisSource already reports 'frozen'/'estimated' honestly.
-let spxwChainPaused = false;
-function pauseSpxwChain() {
-  spxwChainPaused = true;
-  for (const [key, entry] of chain.entries()) {
-    if (ib) { try { ib.cancelMktData(entry.reqId); } catch {} }
-    subs.delete(entry.reqId);
-    chain.delete(key);
-  }
-  chainCenter = null; // force a full re-subscribe on restore
-}
-function restoreSpxwChain() {
-  spxwChainPaused = false;
-  maybeRecenterChain(displayPrice());
-}
-
-function setChain(center) {
-  if (!ib || currentExpiry == null) return;
-  const want = new Set();
-  for (let i = -CHAIN_HALF_WIDTH; i <= CHAIN_HALF_WIDTH; i++) want.add(center + i * STRIKE_STEP);
-
-  for (const [key, entry] of chain.entries()) {
-    if (!want.has(entry.strike)) {
-      try { ib.cancelMktData(entry.reqId); } catch {}
-      subs.delete(entry.reqId);
-      chain.delete(key);
-    }
-  }
-
-  for (const strike of want) {
-    for (const right of ['C', 'P']) {
-      const key = `${strike}${right}`;
-      if (chain.has(key)) continue;
-      const reqId = nextRequestId();
-      const entry = { reqId, strike, right, expiry: currentExpiry };
-      chain.set(key, entry);
-      subs.set(reqId, { kind: 'option', strike, right, key });
-      try {
-        ib.reqMktData(
-          reqId,
-          {
-            symbol: 'SPX', secType: 'OPT', exchange: 'SMART', currency: 'USD',
-            lastTradeDateOrContractMonth: currentExpiry, strike, right,
-            multiplier: '100', tradingClass: 'SPXW'
-          },
-          '', false, false, []
-        );
-      } catch (e) {
-        console.log(`[ibkr] reqMktData ${strike}${right} failed:`, e.message);
-      }
-    }
-  }
-}
-
-function rebuildChainForExpiry(exp) {
-  for (const [key, entry] of chain.entries()) {
-    if (ib) { try { ib.cancelMktData(entry.reqId); } catch {} }
-    subs.delete(entry.reqId);
-    chain.delete(key);
-  }
-  currentExpiry = exp;
-  chainCenter = null; // force re-subscribe
-  maybeRecenterChain(displayPrice());
-}
+setInterval(() => homeMarket.recomputeTick(), BASIS_LIVE_THROTTLE_MS);
 
 // ── Guest-symbol lifecycle ───────────────────────────────────────────────────
 
@@ -2009,7 +1218,7 @@ function onGuestContractDetails(resource, _sub, details) {
     primaryExch: c.primaryExch || c.exchange || undefined,
     currency: c.currency || 'USD',
   };
-  if (!spxwChainPaused) pauseSpxwChain();
+  if (!homeMarket.isChainPaused()) homeMarket.pauseChain();
   resource.pausedHome = true;
   if (!subscribeGuestStock(resource)) return;
   requestGuestHistory(resource);
@@ -2037,7 +1246,12 @@ function requestGuestHistory(resource) {
   try {
     const reqId = nextRequestId();
     resource.historyReqId = reqId;
-    subs.set(reqId, guestSub(resource, 'guest-hist', { series: resource.series }));
+    // Stage history rows in `bars` and merge at completion (like the home
+    // spx/es-hist path). The live series keeps receiving first-tick ticks while
+    // this request is in flight; pushing history straight into it left the
+    // authoritative array non-monotonic with a duplicated current-minute bucket.
+    // `series` stays the resource-generation guard reference.
+    subs.set(reqId, guestSub(resource, 'guest-hist', { series: resource.series, bars: [] }));
     resource.api.reqHistoricalData(reqId, resource.contract, '', '2 D', '1 min', 'TRADES', 1, 2, false);
   } catch (error) {
     if (resource.historyReqId != null) subs.delete(resource.historyReqId);
@@ -2155,10 +1369,10 @@ function teardownGuestResource(resource, _reason) {
 }
 
 function maybeRestoreSpxwChain() {
-  if (!spxwChainPaused || !ib || !connected) return;
+  if (!homeMarket.isChainPaused() || !ib || !connected) return;
   if (guestRegistry.snapshot().resources.length !== 0) return;
   if ([...guestResources.values()].some((resource) => !resource.stopped)) return;
-  restoreSpxwChain();
+  homeMarket.restoreChain();
 }
 
 function handleGuestRequestError(api, reqId, code, error) {
@@ -2305,6 +1519,7 @@ function guestMsg(resource) {
       greeks,
       expiry: resource.expiry,
       strikeStep: resource.strikeStep,
+      strikes: resource.strikes,
       expirations: resource.expirations,
       secType: 'STK',
       settlement: 'physical',
@@ -2425,51 +1640,235 @@ function watchQuotesMsg() {
   return { type: 'watchlistQuotes', quotes };
 }
 
-// ── ⚔ Armed orders ─────────────────────────────────────────────────────────
-// {type:'armed', orders:[...]} → wholesale set (the watchlist pattern): the
-// client owns the list and re-sends on (re)connect. Every order is
-// re-validated server-side; anything already fired this session is refused so
-// a stale client list can't re-arm a spent trigger.
-function handleArmed(_ws, msg) {
-  const list = Array.isArray(msg.orders) ? msg.orders.slice(0, ARMED_MAX) : [];
-  if (killRoutingLocked || reverseRoutingLocked) {
-    armedOrders = [];
-    armedPrevPrice = null;
-    if (list.length) broadcast({ type: 'armedCleared', reason: killRoutingLocked ? 'KILL transaction active' : 'REVERSE transaction active' });
-    return;
+// ── ⚔ Durable armed-order authority ────────────────────────────────────────
+
+function currentArmedExpiry() {
+  return homeMarket.getCurrentExpiry() || session.expiry;
+}
+
+function publicArmedState() {
+  return armedStateStore?.publicState() ?? null;
+}
+
+function armedContractIsMonitored(order, expiry) {
+  if (homeMarket.isChainPaused()) return false;
+  const entry = order && typeof order.strike === 'number'
+    && (order.right === 'C' || order.right === 'P')
+    ? homeMarket.getChainEntry(`${order.strike}${order.right}`)
+    : null;
+  return !!entry && entry.expiry === expiry;
+}
+
+function validateStoredArmedOrder(order, { expiry, source } = {}) {
+  const liveMutation = source === 'create' || source === 'add' || source === 'retarget';
+  return validateArmedOrder(order, {
+    price: liveMutation ? homeMarket.displayPrice() : null,
+    expiry,
+    // A persisted row is structurally validated before the chain has started;
+    // CREATE/ADD must name an exact row monitored right now.
+    contractAvailable: liveMutation ? armedContractIsMonitored(order, expiry) : undefined,
+  });
+}
+
+function broadcastArmedState(extra = {}) {
+  const state = publicArmedState();
+  if (!state) return false;
+  return broadcast({ type: 'armedState', ...state, ...extra });
+}
+
+function ensureArmedStateStore(account = portfolio.publicSnapshot().account) {
+  if (armedStateStore) return armedStateStore;
+  const expiry = currentArmedExpiry();
+  if (!account || !expiry) return null;
+  armedStateStore = createArmedStateStore({
+    file: ARMED_STATE_FILE,
+    initialAccount: account,
+    initialExpiry: expiry,
+    maxOrders: ARMED_MAX,
+    validateOrder: validateStoredArmedOrder,
+    deriveAddQuantity: (order, delta) => addArmedOrderQuantity(order, delta),
+    deriveRetarget: (order, patch) => retargetArmedOrder(order, patch),
+  });
+  const state = publicArmedState();
+  if (state.phase === ARMED_STATE_BLOCKED) {
+    console.error(`[ibkr] armed authority BLOCKED: ${state.error || 'persisted state is not trustworthy'}; staged KILL is required before routing resumes`);
+  } else {
+    syncArmedAuthorityAnchor({ reason: 'bridge authority initialized' });
   }
-  const px = displayPrice();
-  const next = [];
-  for (const raw of list) {
-    if (raw && armedFiredIds.has(String(raw.id))) {
-      broadcast({ type: 'armedRejected', id: String(raw.id), reason: 'already fired this session' });
-      continue;
+  broadcastArmedState();
+  return armedStateStore;
+}
+
+function clearReadyArmedState({ nextAccount, nextExpiry, reason, notify = true } = {}) {
+  const before = publicArmedState();
+  if (!before || before.phase !== ARMED_STATE_READY) return { ok: false, reason: before?.error || 'armed authority unavailable' };
+  const result = armedStateStore.clearInternal({
+    lineageId: before.lineageId,
+    account: before.account,
+    expiry: before.expiry,
+    baseRevision: before.revision,
+    baseDigest: before.digest,
+    nextAccount: nextAccount || before.account,
+    nextExpiry: nextExpiry || before.expiry,
+  });
+  if (!result.ok) {
+    broadcastArmedState();
+    return result;
+  }
+  armedPrevPrice = null;
+  broadcastArmedState();
+  if (notify) {
+    for (const order of before.orders) {
+      broadcast({ type: 'armedFailed', ...order, reason: reason || 'disarmed by bridge authority change' });
     }
-    const exactChainEntry = typeof raw?.strike === 'number'
-      && (raw?.right === 'C' || raw?.right === 'P')
-      ? chain.get(`${raw.strike}${raw.right}`)
-      : null;
-    // An empty, unpaused chain is a transient reconnect/startup unknown, not
-    // proof that a persisted arm names a missing contract. A guest-paused
-    // chain is known unavailable; once initialized, anything outside the exact
-    // monitored SPXW row is also rejected immediately.
-    const contractAvailable = spxwChainPaused
-      ? false
-      : chain.size === 0
-        ? undefined
-        : !!exactChainEntry && exactChainEntry.expiry === currentExpiry;
-    const v = validateArmedOrder(raw, {
-      price: px,
-      expiry: currentExpiry,
-      contractAvailable,
+  }
+  return result;
+}
+
+function syncArmedAuthorityAnchor({ reason = 'armed authority changed' } = {}) {
+  const state = publicArmedState();
+  const selectedAccount = portfolio.publicSnapshot().account;
+  const expiry = currentArmedExpiry();
+  if (!state || state.phase !== ARMED_STATE_READY || !selectedAccount || !expiry) return false;
+
+  // An expired authorization can never become today's contract. Clear it
+  // durably; an active state belonging to another account stays visible but is
+  // fenced from its watcher until explicitly disarmed or that account returns.
+  if (state.expiry !== expiry) {
+    const result = clearReadyArmedState({
+      nextAccount: selectedAccount,
+      nextExpiry: expiry,
+      reason: `${reason}: expiry rolled — disarmed`,
     });
-    if (v.ok) next.push(v.armed);
-    else broadcast({ type: 'armedRejected', id: raw?.id != null ? String(raw.id) : null, reason: v.reason });
+    return result.ok;
   }
-  armedOrders = next;
-  if (next.length) {
-    console.log(`[ibkr] ⚔ armed: ${next.map((a) => `${a.strike}${a.right} @ ${a.level}${a.dir === 'up' ? '↑' : '↓'}`).join(' · ')}`);
+  if (state.orders.length === 0 && state.account !== selectedAccount) {
+    const result = clearReadyArmedState({
+      nextAccount: selectedAccount,
+      nextExpiry: expiry,
+      reason,
+      notify: false,
+    });
+    return result.ok;
   }
+  if (state.orders.length && state.account !== selectedAccount) {
+    console.error(`[ibkr] armed authority belongs to ${state.account}; selected account ${selectedAccount} cannot watch or increase it`);
+  }
+  return true;
+}
+
+function rejectArmedCommand(ws, msg, code, reason, state = publicArmedState()) {
+  return sendWs(ws, {
+    type: 'armedCommandRejected',
+    protocol: 1,
+    requestId: typeof msg?.requestId === 'string' ? msg.requestId : null,
+    code,
+    reason,
+    currentState: state,
+  });
+}
+
+function handleArmedCommand(ws, msg) {
+  const store = ensureArmedStateStore();
+  if (!store) return rejectArmedCommand(ws, msg, 'NO_AUTHORITY', 'no selected account is available for armed authority');
+  if (msg?.protocol !== 1) return rejectArmedCommand(ws, msg, 'PROTOCOL_MISMATCH', 'armed protocol 1 is required');
+
+  const operationType = msg?.operation?.type;
+  if (operationType === 'CREATE' || operationType === 'ADD_QTY' || operationType === 'RETARGET') {
+    const state = publicArmedState();
+    const selectedAccount = portfolio.publicSnapshot().account;
+    const expiry = currentArmedExpiry();
+    if (killRoutingLocked || reverseRoutingLocked) {
+      return rejectArmedCommand(
+        ws,
+        msg,
+        'ROUTING_LOCKED',
+        killRoutingLocked ? 'KILL transaction active' : 'REVERSE transaction active',
+      );
+    }
+    if (!executionReady()) {
+      return rejectArmedCommand(ws, msg, 'EXECUTION_DISABLED', 'account/order/position authority is not ready');
+    }
+    if (state?.phase !== ARMED_STATE_READY || state.account !== selectedAccount || state.expiry !== expiry) {
+      return rejectArmedCommand(ws, msg, 'AUTHORITY_MISMATCH', 'armed authority does not match the selected account and current expiry');
+    }
+    if (!Number.isFinite(homeMarket.displayPrice())) {
+      return rejectArmedCommand(ws, msg, 'NO_MARKET_PRICE', 'no current SPX-equivalent price is available');
+    }
+  } else if (operationType !== 'DISARM') {
+    return rejectArmedCommand(ws, msg, 'INVALID_OPERATION', 'unsupported armed operation');
+  }
+
+  const result = store.compareAndCommit(msg);
+  if (!result.ok) {
+    // Persistence failure changes the public phase to BLOCKED. Tell every tab
+    // immediately; only the requesting tab also receives command correlation.
+    if (result.state?.phase === ARMED_STATE_BLOCKED) broadcastArmedState();
+    return rejectArmedCommand(ws, msg, result.code || 'REJECTED', result.reason || 'armed command refused', result.state);
+  }
+
+  // A retarget moves the level; drop the crossing witness so the moved trigger
+  // establishes a fresh previous price on the next tick and can never fire
+  // retroactively off pre-move price history (same reset the reconnect/clear
+  // paths use).
+  if (operationType === 'RETARGET' && result.ok && !result.duplicate) armedPrevPrice = null;
+  broadcastArmedState({ appliedRequestId: msg.requestId });
+  const committed = result.state.orders;
+  console.log(`[ibkr] ⚔ authority r${result.state.revision}: ${committed.length ? committed.map((order) => `${order.qty}× ${order.strike}${order.right} @ ${order.level}${order.dir === 'up' ? '↑' : '↓'}`).join(' · ') : 'empty'}`);
+  // After the final disarm, an old-account empty state can safely move to the
+  // selected account/current expiry. Broadcast ordering lets the requesting
+  // client first prove its exact mutation, then adopt the re-anchor.
+  if (committed.length === 0) syncArmedAuthorityAnchor({ reason: 'empty authority re-anchored' });
+  return true;
+}
+
+function handleLegacyArmedCommand(ws, msg) {
+  const reason = 'armed protocol upgraded — re-arm explicitly from the current chart';
+  if (msg.type === 'armed' && Array.isArray(msg.orders)) {
+    for (const raw of msg.orders.slice(0, ARMED_MAX)) {
+      sendWs(ws, {
+        type: 'armedFailed',
+        id: raw?.id != null ? String(raw.id) : null,
+        strike: raw?.strike,
+        right: raw?.right,
+        reason,
+      });
+    }
+    sendWs(ws, { type: 'armedCleared', reason });
+  } else {
+    sendWs(ws, {
+      type: 'armedQtyRejected',
+      id: msg?.id ?? null,
+      delta: msg?.delta ?? null,
+      reason,
+    });
+  }
+  const state = publicArmedState();
+  if (state) sendWs(ws, { type: 'armedState', ...state });
+}
+
+function clearArmedAuthorityForKill() {
+  const account = portfolio.publicSnapshot().account;
+  const expiry = currentArmedExpiry();
+  const store = ensureArmedStateStore(account);
+  if (!store || !account || !expiry) throw new Error('armed authority cannot be cleared without an exact account and expiry');
+  const before = publicArmedState();
+  const result = before.phase === ARMED_STATE_BLOCKED
+    ? store.recoverBlocked({ nextAccount: account, nextExpiry: expiry })
+    : store.clearInternal({
+      lineageId: before.lineageId,
+      account: before.account,
+      expiry: before.expiry,
+      baseRevision: before.revision,
+      baseDigest: before.digest,
+      nextAccount: account,
+      nextExpiry: expiry,
+    });
+  if (!result.ok) throw new Error(result.reason || 'armed authority clear could not be persisted');
+  armedPrevPrice = null;
+  broadcastArmedState();
+  broadcast({ type: 'armedCleared', reason: 'KILL transaction' });
+  return true;
 }
 
 function handleKill(ws, msg) {
@@ -2595,7 +1994,7 @@ function resolveReverseRequest(ws, msg) {
     if (guestRegistry.getClientContext(ws)) {
       return { ok: false, reason: 'return this browser to the SPX cockpit before reversing SPX' };
     }
-    if (source.leg.expiry !== currentExpiry) {
+    if (source.leg.expiry !== homeMarket.getCurrentExpiry()) {
       return { ok: false, reason: 'REVERSE expiry must match the active SPX cockpit expiry' };
     }
     sourceContract = spxwContract(source.leg.strike, source.leg.right, source.leg.expiry);
@@ -2692,6 +2091,21 @@ function handleReverse(ws, msg) {
     return send(terminal);
   }
 
+  // Exits armed on the source contract must be durably gone before the
+  // reverse close leg goes out; a still-armed row after the flip would act
+  // on the wrong book. Undisarmable READY rows fail the REVERSE closed.
+  const exitDisarm = disarmArmedExitsForContract({
+    strike: resolved.source?.strike,
+    right: resolved.source?.right,
+    expiry: resolved.source?.expiry,
+    reason: 'REVERSE transaction',
+  });
+  if (!exitDisarm.ok) {
+    const terminal = reject('EXIT_DISARM_FAILED', 'armed exits on this position could not be disarmed');
+    reverseRequestRegistry.commit(reservation.token, terminal);
+    return null;
+  }
+
   reverseCoordinator.start({
     requestId,
     source: resolved.source,
@@ -2718,24 +2132,51 @@ function handleReverse(ws, msg) {
 // First tick after any gap only primes the previous price — a level crossed
 // during a blackout never fires retroactively.
 function checkArmedOrders() {
-  const px = displayPrice();
+  const px = homeMarket.displayPrice();
   if (px == null) return;
   const prev = armedPrevPrice;
   armedPrevPrice = px;
+  const state = publicArmedState();
+  if (!state || state.phase !== ARMED_STATE_READY) return;
   if (killRoutingLocked || reverseRoutingLocked) return;
-  if (prev == null || prev === px || armedOrders.length === 0) return;
-  for (const a of [...armedOrders]) {
-    if (!armedTriggered(a, prev, px)) continue;
+  const selectedAccount = portfolio.publicSnapshot().account;
+  const expiry = currentArmedExpiry();
+  // Keep the crossing witness current through recovery/locks/account changes,
+  // but never consume a crossing from an authority that cannot route now.
+  if (!executionReady() || state.account !== selectedAccount || state.expiry !== expiry) return;
+  if (prev == null || prev === px || state.orders.length === 0) return;
+  for (const candidate of state.orders) {
+    if (!armedTriggered(candidate, prev, px)) continue;
+    const current = publicArmedState();
+    const live = current?.orders.find((order) => order.id === candidate.id);
+    if (!live || !armedTriggered(live, prev, px)) continue;
+    const removal = armedStateStore.removeInternal({
+      id: live.id,
+      lineageId: current.lineageId,
+      account: current.account,
+      expiry: current.expiry,
+      baseRevision: current.revision,
+      baseDigest: current.digest,
+    });
+    if (!removal.ok) {
+      broadcastArmedState();
+      broadcast({
+        type: 'armedFailed',
+        ...live,
+        reason: `authority persistence failed — trigger did not fire${removal.reason ? `: ${removal.reason}` : ''}`,
+      });
+      continue;
+    }
+    // Durable removal is the one-shot boundary. Route only the exact canonical
+    // row returned by that committed transition—not a pre-write snapshot.
+    const a = removal.removedOrder;
+    broadcastArmedState();
     let result;
     try {
       result = fireArmedOrder(a, px);
     } catch (error) {
       result = { accepted: false, reason: error?.message || String(error) };
     }
-    // One-shot means accepted or visibly failed once. Prune only after routing
-    // has returned a synchronous disposition, never before claiming FIRED.
-    armedOrders = armedOrders.filter((x) => x.id !== a.id);
-    armedFiredIds.add(a.id);
     if (result?.accepted === true) {
       broadcast({ type: 'armedFired', ...a, price: px, ask: result.ask, orderId: result.orderId });
     } else {
@@ -2744,14 +2185,16 @@ function checkArmedOrders() {
   }
 }
 
-// Fire = exactly an amber ⚡ at the moment of crossing: qty 1, marketable
-// limit at the live ask + tick, refuses without a fresh ask, and inherits the
-// quick auto-cancel (unfilled 10s → dead). Routed through handleOrderRequest
+// Fire = exactly an amber ⚡ at the moment of crossing: canonical armed qty
+// with a marketable limit at the live ask + tick. It refuses without a fresh
+// ask and inherits the quick cancellation request for any live remainder after
+// 10 seconds. Routed through the order gateway
 // so every existing guard (executionEnabled, account gate, ack flow) applies;
 // the fake socket only mutes the direct reply — broadcasts still reach every
 // client.
 function fireArmedOrder(a, px) {
-  const entry = chain.get(`${a.strike}${a.right}`);
+  const currentExpiry = homeMarket.getCurrentExpiry();
+  const entry = homeMarket.getChainEntry(`${a.strike}${a.right}`);
   const fresh = entry && entry.expiry === currentExpiry && entry.ask > 0 &&
     entry.askTs != null && Date.now() - entry.askTs < 60_000;
   if (a.expiry && currentExpiry && a.expiry !== currentExpiry) {
@@ -2765,16 +2208,348 @@ function fireArmedOrder(a, px) {
   }
   const tick = entry.ask < 3 ? 0.05 : 0.10;
   const limit = Math.round((entry.ask + tick) * 100) / 100;
-  const disposition = handleOrderRequest({ readyState: 0 }, {
+  const disposition = orderGateway.placeOrderRequest({ readyState: 0 }, {
     clientRef: `armed:${a.id}`, intent: 'open', action: 'BUY',
-    strike: a.strike, right: a.right, qty: 1, expiry: a.expiry || currentExpiry,
+    strike: a.strike, right: a.right, qty: a.qty, expiry: a.expiry || currentExpiry,
     limit, quick: true, refAtSend: entry.ask
   });
   if (disposition?.accepted !== true) {
     return { accepted: false, reason: disposition?.reason || 'bridge refused the armed order' };
   }
-  console.log(`[ibkr] ⚔ FIRED ${a.strike}${a.right}: ${px.toFixed(2)} crossed ${a.level} → BUY 1 @ ≤${limit}`);
+  console.log(`[ibkr] ⚔ FIRED ${a.strike}${a.right}: ${px.toFixed(2)} crossed ${a.level} → BUY ${a.qty} @ ≤${limit}`);
   return { accepted: true, orderId: disposition.orderId, ask: entry.ask };
+}
+
+// ── ⚔̸ Durable armed-exit authority (spec-armed-exits.md) ────────────────────
+// The mirror of the entry book: pre-authorized exits on exact open long SPX
+// positions that fire when the displayed price crosses their level. CLOSE
+// fires a fresh-bid marketable limit (reduce-only via the gateway, never MKT,
+// no ⚡ auto-cancel — a resting exit beats a silently naked position); TRAIL
+// attaches the regular typed-$ trailing stop through the same order path the
+// position card uses. Fail closed at fire: the one-shot is consumed first and
+// every fence failure reports instead of degrading.
+
+function publicArmedExitState() {
+  return armedExitStateStore?.publicState() ?? null;
+}
+
+// Authoritative open quantity/side for one exact home-expiry SPX option.
+// Returns null while position truth is not ready (fences fail closed on it).
+function armedExitOpenPosition({ strike, right, expiry } = {}) {
+  const snapshot = portfolio.publicSnapshot();
+  if (!snapshot.positionsReady) return null;
+  let qty = 0;
+  for (const row of snapshot.positions) {
+    const c = row?.contract;
+    if (!c || String(c.secType ?? '').toUpperCase() !== 'OPT') continue;
+    if (String(c.symbol ?? '').trim().toUpperCase() !== 'SPX') continue;
+    if (String(c.lastTradeDateOrContractMonth ?? '').slice(0, 8) !== expiry) continue;
+    if (Number(c.strike) !== strike) continue;
+    const r = String(c.right ?? '').trim().toUpperCase().charAt(0);
+    if (r !== right) continue;
+    qty += Number(row.qty) || 0;
+  }
+  return { openQty: qty > 0 ? qty : 0, side: qty > 0 ? 'long' : qty < 0 ? 'short' : 'flat' };
+}
+
+function broadcastArmedExitState(extra = {}) {
+  const state = publicArmedExitState();
+  if (!state) return false;
+  return broadcast({ type: 'armedExitState', ...state, ...extra });
+}
+
+function ensureArmedExitStore(account = portfolio.publicSnapshot().account) {
+  if (armedExitStateStore) return armedExitStateStore;
+  const expiry = currentArmedExpiry();
+  if (!account || !expiry) return null;
+  armedExitStateStore = createArmedExitStateStore({
+    file: ARMED_EXIT_STATE_FILE,
+    initialAccount: account,
+    initialExpiry: expiry,
+    liveContext: (raw) => {
+      const truth = armedExitOpenPosition(raw ?? {});
+      return {
+        price: homeMarket.displayPrice(),
+        // A short/flat contract reports 0 open — arming it is refused. An
+        // unknown truth omits the fence; CREATE is already gated on
+        // executionReady(), which requires the positionEnd barrier.
+        ...(truth ? { openQty: truth.side === 'long' ? truth.openQty : 0 } : {}),
+      };
+    },
+  });
+  const state = publicArmedExitState();
+  if (state.phase === ARMED_STATE_BLOCKED) {
+    console.error(`[ibkr] armed-exit authority BLOCKED: ${state.error || 'persisted state is not trustworthy'}; staged KILL is required before routing resumes`);
+  } else {
+    syncArmedExitAuthorityAnchor({ reason: 'bridge authority initialized' });
+  }
+  broadcastArmedExitState();
+  return armedExitStateStore;
+}
+
+function clearReadyArmedExitState({ nextAccount, nextExpiry, reason, notify = true } = {}) {
+  const before = publicArmedExitState();
+  if (!before || before.phase !== ARMED_STATE_READY) {
+    return { ok: false, reason: before?.error || 'armed-exit authority unavailable' };
+  }
+  const result = armedExitStateStore.clearInternal({
+    lineageId: before.lineageId,
+    account: before.account,
+    expiry: before.expiry,
+    baseRevision: before.revision,
+    baseDigest: before.digest,
+    nextAccount: nextAccount || before.account,
+    nextExpiry: nextExpiry || before.expiry,
+  });
+  if (!result.ok) {
+    broadcastArmedExitState();
+    return result;
+  }
+  armedExitPrevPrice = null;
+  broadcastArmedExitState();
+  if (notify) {
+    for (const exit of before.orders) {
+      broadcast({ type: 'armedExitFailed', ...exit, reason: reason || 'disarmed by bridge authority change' });
+    }
+  }
+  return result;
+}
+
+function syncArmedExitAuthorityAnchor({ reason = 'armed-exit authority changed' } = {}) {
+  const state = publicArmedExitState();
+  const selectedAccount = portfolio.publicSnapshot().account;
+  const expiry = currentArmedExpiry();
+  if (!state || state.phase !== ARMED_STATE_READY || !selectedAccount || !expiry) return false;
+  if (state.expiry !== expiry) {
+    const result = clearReadyArmedExitState({
+      nextAccount: selectedAccount,
+      nextExpiry: expiry,
+      reason: `${reason}: expiry rolled — disarmed`,
+    });
+    return result.ok;
+  }
+  if (state.orders.length === 0 && state.account !== selectedAccount) {
+    const result = clearReadyArmedExitState({
+      nextAccount: selectedAccount,
+      nextExpiry: expiry,
+      reason,
+      notify: false,
+    });
+    return result.ok;
+  }
+  if (state.orders.length && state.account !== selectedAccount) {
+    console.error(`[ibkr] armed-exit authority belongs to ${state.account}; selected account ${selectedAccount} cannot watch or change it`);
+  }
+  return true;
+}
+
+function rejectArmedExitCommand(ws, msg, code, reason, state = publicArmedExitState()) {
+  return sendWs(ws, {
+    type: 'armedExitCommandRejected',
+    protocol: 1,
+    requestId: typeof msg?.requestId === 'string' ? msg.requestId : null,
+    code,
+    reason,
+    currentState: state,
+  });
+}
+
+function handleArmedExitCommand(ws, msg) {
+  const store = ensureArmedExitStore();
+  if (!store) return rejectArmedExitCommand(ws, msg, 'NO_AUTHORITY', 'no selected account is available for armed-exit authority');
+  if (msg?.protocol !== 1) return rejectArmedExitCommand(ws, msg, 'PROTOCOL_MISMATCH', 'armed-exit protocol 1 is required');
+
+  const operationType = msg?.operation?.type;
+  if (operationType === 'CREATE' || operationType === 'RETARGET') {
+    const state = publicArmedExitState();
+    const selectedAccount = portfolio.publicSnapshot().account;
+    const expiry = currentArmedExpiry();
+    if (killRoutingLocked || reverseRoutingLocked) {
+      return rejectArmedExitCommand(
+        ws,
+        msg,
+        'ROUTING_LOCKED',
+        killRoutingLocked ? 'KILL transaction active' : 'REVERSE transaction active',
+      );
+    }
+    if (!executionReady()) {
+      return rejectArmedExitCommand(ws, msg, 'EXECUTION_DISABLED', 'account/order/position authority is not ready');
+    }
+    if (state?.phase !== ARMED_STATE_READY || state.account !== selectedAccount || state.expiry !== expiry) {
+      return rejectArmedExitCommand(ws, msg, 'AUTHORITY_MISMATCH', 'armed-exit authority does not match the selected account and current expiry');
+    }
+    if (!Number.isFinite(homeMarket.displayPrice())) {
+      return rejectArmedExitCommand(ws, msg, 'NO_MARKET_PRICE', 'no current SPX-equivalent price is available');
+    }
+  } else if (operationType !== 'DISARM') {
+    return rejectArmedExitCommand(ws, msg, 'INVALID_OPERATION', 'unsupported armed-exit operation');
+  }
+
+  const result = store.compareAndCommit(msg);
+  if (!result.ok) {
+    if (result.state?.phase === ARMED_STATE_BLOCKED) broadcastArmedExitState();
+    return rejectArmedExitCommand(ws, msg, result.code || 'REJECTED', result.reason || 'armed-exit command refused', result.state);
+  }
+  if (operationType === 'RETARGET' && result.ok && !result.duplicate) armedExitPrevPrice = null;
+  broadcastArmedExitState({ appliedRequestId: msg.requestId });
+  const committed = result.state.orders;
+  console.log(`[ibkr] ⚔̸ exit authority r${result.state.revision}: ${committed.length ? committed.map((exit) => `${exit.action === 'trail' ? `TRL$${exit.trail}` : 'CLOSE'} ${exit.qty}× ${exit.strike}${exit.right} @ ${exit.level}${exit.dir === 'up' ? '↑' : '↓'}`).join(' · ') : 'empty'}`);
+  if (committed.length === 0) syncArmedExitAuthorityAnchor({ reason: 'empty authority re-anchored' });
+  return true;
+}
+
+function clearArmedExitAuthorityForKill() {
+  const account = portfolio.publicSnapshot().account;
+  const expiry = currentArmedExpiry();
+  const store = ensureArmedExitStore(account);
+  if (!store || !account || !expiry) throw new Error('armed-exit authority cannot be cleared without an exact account and expiry');
+  const before = publicArmedExitState();
+  const result = before.phase === ARMED_STATE_BLOCKED
+    ? store.recoverBlocked({ nextAccount: account, nextExpiry: expiry })
+    : store.clearInternal({
+      lineageId: before.lineageId,
+      account: before.account,
+      expiry: before.expiry,
+      baseRevision: before.revision,
+      baseDigest: before.digest,
+      nextAccount: account,
+      nextExpiry: expiry,
+    });
+  if (!result.ok) throw new Error(result.reason || 'armed-exit authority clear could not be persisted');
+  armedExitPrevPrice = null;
+  broadcastArmedExitState();
+  broadcast({ type: 'armedExitCleared', reason: 'KILL transaction' });
+  return true;
+}
+
+// REVERSE flips a position; any exit armed on it would then act on the wrong
+// book. Durably disarm every matching row BEFORE the reverse close leg goes
+// out. READY-but-undisarmable fails the caller closed; a BLOCKED book cannot
+// fire (the watcher requires READY), so it does not block the reverse.
+function disarmArmedExitsForContract({ strike, right, expiry, reason = 'position reversed' } = {}) {
+  const state = publicArmedExitState();
+  if (!state || state.phase !== ARMED_STATE_READY) return { ok: true, disarmed: 0 };
+  const matches = (exit) => exit.strike === strike && exit.right === right && exit.expiry === expiry;
+  let disarmed = 0;
+  for (;;) {
+    const current = publicArmedExitState();
+    if (!current || current.phase !== ARMED_STATE_READY) break;
+    const row = current.orders.find(matches);
+    if (!row) break;
+    const removal = armedExitStateStore.removeInternal({
+      id: row.id,
+      lineageId: current.lineageId,
+      account: current.account,
+      expiry: current.expiry,
+      baseRevision: current.revision,
+      baseDigest: current.digest,
+    });
+    if (!removal.ok) break;
+    disarmed += 1;
+    broadcast({ type: 'armedExitFailed', ...removal.removedOrder, reason });
+  }
+  if (disarmed) broadcastArmedExitState();
+  const after = publicArmedExitState();
+  const remaining = after?.phase === ARMED_STATE_READY ? after.orders.some(matches) : false;
+  return { ok: !remaining, disarmed };
+}
+
+// Runs on every SPX/ES tick beside checkArmedOrders, with its own crossing
+// witness: the first tick after any gap only primes.
+function checkArmedExitOrders() {
+  const px = homeMarket.displayPrice();
+  if (px == null) return;
+  const prev = armedExitPrevPrice;
+  armedExitPrevPrice = px;
+  const state = publicArmedExitState();
+  if (!state || state.phase !== ARMED_STATE_READY) return;
+  if (killRoutingLocked || reverseRoutingLocked) return;
+  const selectedAccount = portfolio.publicSnapshot().account;
+  const expiry = currentArmedExpiry();
+  if (!executionReady() || state.account !== selectedAccount || state.expiry !== expiry) return;
+  if (prev == null || prev === px || state.orders.length === 0) return;
+  for (const candidate of state.orders) {
+    if (!armedExitTriggered(candidate, prev, px)) continue;
+    const current = publicArmedExitState();
+    const live = current?.orders.find((exit) => exit.id === candidate.id);
+    if (!live || !armedExitTriggered(live, prev, px)) continue;
+    const removal = armedExitStateStore.removeInternal({
+      id: live.id,
+      lineageId: current.lineageId,
+      account: current.account,
+      expiry: current.expiry,
+      baseRevision: current.revision,
+      baseDigest: current.digest,
+    });
+    if (!removal.ok) {
+      broadcastArmedExitState();
+      broadcast({
+        type: 'armedExitFailed',
+        ...live,
+        reason: `authority persistence failed — exit did not fire${removal.reason ? `: ${removal.reason}` : ''}`,
+      });
+      continue;
+    }
+    const x = removal.removedOrder;
+    broadcastArmedExitState();
+    let result;
+    try {
+      result = fireArmedExit(x, px);
+    } catch (error) {
+      result = { accepted: false, reason: error?.message || String(error) };
+    }
+    if (result?.accepted === true) {
+      broadcast({ type: 'armedExitFired', ...x, qty: result.qty, price: px, bid: result.bid, orderId: result.orderId });
+    } else {
+      broadcast({ type: 'armedExitFailed', ...x, reason: result?.reason || 'order routing refused the armed exit' });
+    }
+  }
+}
+
+// Fire once the one-shot is durably consumed. Both actions demand a fresh
+// exact bid (no blind fires) and route through the order gateway so every
+// existing guard (reduce-only reservation, account gate, ack flow) applies.
+function fireArmedExit(x, px) {
+  const currentExpiry = homeMarket.getCurrentExpiry();
+  if (x.expiry && currentExpiry && x.expiry !== currentExpiry) {
+    return { accepted: false, reason: 'expiry rolled since arming' };
+  }
+  if (!isPortfolioReady(connected, portfolio.isReady(), ordersReady)) {
+    return { accepted: false, reason: 'portfolio recovery incomplete — refused to fire' };
+  }
+  const truth = armedExitOpenPosition(x);
+  if (!truth) return { accepted: false, reason: 'position truth unavailable — refused to fire' };
+  const plan = planArmedExitFire(x, truth);
+  if (!plan.ok) return { accepted: false, reason: plan.reason };
+  const entry = homeMarket.getChainEntry(`${x.strike}${x.right}`);
+  const fresh = entry && entry.expiry === currentExpiry && entry.bid > 0 &&
+    entry.bidTs != null && Date.now() - entry.bidTs < 60_000;
+  if (!fresh) {
+    return { accepted: false, reason: 'no fresh bid at trigger — refused to fire blind' };
+  }
+  const base = {
+    clientRef: `armedx:${x.id}`,
+    intent: 'close',
+    action: 'SELL',
+    strike: x.strike,
+    right: x.right,
+    qty: plan.qty,
+    expiry: x.expiry || currentExpiry,
+  };
+  let payload;
+  if (x.action === 'trail') {
+    payload = { ...base, trail: x.trail };
+  } else {
+    const tick = entry.bid < 3 ? 0.05 : 0.10;
+    const limit = Math.max(Math.round((entry.bid - tick) * 100) / 100, 0.05);
+    payload = { ...base, limit, refAtSend: entry.bid };
+  }
+  const disposition = orderGateway.placeOrderRequest({ readyState: 0 }, payload);
+  if (disposition?.accepted !== true) {
+    return { accepted: false, reason: disposition?.reason || 'bridge refused the armed exit' };
+  }
+  console.log(`[ibkr] ⚔̸ EXIT FIRED ${x.strike}${x.right}: ${px.toFixed(2)} crossed ${x.level} → ${x.action === 'trail' ? `attach TRAIL $${x.trail}` : 'SELL'} ${plan.qty}× ${x.action === 'trail' ? '' : `@ ≥${payload.limit}`}`);
+  return { accepted: true, orderId: disposition.orderId, bid: entry.bid, qty: plan.qty };
 }
 
 // ── Session evaluation ──────────────────────────────────────────────────────
@@ -2785,16 +2560,13 @@ function evaluateSession() {
   const prevExpiry = session.expiry;
   session = next;
 
-  // Capture the authoritative basis at 4:00 PM (before the 4:15 source flip).
-  captureCloseBasis();
+  // Home-market captures the 4:00 basis (before the 4:15 source flip) and rolls
+  // the SPXW chain on an expiry change; it reads the freshly-set `session`.
+  const { expiryRolled } = homeMarket.onSessionEvaluated();
 
-  if (next.expiry !== currentExpiry) {
-    console.log(`[ibkr] expiry roll -> ${next.expiry}`);
-    rebuildChainForExpiry(next.expiry);
-    // ⚔ armed orders die at the roll — their contract just expired. The client
-    // is told per order so its list (and chart lines) clear too.
-    for (const a of armedOrders) broadcast({ type: 'armedFailed', ...a, reason: 'expiry rolled — disarmed' });
-    armedOrders = [];
+  if (expiryRolled) {
+    syncArmedAuthorityAnchor({ reason: 'session changed' });
+    syncArmedExitAuthorityAnchor({ reason: 'session changed' });
   }
 
   if (next.source !== prevSource || next.expiry !== prevExpiry) {
@@ -2805,17 +2577,17 @@ function evaluateSession() {
   // Overnight just began (16:15/13:15 flip): both series hold today's close bars,
   // so audit the 16:00 live capture against them now — otherwise a bad grab sits
   // unchecked until the next reconnect's history seed.
-  if (prevSource === 'SPX' && next.source === 'ES') maybeBackfillBasis();
+  if (prevSource === 'SPX' && next.source === 'ES') homeMarket.onOvernightSeam();
 }
 
 setInterval(evaluateSession, 5000);
 
 // Retry a missed basis backfill every 5 min (no-op while the snapshot is
 // current). Catches the case where HMDS was still blocked at seed time.
-setInterval(maybeBackfillBasis, 300_000);
+setInterval(() => homeMarket.backfillTick(), 300_000);
 
 // Poll the watchlist with one-shot snapshots on a slow cycle. No-op when the
-// list is empty or disconnected, so it costs nothing until a client stars a symbol.
+// list is empty or disconnected, so it costs nothing until the owner stars a symbol.
 setInterval(pollWatchlist, WATCH_POLL_MS);
 
 // While DELAYED, re-subscribe SPX every 2 min: TWS only re-evaluates the data
@@ -2824,31 +2596,21 @@ setInterval(pollWatchlist, WATCH_POLL_MS);
 // and setDelayed() reconnects to refresh the remaining subscriptions.
 setInterval(() => {
   if (!dataDelayed || !ib || !connected) return;
-  for (const [reqId, s] of [...subs]) {
-    if (s.kind !== 'spx') continue;
-    try { ib.cancelMktData(reqId); } catch {}
-    subs.delete(reqId);
-  }
-  subscribeSpx();
+  homeMarket.resubscribeSpxForDelayed();
 }, 120_000);
 
 // ── Misc ──────────────────────────────────────────────────────────────────────
 
 function resetSubscriptions() {
+  // Home-market owns its subs/chain/candles/esContract/watchdog/basis-fill and
+  // clears them (including the guest-paused SPXW flag) on its own reset.
+  homeMarket.reset();
   subs.clear();
-  chain.clear();
-  chainCenter = null;
-  currentExpiry = null;
-  esContract = null;
-  esExpiry = null;
   // Guest resources were generation-invalidated and torn down before this
   // generic reset. The browser registry remains attached so each tab can replay
   // its exact persisted symbol+conId intent after the next transport handshake.
   guestResources.clear();
   guestPendingStarts.clear();
-  // A guest may have paused the home SPXW chain when the socket dropped;
-  // otherwise the next handshake cannot rebuild SPXW/options-basis after login.
-  spxwChainPaused = false;
   // Watchlist state is not persisted across a reconnect either — its resolved
   // contracts/reqIds were just cleared with everyone else's. Drop the runtime
   // maps and the list; the client re-sends `watchlist` on reconnect from memory.
@@ -2861,6 +2623,7 @@ function resetSubscriptions() {
   // subscription) — but the crossing clock resets, so a level crossed during
   // the blackout can never fire retroactively (first tick back only primes).
   armedPrevPrice = null;
+  armedExitPrevPrice = null;
 }
 
 function setStatus(s) {
@@ -2892,6 +2655,10 @@ function setAccount(id) {
   if (!portfolio.onManagedAccounts(id)) return false;
   const next = portfolio.publicSnapshot();
   if (next.account !== before) {
+    ensureArmedStateStore(next.account);
+    syncArmedAuthorityAnchor({ reason: 'selected account changed' });
+    ensureArmedExitStore(next.account);
+    syncArmedExitAuthorityAnchor({ reason: 'selected account changed' });
     killOrderService.accountChanged(next.account);
     killCoordinator.accountChanged(next.account);
     reverseCoordinator.accountChanged(next.account);
@@ -2927,6 +2694,7 @@ function finishPortfolioRecoveryIfReady() {
 function executionReady() {
   return isPortfolioReady(connected, portfolio.isReady(), ordersReady)
     && orderIdNamespaceSafe
+    && publicArmedState()?.phase === ARMED_STATE_READY
     && !killRoutingLocked
     && !reverseRoutingLocked;
 }
@@ -2994,7 +2762,7 @@ function assertReverseContext(context = {}) {
   const guard = context.guard;
   if (!guard || typeof guard !== 'object') throw new Error('REVERSE context guard is missing');
   if (guard.symbol === 'SPX') {
-    if (guard.expiry !== currentExpiry) throw new Error('SPX expiry changed during REVERSE');
+    if (guard.expiry !== homeMarket.getCurrentExpiry()) throw new Error('SPX expiry changed during REVERSE');
     if (guestRegistry.getClientContext(context.owner)) throw new Error('browser left the SPX cockpit during REVERSE');
     return true;
   }
@@ -3090,25 +2858,20 @@ function placeReverseOpen(plan, context = {}) {
     contract: { ...plan.contract },
     order,
   };
-  const record = {
-    ...parentOrderRecord(normalizedPlan),
-    orderId,
-    orderKey: `client:${IBKR_CLIENT_ID}:order:${orderId}`,
-    clientId: IBKR_CLIENT_ID,
-    cancellable: true,
-    status: 'submitted',
-  };
-  orders.set(orderId, record);
+  // The gateway owns every working-order record, including this one: REVERSE's
+  // reopen must be visible to the same projection and counted by the same
+  // reduce-only exposure model as any other order on this account.
+  orderGateway.recordReverseOpenOrder(orderId, normalizedPlan);
   try {
     ib.placeOrder(orderId, normalizedPlan.contract, order);
   } catch (error) {
     // Once placeOrder begins, a synchronous throw cannot prove that TWS did
     // not receive the target open. Retain both the row and persisted route lock.
-    record.status = 'submission-uncertain';
+    orderGateway.markOrderSubmissionUncertain(orderId);
     const wrapped = new Error(`REVERSE reopen submission is uncertain: ${error?.message || error}`);
     wrapped.code = 'OPEN_SUBMIT_UNCERTAIN';
     wrapped.details = { submissionAttempted: true, orderId, clientRef };
-    try { broadcastOrders(); } catch (broadcastError) {
+    try { orderGateway.publishOrders(); } catch (broadcastError) {
       console.error(`[ibkr] uncertain REVERSE order ${orderId} broadcast failed:`, broadcastError?.message || broadcastError);
     }
     throw wrapped;
@@ -3116,7 +2879,7 @@ function placeReverseOpen(plan, context = {}) {
   // From this point the accepted submission handle is irrevocable. Reporting
   // failures must never make the coordinator believe no order was sent.
   const submission = { orderId, clientRef, qty, action: plan.action, limit, contract: { ...plan.contract } };
-  try { broadcastOrders(); } catch (error) {
+  try { orderGateway.publishOrders(); } catch (error) {
     console.error(`[ibkr] REVERSE order ${orderId} submitted but order broadcast failed:`, error?.message || error);
   }
   try {
@@ -3128,9 +2891,9 @@ function placeReverseOpen(plan, context = {}) {
 function onKillOrderServiceEvent(event) {
   if (!event || typeof event !== 'object') return;
   if (event.type === 'killOrderSnapshotComplete' && event.purpose === 'bridge-recovery') {
-    ordersReady = orderIdNamespaceSafe;
-    finishPortfolioRecoveryIfReady();
-    broadcastPortfolio();
+    // Snapshot completion alone is no longer the readiness boundary. The
+    // awaiting recovery pipeline must first resolve any expired/malformed TTQ1
+    // quick order and, when it cancels one, obtain a second fresh snapshot.
     return;
   }
   if (event.type === 'killOrderSnapshotDesynchronized') {
@@ -3144,35 +2907,10 @@ function onKillOrderServiceEvent(event) {
     return;
   }
   if (event.type !== 'killCloseSubmitted') return;
-  const submission = event.submission;
-  const contract = submission?.contract;
-  const order = submission?.order;
-  const orderId = Number(submission?.orderId);
-  if (!Number.isSafeInteger(orderId) || !contract || !order) return;
-  orders.set(orderId, {
-    clientRef: submission.orderRef || `kill-${orderId}`,
-    orderId,
-    orderKey: `client:${IBKR_CLIENT_ID}:order:${orderId}`,
-    account: String(order.account ?? '').trim() || null,
-    clientId: IBKR_CLIENT_ID,
-    permId: submission.permId ?? null,
-    cancellable: true,
-    symbol: contract.symbol ?? 'SPX',
-    action: order.action,
-    strike: contract.strike,
-    right: contract.right,
-    expiry: String(contract.lastTradeDateOrContractMonth || '').slice(0, 8),
-    qty: order.totalQuantity,
-    orderType: order.orderType,
-    limit: order.lmtPrice ?? null,
-    ocaGroup: order.ocaGroup ?? null,
-    status: submission.status || 'PendingSubmit',
-    filled: submission.filled ?? 0,
-    remaining: Math.max(0, Number(order.totalQuantity) - Number(submission.filled ?? 0)),
-    avgFillPrice: 0,
-    contract: { ...contract },
-  });
-  broadcastOrders();
+  // KILL builds and submits its own close through kill-order-service, but the
+  // resulting row is an ordinary working order on this account. Hand it to the
+  // gateway rather than keeping a second writer of the order map.
+  orderGateway.recordKillCloseOrder(event.submission);
 }
 
 function requestOpenOrderRecovery() {
@@ -3180,7 +2918,39 @@ function requestOpenOrderRecovery() {
   if (ordersReady) return openOrderRecoveryPromise;
   if (openOrderRecoveryPromise) return openOrderRecoveryPromise;
   const owner = ib;
-  const pending = killOrderService.snapshotOpenOrders({ purpose: 'bridge-recovery' })
+  const account = portfolio.publicSnapshot().account;
+  const pending = killOrderService.snapshotOpenOrders({ purpose: 'bridge-recovery', account })
+    .then((rows) => recoverQuickOrders({
+      initialRows: rows,
+      account,
+      clientId: IBKR_CLIENT_ID,
+      isAuthorityCurrent: () => (
+        ib === owner
+        && connected
+        && portfolio.publicSnapshot().account === account
+      ),
+      cancelOrder: (orderId, context) => killOrderService.cancelOrder(orderId, context),
+      waitForCancellations: (orderIds, context) => killOrderService.waitForCancellations(orderIds, context),
+      snapshotOpenOrders: (context) => killOrderService.snapshotOpenOrders(context),
+      report: (event) => {
+        const ids = event?.orderIds ?? (event?.orderId != null ? [event.orderId] : []);
+        console.error(`[ibkr] quick recovery ${event?.type || 'warning'}${ids.length ? ` (${ids.join(', ')})` : ''}: ${event?.reason || 'broker hint unavailable'}`);
+      },
+    }))
+    .then((quickRecovery) => {
+      if (ib !== owner || !connected || portfolio.publicSnapshot().account !== account) {
+        throw new Error('open-order authority changed before readiness commit');
+      }
+      // The proof snapshot establishes only that these exact quick rows are no
+      // longer working, not whether they filled or cancelled. Retire the stale
+      // projection under its original identity; a late exact broker callback
+      // may still refine the neutral terminal status.
+      orderGateway.retireProvenQuickOrders(quickRecovery.provenAbsentRows);
+      ordersReady = orderIdNamespaceSafe;
+      finishPortfolioRecoveryIfReady();
+      broadcastPortfolio();
+      return true;
+    })
     .catch((error) => {
       if (ib === owner && connected) {
         console.error(`[ibkr] open-order recovery failed: ${error?.message || error}`);
@@ -3197,39 +2967,10 @@ function requestOpenOrderRecovery() {
 }
 
 // Working (unfilled, uncanceled) orders — shown on every device so a resting
-// order can always be seen and canceled, even after a page reload.
-const DEAD_ORDER_STATUSES = new Set(['Filled', 'Cancelled', 'ApiCancelled', 'Inactive', 'error']);
-
+// order can always be seen and canceled, even after a page reload. The gateway
+// owns the records and the account scoping; snapshots read its projection.
 function workingOrdersList() {
-  const selectedAccount = portfolio.publicSnapshot().account;
-  const own = [...ordersForAccount(orders, selectedAccount)]
-    .map(([orderId, order]) => ({ mapKey: orderId, order, cancellable: true }));
-  const foreign = [...ordersForAccount(foreignOrders, selectedAccount)]
-    .map(([mapKey, order]) => ({ mapKey, order, cancellable: false }));
-  return [...own, ...foreign]
-    .filter(({ order }) => !DEAD_ORDER_STATUSES.has(order.status))
-    .map(({ mapKey, order: o, cancellable }) => ({
-      orderId: o.orderId ?? (cancellable ? mapKey : null),
-      orderKey: o.orderKey ?? `client:${IBKR_CLIENT_ID}:order:${mapKey}`,
-      clientRef: o.clientRef ?? null,
-      account: o.account,
-      clientId: o.clientId ?? (cancellable ? IBKR_CLIENT_ID : null),
-      permId: o.permId ?? null,
-      cancellable,
-      symbol: o.symbol ?? 'SPX',
-      action: o.action,
-      strike: o.strike,
-      right: o.right,
-      expiry: o.expiry,
-      qty: o.qty,
-      orderType: o.orderType ?? null,
-      limit: o.limit ?? null,
-      status: o.status
-    }));
-}
-
-function broadcastOrders() {
-  broadcast({ type: 'orders', orders: workingOrdersList() });
+  return orderGateway.workingOrdersList();
 }
 
 function broadcastPortfolio() {
@@ -3250,6 +2991,8 @@ function broadcastAccount(state = portfolio.publicSnapshot()) {
     type: 'account',
     account: state.account,
     accountType: state.accountType,
+    accountCount: state.accountCount,
+    accountAmbiguous: state.accountAmbiguous,
     executionEnabled: executionReady(),
   });
 }
@@ -3285,192 +3028,6 @@ function requestAccountSummary() {
   }
 }
 
-// ── Order execution ───────────────────────────────────────────────────────
-
-function handleOrderRequest(ws, msg) {
-  const send = (m) => {
-    if (ws.readyState === 1) {
-      try { ws.send(JSON.stringify(m)); } catch (error) {
-        console.error('[ibkr] order acknowledgement delivery failed:', error?.message || error);
-      }
-    }
-    return m;
-  };
-  const clientRef = msg.clientRef;
-  const reject = (reason) => send({ type: 'orderAck', clientRef, accepted: false, reason });
-  const { account } = portfolio.publicSnapshot();
-  const executionEnabled = executionReady();
-
-  if (!executionEnabled) {
-    const why = 'no executable account connected';
-    return reject(`execution disabled (${why})`);
-  }
-  if (!ib || !connected) return reject('IBKR not connected');
-
-  const guestContext = guestRegistry.getClientContext(ws);
-  const requestedGuest = typeof msg.symbol === 'string' && msg.symbol.toUpperCase() !== 'SPX';
-  const ownedGuest = requestedGuest && guestContext?.symbol === String(msg.symbol).toUpperCase()
-    ? guestContext.resource
-    : null;
-  const plan = planOrderRequest(msg, {
-    currentExpiry,
-    guest: ownedGuest,
-    account,
-    routingLocked: killRoutingLocked || reverseRoutingLocked,
-  });
-  if (!plan.ok) return reject(plan.reason);
-  const {
-    action, right, strike, qty, expiry, orderSymbol, contract, order,
-    isLimit, limit, isStop, stop, isTrail, trail, ocaGroup,
-    wantTp, wantSl, takeProfit, stopLoss, quick,
-  } = plan;
-
-  if (!marketOrderHasFreshAsk(plan, {
-    streamed: chain.get(`${strike}${right}`) ?? null,
-    snapshot: quoteService.peekQuote(contract, { maxAgeMs: 60_000 }),
-  })) {
-    return reject(`MKT refused: no fresh ask for ${strike}${right} ${expiry}`);
-  }
-
-  const reservation = orderRequestRegistry.reserve(clientRef, fingerprintOrderRequest(msg));
-  if (!reservation.ok) {
-    if (reservation.code === 'INVALID_CLIENT_REF') return reject('invalid clientRef');
-    if (reservation.code === 'INVALID_FINGERPRINT') return reject('invalid order payload');
-    if (reservation.code === 'CLIENT_REF_PAYLOAD_MISMATCH') {
-      return send({
-        type: 'orderAck', clientRef, accepted: false, duplicate: true,
-        reason: 'clientRef was already used for a different order payload',
-      });
-    }
-    if (reservation.state === 'committed' && reservation.result) {
-      // Idempotent acknowledgements are point-to-point. Never broadcast one
-      // tab's correlation result to the other connected browsers.
-      return send({ ...reservation.result, duplicate: true });
-    }
-    return send({
-      type: 'orderAck', clientRef, accepted: false, duplicate: true,
-      reason: 'duplicate clientRef already in flight',
-    });
-  }
-
-  // A browser's `intent` label is not authority.  Classify the planned action
-  // against the selected account's exact signed position, reserve every
-  // same-contract close that can still fill (including foreign/recovered
-  // orders), and refuse any combination that could cross through flat.
-  const reduceOnly = assessReduceOnlyOrder({
-    plan,
-    authority: portfolio.positionAuthorityForContract(account, contract),
-    orders: [...orders.values(), ...foreignOrders.values()],
-  });
-  if (!reduceOnly.ok) {
-    orderRequestRegistry.release(reservation.token);
-    return reject(reduceOnly.reason);
-  }
-
-  let orderId;
-  try {
-    orderId = nextOrderId();
-  } catch (error) {
-    orderRequestRegistry.release(reservation.token);
-    return reject(`order ID unavailable: ${error?.message || error}`);
-  }
-  // Track every id before handing it to IBKR so a synchronous throw is treated
-  // as submission-uncertain and receives a best-effort cancel too.
-  // The parent goes out transmit:false when children exist; if a child placeOrder
-  // throws, the parent is sitting HELD in TWS and must be cancelled, not just
-  // dropped from the map — otherwise it squats an order-id slot forever.
-  const placedIds = [];
-  let submissionAttempted = false;
-  try {
-    orders.set(orderId, parentOrderRecord(plan, reduceOnly.applies ? reduceOnly.reduceOnly : null));
-    // Once the broker API call begins, a synchronous error is not proof that
-    // nothing reached TWS. Consume the clientRef rather than let a retry create
-    // a second real order with an uncertain first submission.
-    submissionAttempted = true;
-    placedIds.push(orderId);
-    ib.placeOrder(orderId, contract, order);
-    // ⚡ auto-cancel: a quick order that hasn't filled inside its window has
-    // outlived its moment — cancel it rather than leave a zombie working at a
-    // price the book already left. Never fires on a filled/partial/cancelled
-    // order; quick orders are qty-1 with no bracket children.
-    if (quick) {
-      setTimeout(() => {
-        const o = orders.get(orderId);
-        if (!o || (o.filled ?? 0) > 0) return;
-        if (['Filled', 'Cancelled', 'ApiCancelled', 'error'].includes(o.status)) return;
-        try {
-          ib.cancelOrder(orderId);
-          console.log(`[ibkr] ⚡ order ${orderId} (${o.strike}${o.right}) auto-cancelled: unfilled after ${QUICK_CANCEL_MS / 1000}s`);
-          broadcast({ type: 'orderAutoCancel', clientRef: o.clientRef, orderId, strike: o.strike, right: o.right, reason: `unfilled ${QUICK_CANCEL_MS / 1000}s, book moved` });
-        } catch (e) {
-          console.log(`[ibkr] ⚡ auto-cancel ${orderId} failed:`, e.message);
-        }
-      }, QUICK_CANCEL_MS);
-    }
-    if (wantTp || wantSl) {
-      if (wantTp) {
-        const tpId = nextOrderId();
-        const child = bracketChild(plan, 'tp', orderId, account);
-        orders.set(tpId, child.record);
-        placedIds.push(tpId);
-        ib.placeOrder(tpId, contract, child.order);
-        console.log(`[ibkr] bracket TP SELL LMT@${takeProfit} (order ${tpId}, parent ${orderId})`);
-      }
-      if (wantSl) {
-        const slId = nextOrderId();
-        const child = bracketChild(plan, 'sl', orderId, account);
-        orders.set(slId, child.record);
-        placedIds.push(slId);
-        ib.placeOrder(slId, contract, child.order);
-        console.log(`[ibkr] bracket SL SELL STP@${stopLoss} (order ${slId}, parent ${orderId})`);
-      }
-    }
-  } catch (e) {
-    // Unwind anything that made or may have made it onto the wire (children
-    // first, then the held parent) so a partial bracket cannot leave orphans.
-    for (let i = placedIds.length - 1; i >= 0; i--) {
-      try { ib.cancelOrder(placedIds[i], ''); } catch { /* never reached TWS */ }
-    }
-    // A synchronous API throw after placeOrder begins is not proof that TWS did
-    // not accept the order.  Retain every possibly-submitted row until an IBKR
-    // error/orderStatus or a restart's fresh snapshot proves its lifecycle. In
-    // particular, the reduce-only gate must continue reserving an uncertain
-    // close instead of letting a second click cross through flat.
-    if (submissionAttempted) {
-      const uncertainIds = new Set(placedIds);
-      orders.forEach((value, id) => {
-        if (value.clientRef === `${clientRef}:tp` || value.clientRef === `${clientRef}:sl`) uncertainIds.add(id);
-      });
-      for (const id of uncertainIds) {
-        const uncertain = orders.get(id);
-        if (uncertain) uncertain.status = 'submission-uncertain';
-      }
-    } else {
-      orders.delete(orderId);
-      orders.forEach((value, id) => {
-        if (value.clientRef === `${clientRef}:tp` || value.clientRef === `${clientRef}:sl`) orders.delete(id);
-      });
-    }
-    broadcastOrders();
-    const failureAck = {
-      type: 'orderAck', clientRef, accepted: false,
-      reason: submissionAttempted
-        ? `placeOrder failed after broker submission began; request consumed: ${e.message}`
-        : `placeOrder failed before broker submission: ${e.message}`,
-    };
-    if (submissionAttempted) orderRequestRegistry.commit(reservation.token, failureAck);
-    else orderRequestRegistry.release(reservation.token);
-    return send(failureAck);
-  }
-
-  const acceptedAck = { type: 'orderAck', clientRef, orderId, accepted: true };
-  orderRequestRegistry.commit(reservation.token, acceptedAck);
-  const label = orderSymbol === 'SPX' ? 'SPXW' : orderSymbol;
-  console.log(`[ibkr] placed ${action} ${isLimit ? `LMT@${limit}` : isStop ? `STP@${stop}` : isTrail ? `TRAIL@${trail}` : 'MKT'}${ocaGroup ? ' [oca]' : ''} ${qty} ${label} ${strike}${right} ${expiry} (order ${orderId})`);
-  broadcastOrders();
-  return send(acceptedAck);
-}
-
 // ── Client-requested history ─────────────────────────────────────────────────
 // Timeframe, option-premium, and replay lifecycle/cache ownership is isolated
 // from the bridge coordinator. Live seeds, basis fills, guest underlying history,
@@ -3498,7 +3055,7 @@ const historyService = createHistoryService({
   cancel: (reqId) => { if (ib) ib.cancelHistoricalData(reqId); },
   broadcast,
   publish: publishGuestHistory,
-  spyVolumeForRange: spyVolForRange,
+  spyVolumeForRange: (t, spanMs) => homeMarket.spyVolumeForRange(t, spanMs),
   log: (message) => console.log(message),
 });
 
@@ -3543,7 +3100,7 @@ function handleOptHistoryRequest(ws, msg) {
     });
     return;
   } else {
-    expiry = String(msg.expiry || currentExpiry || session.expiry);
+    expiry = String(msg.expiry || homeMarket.getCurrentExpiry() || session.expiry);
     symbol = 'SPX';
     contract = spxwContract(strike, right, expiry);
   }
@@ -3585,7 +3142,7 @@ function handleQuoteRequest(ws, msg) {
   const strike = Number(msg.strike);
   const right = msg.right === 'P' ? 'P' : 'C';
   if (!Number.isFinite(strike) || !ib || !connected) return;
-  // A guest-symbol quote is read-only; the position poller
+  // A guest-symbol quote (read-only; the owner 2026-07-10): the position poller
   // marks open legs on symbols whose cockpit ISN'T active. There's no
   // discovered secdef here, so the OPT contract is built directly — SMART
   // resolves stock weeklies fine, and a failed resolution just means no
@@ -3595,6 +3152,38 @@ function handleQuoteRequest(ws, msg) {
     ? msg.symbol.toUpperCase() : null;
   let expiry, symbol, contract;
   if (guestSym) {
+    const context = guestRegistry.getClientContext(ws);
+    const activeGuestRequest = msg.underlyingConId != null
+      || msg.resourceKey != null
+      || msg.resourceGeneration != null;
+    if (activeGuestRequest) {
+      if (!context
+          || context.symbol !== guestSym
+          || Number(msg.underlyingConId) !== context.conId
+          || msg.resourceKey !== context.key
+          || Number(msg.resourceGeneration) !== context.resourceGeneration
+          || !context.resource) return;
+      expiry = String(msg.expiry || context.resource.expiry || '');
+      if (expiry !== context.resource.expiry) return;
+      const valid = validateGuestOrder(
+        { strike, right, expiry },
+        { strikes: context.resource.strikes, expirations: context.resource.expirations },
+      );
+      if (!valid.ok) return;
+      symbol = guestSym;
+      contract = guestOptionContract(context.resource, strike, right, expiry);
+      quoteService.requestQuote(contract, {
+        target: ws,
+        context: {
+          guestResourceKey: context.key,
+          guestResourceGeneration: context.resourceGeneration,
+          guestUnderlyingConId: context.conId,
+        },
+      }).catch((error) => {
+        console.log(`[ibkr] active guest quote ${symbol} ${strike}${right} failed:`, error.message);
+      });
+      return;
+    }
     if (!/^\d{8}$/.test(String(msg.expiry || ''))) return;
     const requestedConId = Number(msg.conId);
     if (!Number.isSafeInteger(requestedConId) || requestedConId <= 0) return;
@@ -3612,7 +3201,7 @@ function handleQuoteRequest(ws, msg) {
     if (!position?.contract) return;
     contract = position.contract;
   } else {
-    expiry = String(msg.expiry || currentExpiry || session.expiry);
+    expiry = String(msg.expiry || homeMarket.getCurrentExpiry() || session.expiry);
     symbol = 'SPX';
     contract = spxwContract(strike, right, expiry);
   }
@@ -3624,50 +3213,6 @@ function handleQuoteRequest(ws, msg) {
     // a price or turning a transient snapshot miss into a bridge failure.
     console.log(`[ibkr] quote ${symbol} ${strike}${right} ${expiry} failed: ${error?.message || error}`);
   });
-}
-
-function handleCancel(ws, msg) {
-  const send = (m) => { if (ws.readyState === 1) ws.send(JSON.stringify(m)); };
-  if (killRoutingLocked || reverseRoutingLocked) {
-    return send({ type: 'cancelAck', ok: false, reason: killRoutingLocked ? 'KILL transaction active' : 'REVERSE transaction active' });
-  }
-  if (!ib || !connected) return send({ type: 'cancelAck', ok: false, reason: 'not connected' });
-  // ClientRefs do not survive a bridge restart, so contract identity remains a
-  // fallback—but only exact symbol matches and one unique working order qualify.
-  const account = portfolio.publicSnapshot().account;
-  const scopedOrders = ordersForAccount(orders, account);
-  const orderId = findCancelableOrderId(scopedOrders, msg);
-  if (orderId == null) return send({ type: 'cancelAck', ok: false, reason: 'order not found' });
-  try {
-    ib.cancelOrder(orderId, '');
-    console.log(`[ibkr] cancel requested for order ${orderId}`);
-    // This acknowledges only that the request reached IBKR. The later
-    // orderStatus/open-order snapshot is cancellation truth.
-    send({ type: 'cancelAck', orderId, ok: true, requested: true, confirmed: false });
-  } catch (e) {
-    send({ type: 'cancelAck', orderId, ok: false, reason: e.message });
-  }
-}
-
-// Cancel only the orders THIS bridge tracks — never ib.reqGlobalCancel(), which
-// would also kill resting orders placed from TWS mobile/desktop or any other
-// client sharing the IBKR account. The UI doesn't currently send cancelAll, so
-// this is reachable only by a hand-crafted message; scoping keeps it honest if
-// the UI ever wires a "cancel all working orders" button.
-function handleCancelAll(ws, msg) {
-  const send = (m) => { if (ws.readyState === 1) ws.send(JSON.stringify(m)); };
-  if (killRoutingLocked || reverseRoutingLocked) {
-    return send({ type: 'cancelAllAck', ok: false, reason: killRoutingLocked ? 'KILL transaction active' : 'REVERSE transaction active' });
-  }
-  if (!ib || !connected) return send({ type: 'cancelAllAck', ok: false, reason: 'not connected' });
-  let requested = 0;
-  const account = portfolio.publicSnapshot().account;
-  for (const [id, o] of ordersForAccount(orders, account)) {
-    if (DEAD_ORDER_STATUSES.has(o.status)) continue;
-    try { ib.cancelOrder(id, ''); requested++; } catch (e) { console.log(`[ibkr] cancelAll: order ${id} failed`, e.message); }
-  }
-  console.log(`[ibkr] cancelAll: requested cancellation for ${requested} own-client order(s)`);
-  send({ type: 'cancelAllAck', ok: true, requested: true, confirmed: false, count: requested });
 }
 
 function broadcast(msg) {
@@ -3685,54 +3230,32 @@ function broadcast(msg) {
   return true;
 }
 
-// Full current state of a chain entry (greeks + bid/ask). Sent on any update;
-// the frontend keeps the latest per strike.
-function chainPayload(e) {
-  return {
-    type: 'greeks',
-    strike: e.strike,
-    optionType: e.right === 'C' ? 'call' : 'put',
-    premium: e.premium, delta: e.delta, gamma: e.gamma, theta: e.theta, vega: e.vega, iv: e.iv,
-    bid: e.bid, ask: e.ask, dayHigh: e.dayHigh, dayLow: e.dayLow,
-    bidTs: e.bidTs, askTs: e.askTs, tickTs: e.tickTs
-  };
-}
-
 function snapshotMsg() {
   const portfolioState = portfolio.publicSnapshot();
-  const greeks = [];
-  for (const e of chain.values()) {
-    if (e.expiry !== currentExpiry) continue;
-    if (e.premium == null && e.bid == null && e.ask == null) continue;
-    greeks.push({
-      strike: e.strike,
-      type: e.right === 'C' ? 'call' : 'put',
-      premium: e.premium, delta: e.delta, gamma: e.gamma, theta: e.theta, vega: e.vega, iv: e.iv,
-      bid: e.bid, ask: e.ask, dayHigh: e.dayHigh, dayLow: e.dayLow,
-      bidTs: e.bidTs, askTs: e.askTs, tickTs: e.tickTs
-    });
-  }
+  const basisState = basisCtl.snapshot();
+  const greeks = homeMarket.greeksSnapshot();
+  const vix = homeMarket.getVix();
   return {
     type: 'snapshot',
     connected,
     delayed: dataDelayed,
     source: session.source,
-    price: displayPrice(),
-    candles: displayCandles(),
+    price: homeMarket.displayPrice(),
+    candles: homeMarket.displayCandles(),
     greeks,
-    expiry: currentExpiry || session.expiry,
-    esExpiry,
-    basis,
-    basisFrozen,
-    basisEstimated,
+    expiry: homeMarket.getCurrentExpiry() || session.expiry,
+    esExpiry: homeMarket.getEsExpiry(),
+    basis: basisState.basis,
+    basisFrozen: basisState.basisFrozen,
+    basisEstimated: basisState.basisEstimated,
     // Honesty about which basis the overnight conversion is applying right now:
     // 'options' = live chain-anchored, 'frozen' = the 4 PM capture, 'estimated'
     // = cold-start fallback. RTH shows SPX cash directly, so it reports 'frozen'
     // vacuously there.
-    basisLive: basisLiveFresh() ? basisLive : null,
-    basisSource: !session.rth && basisLiveFresh() ? 'options' : basisEstimated ? 'estimated' : 'frozen',
+    basisLive: basisState.basisLive,
+    basisSource: basisState.basisSource,
     rth: session.rth,
-    vix: { last: vixLast, close: vixClose },
+    vix,
     account: portfolioState.account,
     accountType: portfolioState.accountType,
     executionEnabled: executionReady(),
@@ -3740,32 +3263,36 @@ function snapshotMsg() {
     positionAuthorityRevision: portfolioState.positionAuthorityRevision,
     killState: publicKillState(),
     reverseState: publicReverseState(),
+    armedState: publicArmedState(),
+    armedExitState: publicArmedExitState(),
     // Capability handshake: the client must never send an order field this
     // bridge won't understand — an old bridge ignoring `trail` would route
     // the leg as naked MKT. New order-shaping fields get a flag here, and
     // the client hides the control until its bridge advertises it.
-    caps: { trail: true, guestRegistry: true, reverseTransaction: true },
+    caps: {
+      trail: true,
+      guestRegistry: true,
+      reverseTransaction: true,
+      armedStateV1: true,
+      armedQtyMax: ARMED_QTY_MAX,
+      armedExit: true,
+      armedExitMax: ARMED_EXIT_MAX,
+      armedExitQtyMax: ARMED_EXIT_QTY_MAX,
+      guestMarket: true,
+      guestQuick: true,
+      guestRung: true,
+    },
     trades: tradeJournal.trades,
     positions: portfolioState.positions,
     orders: workingOrdersList(),
     funds: portfolioState.funds,
-    spxClose,
+    spxClose: basisState.spxClose,
     // Staleness heartbeat: when the displayed price last ticked. Seeds the client's
     // freshness clock at (re)connect for the price it actually shows — SPX cash in
     // RTH, the ES proxy overnight — so a feed that's already frozen at connect reads
     // as stale immediately (the client re-stamps this on every live tick after).
-    tickTs: (session.source === 'ES' ? watchdogState.lastEsTick : watchdogState.lastSpxTick) || null
+    tickTs: homeMarket.lastTickTs(session.source)
   };
-}
-
-// ── Basis persistence ──────────────────────────────────────────────────────
-
-function saveBasis() {
-  try {
-    atomicWriteSync(BASIS_FILE, JSON.stringify({ basis, basisEstimated, esClose, spxClose, captureDate: basisCaptureDate, esExpiry: basisEsExpiry, ts: Date.now() }));
-  } catch (err) {
-    console.error('[ibkr] saveBasis failed:', err);
-  }
 }
 
 // Live entry-delta projection supplied to the journal service. Backfills never
@@ -3774,7 +3301,7 @@ function deltaAtFill(contract, live) {
   if (!live) return {};
   const key = `${Number(contract.strike)}${contract.right === 'P' ? 'P' : 'C'}`;
   const expiry = String(contract.lastTradeDateOrContractMonth || '').slice(0, 8);
-  let e = String(contract.symbol || '') === 'SPX' ? chain.get(key) : null;
+  let e = String(contract.symbol || '') === 'SPX' ? homeMarket.getChainEntry(key) : null;
   if (!e) {
     const symbol = String(contract.symbol || '').toUpperCase();
     for (const resource of guestResources.values()) {
@@ -3785,37 +3312,6 @@ function deltaAtFill(contract, live) {
   }
   if (!e || (e.expiry && e.expiry !== expiry)) return {};
   return Number.isFinite(e.delta) ? { delta: Math.round(e.delta * 100) / 100 } : {};
-}
-
-// ── Basis persistence ──────────────────────────────────────────────────────
-
-function loadBasis() {
-  try {
-    const d = JSON.parse(fs.readFileSync(BASIS_FILE, 'utf8'));
-    // Only trust a real 4:00 capture. A persisted *estimate* (cold-start) must not
-    // pin the value — let the fallback re-fire until the next 4:00 capture.
-    if (typeof d.basis === 'number' && !d.basisEstimated) {
-      basis = d.basis;
-      basisEstimated = false;
-      basisFrozen = true;
-      if (typeof d.esClose === 'number') esClose = d.esClose;
-      if (typeof d.spxClose === 'number') spxClose = d.spxClose;
-      // The ES contract the basis was measured against. Older cache files lack
-      // it (null) — maybeBackfillBasis then re-derives against the resolved front
-      // month, which both heals a missing value and catches a roll.
-      if (typeof d.esExpiry === 'string') basisEsExpiry = d.esExpiry;
-      // Capture date drives the staleness check for the backfill. Older cache
-      // files lack the field — derive it from the save timestamp's ET date.
-      if (typeof d.captureDate === 'string') basisCaptureDate = d.captureDate;
-      else if (typeof d.ts === 'number') {
-        const e = etParts(new Date(d.ts));
-        basisCaptureDate = ymd(e.y, e.mo, e.d);
-      }
-      const tail = (esClose != null && spxClose != null)
-        ? ` (ES ${esClose.toFixed(2)} − SPX ${spxClose.toFixed(2)})` : '';
-      console.log(`[ibkr] loaded persisted 4:00 basis ${basis.toFixed(2)}${tail}`);
-    }
-  } catch {}
 }
 
 async function tryConnect() {

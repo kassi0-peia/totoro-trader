@@ -25,13 +25,22 @@ import {
 import { drawMarkers } from './chart/draw/markers.js';
 import { drawBusStops } from './chart/draw/busstops.js';
 import {
+  buildArmedAxisGroups,
+  resolveArmedGuideGrab,
+  resolveArmedRetargetDrop,
   resolveChartClickIntent,
-  resolveChartContextTarget
+  resolveChartContextTarget,
+  snapArmedTrigger,
 } from './chart/interactionIntent.js';
 import {
   chartViewportStorageKey,
   resolveChartViewportRestore
 } from './chart/viewportPersistence.js';
+import {
+  ARMED_AUTHORITY_MAX_QTY,
+  ARMED_AUTHORITY_QTY_DELTAS,
+  canAddArmedQty,
+} from './app/armedAuthority.js';
 import { resolveArmedTrigger } from './app/armedPlacement.js';
 
 function clearCanvasSurface(canvas, size, background) {
@@ -86,13 +95,22 @@ export default function Chart({
   armPlacement = null,
   onPlaceArmTrigger = null,
   onCancelArmPlacement = null,
+  armedExits = [],
+  onDisarmArmedExit = null,
+  armedExitAuthorityStatus = 'READY',
+  onDisarmArmed = null,
+  onAddArmedQty = null,
+  onRetargetArmed = null,
+  armedQtyMax = ARMED_AUTHORITY_MAX_QTY,
+  armedAuthorityStatus = 'WAITING FOR ARMED AUTHORITY',
+  armedCanDisarm = false,
+  armedCanAdd = false,
   onToggleAxisChain = null,
   alerts = [],
   armed = [],
   dayLevels = null,
+  showGridlines = true,
   beLine = null,
-  dayLevelsOn = false,
-  onToggleDayLevels = null,
   onMenu = null,
   apiRef = null,
   fillFlash = null,
@@ -117,6 +135,7 @@ export default function Chart({
   }, [showVolume]);
   const [recording, setRecording] = useState(false);    // screen-capture clip in progress
   const [armCursor, setArmCursor] = useState(null);     // exclusive trigger-level preview
+  const [armedRetarget, setArmedRetarget] = useState(null);
   const recRef = useRef(null);                          // active MediaRecorder
   const markerHitsRef = useRef([]); // point markers + closed-trade connector segments
   const ghostHitsRef = useRef([]);  // decision-replay ghost fills: [{ x, y, half, fill }]
@@ -288,11 +307,11 @@ export default function Chart({
     // on that cascade, so it too must not be reordered.
     // ─────────────────────────────────────────────────────────────────────────
 
-    drawGrid(ctx, { view, layout, theme, priceToY, indexToX, timeframe, showVolume, axisChain });
+    drawGrid(ctx, { view, layout, theme, priceToY, indexToX, timeframe, showVolume, axisChain, showGridlines });
 
     drawCandles(ctx, { view, layout, theme, priceToY, indexToX, price, positions, showPositions, source, showVolume });
 
-    drawPriceLine(ctx, { layout, theme, priceToY, price, expectedMove, alerts, armed, rightAxis: RIGHT_AXIS, dayLevels, beLine });
+    drawPriceLine(ctx, { layout, theme, priceToY, price, expectedMove, alerts, rightAxis: RIGHT_AXIS, dayLevels, beLine });
 
     drawAxisChain(ctx, { view, layout, theme, priceToY, price, axisChain, greeksMap, ivol, timeToExpiryYears, strikeStep });
 
@@ -314,7 +333,7 @@ export default function Chart({
     }
 
     busHitsRef.current = drawBusStops(ctx, { view, layout, theme, priceToY, indexToX, price, busStops, tfCandles, tToIdx, bucketMs });
-  }, [candles, price, positions, theme, size, view, layout, priceToY, indexToX, timeframe, showMarkers, showVolume, expectedMove, alerts, armed, dayLevels, beLine, axisChain, strikeStep, greeksMap, ivol, timeToExpiryYears, source, showPositions, ghostFills, busStops, highlightPositionId, tfCandles, clearHitLists]);
+  }, [candles, price, positions, theme, size, view, layout, priceToY, indexToX, timeframe, showMarkers, showVolume, showGridlines, expectedMove, alerts, dayLevels, beLine, axisChain, strikeStep, greeksMap, ivol, timeToExpiryYears, source, showPositions, ghostFills, busStops, highlightPositionId, tfCandles, clearHitLists]);
 
   const {
     pinchRef,
@@ -370,22 +389,32 @@ export default function Chart({
     clearCanvasSurface(canvasRef.current, size, theme.bg);
   }, [view, size, theme.bg, clearHitLists, resetHover]);
 
-  // Record a clip of the CHART CANVAS directly (canvas.captureStream) — no
-  // permission prompt at all. The old getDisplayMedia path died silently in the
-  // chromeless app window: Firefox anchors its screen-share doorhanger to the
-  // toolbox that userChrome.css collapses, so the prompt opened invisibly and
-  // the button appeared inert. Canvas capture starts instantly,
-  // records at full dpr resolution, and the chart IS the app; DOM overlays
-  // (hover cards, toasts) aren't in the clip — the tape and its lines are.
-  // Click again to finish (downloads a .webm); auto-stops at 90 s.
-  const toggleRecord = useCallback(() => {
+  // Record a clip of the WHOLE SCREEN (getDisplayMedia) — cursor, drawers,
+  // toasts, armed cards, everything (the owner 2026-07-16: the 07-13 canvas-capture
+  // workaround silently lost all of that; the chart alone isn't the story).
+  // The original failure was never getDisplayMedia itself: Firefox anchors its
+  // screen-share doorhanger to the toolbox userChrome.css collapses, so the
+  // prompt opened invisibly and the button "did nothing". The dedicated totoro
+  // profile now sets media.navigator.permission.disabled (user.js) which
+  // removes the doorhanger entirely and auto-grants the primary screen — see
+  // deploy/launch-totoro.sh. If capture is denied (pref missing), the button
+  // stays idle. Click again to finish (downloads a .webm); auto-stops at 90 s,
+  // and ending the share from the OS side finalizes the clip too.
+  const toggleRecord = useCallback(async () => {
     if (recRef.current) {
       if (recRef.current.state === 'recording') recRef.current.stop();
       return;
     }
-    const canvas = canvasRef.current;
-    if (!canvas || typeof canvas.captureStream !== 'function') return;
-    const stream = canvas.captureStream(30);
+    if (typeof navigator.mediaDevices?.getDisplayMedia !== 'function') return;
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { displaySurface: 'monitor', frameRate: 30 },
+        audio: false,
+      });
+    } catch {
+      return; // denied / dismissed — leave the button idle
+    }
     const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp9') ? 'video/webm;codecs=vp9' : 'video/webm';
     const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 6_000_000 });
     const chunks = [];
@@ -402,6 +431,11 @@ export default function Chart({
       recRef.current = null;
       setRecording(false);
     };
+    // Ending the share from the OS/browser side (not our button) must also
+    // finalize and download the clip rather than leave a zombie recorder.
+    stream.getVideoTracks()[0]?.addEventListener?.('ended', () => {
+      if (recRef.current === rec && rec.state === 'recording') rec.stop();
+    });
     rec.start();
     recRef.current = rec;
     setRecording(true);
@@ -413,6 +447,25 @@ export default function Chart({
     if (armPlacement) {
       e.preventDefault();
       return;
+    }
+    if (onRetargetArmed && layout && view) {
+      const rect = canvasRef.current?.getBoundingClientRect();
+      if (rect) {
+        const grab = resolveArmedGuideGrab({
+          x: e.clientX - rect.left,
+          y: e.clientY - rect.top,
+          armed,
+          layout,
+          priceToY,
+        });
+        if (grab) {
+          e.preventDefault();
+          canvasRef.current?.setPointerCapture?.(e.pointerId);
+          setArmedRetarget({ arm: grab.arm, candidate: grab.arm.level });
+          clearStrikeHover();
+          return;
+        }
+      }
     }
     canvasRef.current?.setPointerCapture?.(e.pointerId);
     startDrag(e.clientX, e.clientY);
@@ -433,6 +486,17 @@ export default function Chart({
       setArmCursor({ x, y, price: yToPrice(y) });
       return;
     }
+    if (armedRetarget) {
+      const rect = canvasRef.current?.getBoundingClientRect();
+      if (!rect || !layout || !view) return;
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      const candidate = x >= 0 && x <= layout.chartW && y >= layout.priceTop && y <= layout.priceBot
+        ? snapArmedTrigger(yToPrice(y), strikeStep)
+        : null;
+      setArmedRetarget((current) => current ? { ...current, candidate } : null);
+      return;
+    }
     if (dragRef.current) {
       handleDragMove(e.clientX, e.clientY);
       if (dragRef.current.moved) clearStrikeHover();
@@ -444,10 +508,28 @@ export default function Chart({
   const handlePointerUp = (e) => {
     if (e.pointerType !== 'mouse') return;
     if (armPlacement) return;
+    if (armedRetarget) {
+      const drag = armedRetarget;
+      setArmedRetarget(null);
+      suppressClickRef.current = performance.now() + 800;
+      const drop = resolveArmedRetargetDrop({
+        arm: drag.arm,
+        level: drag.candidate,
+        marketPrice: price,
+        strikeStep,
+      });
+      if (drop.ok) onRetargetArmed?.(drag.arm, drop.level, drop.dir);
+      return;
+    }
     endDrag();
   };
 
   const handlePointerCancel = (e) => {
+    if (armedRetarget) {
+      setArmedRetarget(null);
+      suppressClickRef.current = performance.now() + 800;
+      return;
+    }
     if (armPlacement) {
       setArmCursor(null);
       return;
@@ -555,6 +637,19 @@ export default function Chart({
     if (armPlacement) resetHover();
   }, [armPlacement?.strike, armPlacement?.right, armPlacement?.expiry, resetHover]);
 
+  useEffect(() => {
+    if (!armedRetarget) return undefined;
+    const cancel = (event) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      event.stopPropagation();
+      setArmedRetarget(null);
+      suppressClickRef.current = performance.now() + 800;
+    };
+    window.addEventListener('keydown', cancel, true);
+    return () => window.removeEventListener('keydown', cancel, true);
+  }, [armedRetarget]);
+
   // OHLCV legend data: hovered candle, else the latest one (TradingView-style).
   const ohlc = (() => {
     if (!tfCandles.length) return null;
@@ -571,9 +666,40 @@ export default function Chart({
   const armPreviewLevel = armCursor?.price != null
     ? Math.round(armCursor.price * 100) / 100
     : null;
+  // Exit placements share the entry placement surface but not its OTM rule —
+  // an exit level is a P/L plan on an existing position, any side of strike.
+  const resolveExitPreview = (level) => {
+    if (!(typeof price === 'number' && Number.isFinite(price) && price > 0)) {
+      return { ok: false, reason: 'no current market price' };
+    }
+    if (level === price) return { ok: false, reason: 'level equals the market' };
+    if (Math.abs(level - price) / price > 0.1) return { ok: false, reason: '>10% from the market' };
+    return { ok: true, armed: { dir: level > price ? 'up' : 'down' } };
+  };
   const armPreview = armPlacement && armPreviewLevel != null
-    ? resolveArmedTrigger(armPlacement, { level: armPreviewLevel, marketPrice: price })
+    ? (armPlacement.exit
+      ? resolveExitPreview(armPreviewLevel)
+      : resolveArmedTrigger(armPlacement, { level: armPreviewLevel, marketPrice: price }))
     : null;
+  // Offline/empty startup has no canvas layout yet. Axis controls are derived
+  // from that layout, so keep them absent until both coordinate witnesses exist
+  // instead of dereferencing layout during React's first render.
+  const armedAxisGroups = armPlacement || !layout || !view
+    ? []
+    : buildArmedAxisGroups({
+      armed,
+      priceToY,
+      priceTop: layout.priceTop + 8,
+      priceBot: layout.priceBot - 8,
+    });
+  const armedExitAxisGroups = armPlacement || !layout || !view
+    ? []
+    : buildArmedAxisGroups({
+      armed: armedExits,
+      priceToY,
+      priceTop: layout.priceTop + 8,
+      priceBot: layout.priceBot - 8,
+    });
 
   // Imperative surface for App's keyboard layer: Space = snapToNow, C/P read
   // the hovered strike (only the tradeable live-edge hover counts — history
@@ -603,7 +729,7 @@ export default function Chart({
   }
 
   return (
-    <div className={`chart-wrap${fullscreen ? ' fullscreen' : ''}${armPlacement ? ' arm-placement' : ''}`} ref={wrapRef}>
+    <div className={`chart-wrap${fullscreen ? ' fullscreen' : ''}${armPlacement ? ' arm-placement' : ''}${armedRetarget ? ' armed-retarget' : ''}`} ref={wrapRef}>
       {ohlc && (
         <div className="ohlc-legend">
           <span className="ohlc-pair" style={{ color: ohlc.up ? theme.up : theme.down }}>
@@ -622,10 +748,11 @@ export default function Chart({
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         onPointerCancel={handlePointerCancel}
-        onPointerLeave={armPlacement ? () => setArmCursor(null) : handlePointerLeave}
+        onPointerLeave={armPlacement ? () => setArmCursor(null) : armedRetarget ? undefined : handlePointerLeave}
         onClick={handleClickEvent}
         onContextMenu={(e) => {
           e.preventDefault(); // chart owns right-click; no browser menu
+          if (armedRetarget) return;
           if (armPlacement) {
             onCancelArmPlacement?.();
             return;
@@ -657,12 +784,17 @@ export default function Chart({
           }
           if (!quickMode && onMenu) {
             const near = alerts.find((a) => Math.abs(priceToY(a.price) - target.y) <= 8);
-            const nearArmed = armed.find((a) => Math.abs(priceToY(a.level) - target.y) <= 8);
+            const nearArmed = onDisarmArmed
+              ? armed.find((a) => a.liveAuthorization === true
+                && a.status === 'ARMED'
+                && Math.abs(priceToY(a.level) - target.y) <= 8)
+              : null;
             onMenu({
               x: e.clientX, y: e.clientY, price: target.price,
+              marketPrice: price,
               alertId: near ? near.id : null, alertPrice: near ? near.price : null,
               armedId: nearArmed ? nearArmed.id : null,
-              armedLabel: nearArmed ? `${nearArmed.strike}${nearArmed.right} @ ${nearArmed.level}` : null
+              armedLabel: nearArmed ? `${nearArmed.strike}${nearArmed.right} ×${nearArmed.qty ?? 1} @ ${nearArmed.level}` : null
             });
           }
         }}
@@ -683,9 +815,203 @@ export default function Chart({
         timeframe={timeframe}
         tooltipRef={tooltipRef}
       />
+      {armedAxisGroups.map((group) => {
+        const controlTop = group.y - 8.5;
+        const authorityReady = armedAuthorityStatus === 'READY';
+        const groupPending = group.items.some(({ arm }) => arm.status !== 'ARMED');
+        const authorityWarning = !authorityReady || groupPending;
+        const quantityControls = armedCanAdd && armedQtyMax != null && !!onAddArmedQty;
+        const cardHeight = 54 + (authorityReady ? 0 : 28)
+          + group.items.length * (quantityControls ? 114 : authorityWarning ? 102 : 82);
+        const cardTop = Math.max(
+          layout.priceTop + 4,
+          Math.min(group.y - cardHeight / 2, layout.priceBot - cardHeight - 4),
+        );
+        const one = group.items.length === 1 ? group.items[0].arm : null;
+        const labelIcon = groupPending ? '…' : authorityReady ? '⚔' : '⚠';
+        const label = one ? `${labelIcon} ${one.strike}${one.right}` : `${labelIcon} ×${group.items.length}`;
+        const rights = new Set(group.items.map(({ arm }) => arm.right));
+        const onlyRight = rights.size === 1 ? group.items[0].arm.right : null;
+        const labelColor = onlyRight === 'C'
+          ? theme.callLine
+          : onlyRight === 'P' ? theme.putLine : theme.text;
+        return (
+          <div
+            key={group.items.map(({ arm }) => arm.id).join(':')}
+            className="armed-axis-control"
+            style={{
+              left: layout.chartW,
+              top: controlTop,
+              width: RIGHT_AXIS,
+              '--armed-popover-top': `${cardTop - controlTop}px`,
+              '--armed-axis-color': labelColor,
+            }}
+            onContextMenu={(event) => event.preventDefault()}
+          >
+            <button
+              type="button"
+              className={`armed-axis-label${authorityWarning ? ' withheld' : ''}`}
+              aria-label={`${group.items.length} armed trigger${group.items.length === 1 ? '' : 's'} · ${armedAuthorityStatus} — show details`}
+              aria-haspopup="true"
+            >
+              {label}
+            </button>
+            {group.items.filter(({ arm }) => arm.liveAuthorization === true).map(({ arm, y }) => (
+              <span
+                key={`guide:${arm.id}`}
+                className="armed-axis-guide"
+                aria-hidden="true"
+                style={{
+                  top: y - controlTop,
+                  width: layout.chartW,
+                  borderColor: arm.right === 'C' ? theme.callLine : theme.putLine,
+                }}
+              />
+            ))}
+            <div className="armed-axis-popover" role="dialog" aria-label="Armed triggers">
+              <div className="armed-axis-head">
+                <b>{authorityReady && !groupPending ? 'ARMED' : groupPending ? 'PENDING' : 'AUTHORITY'}</b>
+                <span>{authorityReady && !groupPending ? 'ONE-SHOT' : 'SERVER TRUTH'}</span>
+              </div>
+              {!authorityReady && (
+                <div className="armed-axis-sync-warning">{armedAuthorityStatus}</div>
+              )}
+              {group.items.map(({ arm }) => {
+                const qty = Number.isSafeInteger(arm.qty) ? arm.qty : 1;
+                const rowStatus = arm.status || 'ARMED';
+                const actionable = arm.liveAuthorization === true && rowStatus === 'ARMED';
+                const showQuantityControls = quantityControls && actionable;
+                return (
+                  <div className="armed-axis-item" key={arm.id}>
+                    <div className="armed-axis-contract">
+                      <b style={{ color: arm.right === 'C' ? theme.callLine : theme.putLine }}>{arm.strike}{arm.right}</b>
+                      <span>{String(arm.expiry).replace(/^(\d{4})(\d{2})(\d{2})$/, '$1-$2-$3')}</span>
+                    </div>
+                    <div className="armed-axis-route">
+                      SPX {arm.dir === 'up' ? '↑' : '↓'} {Number(arm.level).toFixed(2)}
+                    </div>
+                    <div className="armed-axis-order">BUY ×{arm.qtyDisplay ?? qty} · ASK + 1 TICK · LMT</div>
+                    {rowStatus !== 'ARMED' && (
+                      <div className="armed-axis-sync-warning">{rowStatus}</div>
+                    )}
+                    {showQuantityControls && (
+                      <div className="armed-axis-qty" aria-label={`Armed quantity ${qty}`}>
+                        <span>QTY <b>{arm.qtyDisplay ?? qty}</b></span>
+                        <div className="armed-axis-qty-actions">
+                          {ARMED_AUTHORITY_QTY_DELTAS.map((delta) => (
+                            <button
+                              type="button"
+                              key={delta}
+                              disabled={!canAddArmedQty({ qty }, delta, armedQtyMax)}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                onAddArmedQty(arm.id, delta);
+                              }}
+                              aria-label={`Add ${delta} contract${delta === 1 ? '' : 's'} to ${arm.strike}${arm.right}`}
+                            >+{delta}</button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {armedCanDisarm && actionable && onDisarmArmed && (
+                      <button
+                        type="button"
+                        className="armed-axis-disarm"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onDisarmArmed(arm.id);
+                        }}
+                      >
+                        DISARM
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+              {armedCanAdd && armed.length < 3 && <div className="armed-axis-hint">RIGHT-CLICK A STRIKE TO ADD ANOTHER</div>}
+            </div>
+          </div>
+        );
+      })}
+      {armedExitAxisGroups.map((group) => {
+        const controlTop = group.y - 8.5;
+        const ready = armedExitAuthorityStatus === 'READY';
+        const one = group.items.length === 1 ? group.items[0].arm : null;
+        const label = one ? `⚔̸ ${one.strike}${one.right}` : `⚔̸ ×${group.items.length}`;
+        const rights = new Set(group.items.map(({ arm }) => arm.right));
+        const onlyRight = rights.size === 1 ? group.items[0].arm.right : null;
+        const labelColor = onlyRight === 'C'
+          ? theme.callLine
+          : onlyRight === 'P' ? theme.putLine : theme.text;
+        return (
+          <div
+            key={`exit:${group.items.map(({ arm }) => arm.id).join(':')}`}
+            className="armed-axis-control armed-exit-axis"
+            style={{
+              left: layout.chartW,
+              top: controlTop,
+              width: RIGHT_AXIS,
+              '--armed-axis-color': labelColor,
+            }}
+            onContextMenu={(event) => event.preventDefault()}
+          >
+            <button
+              type="button"
+              className={`armed-axis-label${ready ? '' : ' withheld'}`}
+              aria-label={`${group.items.length} armed exit${group.items.length === 1 ? '' : 's'} · ${armedExitAuthorityStatus} — show details`}
+              aria-haspopup="true"
+            >
+              {label}
+            </button>
+            {group.items.filter(({ arm }) => arm.liveAuthorization === true).map(({ arm, y }) => (
+              <span
+                key={`exit-guide:${arm.id}`}
+                className="armed-axis-guide armed-exit-guide"
+                aria-hidden="true"
+                style={{
+                  top: y - controlTop,
+                  width: layout.chartW,
+                  borderColor: arm.right === 'C' ? theme.callLine : theme.putLine,
+                }}
+              />
+            ))}
+            <div className="armed-axis-popover" role="dialog" aria-label="Armed exits">
+              <div className="armed-axis-head">
+                <b>EXITS</b>
+                <span>{ready ? 'ONE-SHOT' : 'SERVER TRUTH'}</span>
+              </div>
+              {!ready && (
+                <div className="armed-axis-sync-warning">{armedExitAuthorityStatus}</div>
+              )}
+              {group.items.map(({ arm }) => (
+                <div key={`exit-row:${arm.id}`} className="armed-axis-item">
+                  <div className="armed-axis-contract">
+                    <b style={{ color: arm.right === 'C' ? theme.callLine : theme.putLine }}>
+                      {arm.action === 'trail' ? `TRL $${Number(arm.trail).toFixed(2)}` : 'CLOSE'} ×{arm.qty} {arm.strike}{arm.right}
+                    </b>
+                  </div>
+                  <div className="armed-axis-route">SPX {arm.dir === 'up' ? '↑' : '↓'} {Number(arm.level).toFixed(2)}</div>
+                  <div className="armed-axis-order">{arm.status || 'ARMED'}</div>
+                  {onDisarmArmedExit && arm.liveAuthorization === true && (arm.status || 'ARMED') === 'ARMED' && (
+                    <button
+                      type="button"
+                      className="armed-axis-disarm"
+                      onClick={() => onDisarmArmedExit(arm.id)}
+                    >
+                      DISARM
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })}
       {armPlacement && (
         <div className="arm-placement-instruction" role="status">
-          ARMING {armPlacement.strike}{armPlacement.right} · HOVER TRIGGER LEVEL · CLICK TO PLACE · ESC / RIGHT-CLICK CANCEL
+          {armPlacement.exit
+            ? `EXIT ${armPlacement.strike}${armPlacement.right} · ${armPlacement.exit.action === 'trail' ? `ATTACH TRAIL $${Number(armPlacement.exit.trail).toFixed(2)}` : 'CLOSE'} ×${armPlacement.exit.qty} · HOVER SPX LEVEL · CLICK TO ARM · ESC / RIGHT-CLICK CANCEL`
+            : `ARMING ${armPlacement.strike}${armPlacement.right} · HOVER TRIGGER LEVEL · CLICK TO PLACE · ESC / RIGHT-CLICK CANCEL`}
         </div>
       )}
       {armPlacement && armCursor && armPreviewLevel != null && layout && (
@@ -704,10 +1030,23 @@ export default function Chart({
             }}
           >
             {armPreview?.ok
-              ? `CLICK · SPX ${armPreviewLevel.toFixed(2)} ${armPreview.armed.dir === 'up' ? '↑' : '↓'} → BUY ${armPlacement.strike}${armPlacement.right}`
+              ? (armPlacement.exit
+                ? `CLICK · SPX ${armPreviewLevel.toFixed(2)} ${armPreview.armed.dir === 'up' ? '↑' : '↓'} → ${armPlacement.exit.action === 'trail' ? `TRAIL $${Number(armPlacement.exit.trail).toFixed(2)}` : 'CLOSE'} ×${armPlacement.exit.qty} ${armPlacement.strike}${armPlacement.right}`
+                : `CLICK · SPX ${armPreviewLevel.toFixed(2)} ${armPreview.armed.dir === 'up' ? '↑' : '↓'} → BUY ×1 ${armPlacement.strike}${armPlacement.right}`)
               : armPreview?.reason}
           </div>
         </>
+      )}
+      {armedRetarget?.candidate != null && layout && view && (
+        <div
+          className="arm-placement-line"
+          aria-hidden="true"
+          style={{
+            top: priceToY(armedRetarget.candidate),
+            width: layout.chartW,
+            borderColor: armedRetarget.arm.right === 'C' ? theme.callLine : theme.putLine,
+          }}
+        />
       )}
       <button
         className="fs-btn"
@@ -735,18 +1074,6 @@ export default function Chart({
           <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
             <path d="M20.5 13.4 11 3.9H4V11l9.5 9.5z" />
             <circle cx="7.6" cy="7.6" r="1.1" />
-          </svg>
-        </button>
-      )}
-      {onToggleDayLevels && (
-        <button
-          className={`daylevels-btn${dayLevelsOn ? ' active' : ''}`}
-          onClick={onToggleDayLevels}
-          aria-label="Toggle day levels"
-          data-tip={dayLevelsOn ? 'Hide day levels' : 'Day levels: prior high/low/close + today’s open'}
-        >
-          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
-            <path d="M3 7h18M3 12h18M3 17h18" strokeDasharray="3 3" />
           </svg>
         </button>
       )}

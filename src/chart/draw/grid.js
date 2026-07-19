@@ -1,9 +1,9 @@
-import { fmtTimeTf, niceStep, priceDecimals, niceTimeStep, TIME_STEPS } from '../format.js';
+import { niceStep, priceDecimals, selectTimeAxisLabels } from '../format.js';
 
 // h/v gridlines + price and time axis labels. axisChain moves the price labels
 // LEFT onto strike-friendly increments (they'd collide with the gutter chain).
 // Pure paint; leaves ctx clean.
-export function drawGrid(ctx, { view, layout, theme, priceToY, indexToX, timeframe, showVolume, axisChain }) {
+export function drawGrid(ctx, { view, layout, theme, priceToY, indexToX, timeframe, showVolume, axisChain, showGridlines = true }) {
   // grid
   ctx.strokeStyle = theme.grid;
   ctx.lineWidth = 1;
@@ -26,11 +26,13 @@ export function drawGrid(ctx, { view, layout, theme, priceToY, indexToX, timefra
   for (let k = firstK; k <= lastK; k++) {
     const p = k * pStep;
     const y = priceToY(p);
-    ctx.strokeStyle = theme.grid;
-    ctx.beginPath();
-    ctx.moveTo(0, y + 0.5);
-    ctx.lineTo(layout.chartW, y + 0.5);
-    ctx.stroke();
+    if (showGridlines) {
+      ctx.strokeStyle = theme.grid;
+      ctx.beginPath();
+      ctx.moveTo(0, y + 0.5);
+      ctx.lineTo(layout.chartW, y + 0.5);
+      ctx.stroke();
+    }
     const label = p.toFixed(pDec);
     ctx.fillStyle = theme.muted;
     if (axisChain) {
@@ -53,55 +55,24 @@ export function drawGrid(ctx, { view, layout, theme, priceToY, indexToX, timefra
     }
   }
 
-  // vertical grid on "nice" time increments (… 5, 10, 15, 30, 60 min …),
-  // labelling only candles whose timestamp lands on a round clock boundary.
-  // Size the step to the pixels available (labels live in the real-candle
-  // region, ~left half), keeping them >= ~1.6 label-widths apart so the axis
-  // stays readable when zoomed in on a narrow mobile screen.
-  // Measure the ACTUAL label width for this timeframe — hourly+ labels carry a
-  // date ("Sep 28 23:59") and are far wider than a bare "00:00", so measuring
-  // the real format is what keeps the 1h bottom labels from overlapping.
-  const labelW = ctx.measureText(fmtTimeTf(Date.UTC(2026, 8, 28, 23, 59), timeframe)).width;
-  const realPx = view.want * layout.candleW;
-  const maxLabels = Math.max(1, Math.floor(realPx / (labelW * 1.6)));
-  const spanMin = view.want * timeframe;
-  let stepMin = niceTimeStep(spanMin / maxLabels, timeframe);
-  // When zoomed in tight, the chosen "nice" step can be wider than the entire
-  // visible window — then no candle's timestamp aligns to it and the time
-  // line disappears. Fall back to the largest TIME_STEP that fits the window
-  // so at least one label is guaranteed.
-  if (stepMin > spanMin) {
-    let fallback = timeframe;
-    for (const s of TIME_STEPS) {
-      if (s < timeframe) continue;
-      if (s > spanMin) break;
-      fallback = s;
-    }
-    stepMin = fallback;
-  }
-  const stepMs = stepMin * 60000;
   ctx.textAlign = 'center';
-  // Label the first bar CROSSING each step boundary, not only bars landing
-  // exactly on it — IBKR deep-history bars are session-aligned (09:30…) and
-  // never hit epoch 12h boundaries, which left whole history stretches
-  // unlabeled. Seam-tolerant like tToIdx.
-  let prevBucket = null;
-  for (let i = 0; i < view.slotCount; i++) {
-    const c = view.slots[i];
-    if (!c) continue;
-    const bucket = Math.floor(c.t / stepMs);
-    const crossed = prevBucket !== null && bucket !== prevBucket;
-    const exact = c.t % stepMs === 0;
-    prevBucket = bucket;
-    if (!crossed && !exact) continue;
-    const x = indexToX(i);
-    ctx.beginPath();
-    ctx.moveTo(x + 0.5, layout.priceTop);
-    ctx.lineTo(x + 0.5, layout.volBot);
-    ctx.strokeStyle = theme.grid;
-    ctx.stroke();
+  for (const tick of selectTimeAxisLabels(view.slots, {
+    timeframe,
+    candleW: layout.candleW,
+  })) {
+    const x = indexToX(tick.index);
+    if (showGridlines) {
+      ctx.beginPath();
+      ctx.moveTo(x + 0.5, layout.priceTop);
+      ctx.lineTo(x + 0.5, layout.volBot);
+      ctx.strokeStyle = theme.grid;
+      ctx.stroke();
+    }
     ctx.fillStyle = theme.muted;
-    ctx.fillText(fmtTimeTf(c.t, timeframe), x, layout.h - 8);
+    ctx.font = tick.kind !== 'time'
+      ? '600 11px "JetBrains Mono", monospace'
+      : '11px "JetBrains Mono", monospace';
+    ctx.fillText(tick.label, x, layout.h - 8);
   }
 
   // separator between price + volume (only when the volume pane is visible)

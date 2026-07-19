@@ -1,6 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { validateArmedOrder, armedTriggered } from './armed.js';
+import {
+  addArmedOrderQuantity,
+  armedTriggered,
+  retargetArmedOrder,
+  ARMED_QTY_MAX,
+  validateArmedOrder,
+} from './armed.js';
 
 const ctx = { price: 7480, expiry: '20260713', contractAvailable: true };
 
@@ -9,11 +15,73 @@ test('a valid call arm above the market passes and is stamped with the expiry', 
   assert.equal(v.ok, true);
   assert.equal(v.armed.expiry, '20260713');
   assert.equal(v.armed.strike, 7505);
+  assert.equal(v.armed.qty, 1, 'legacy arms without qty remain one-lot');
 });
 
 test('a valid put arm below the market passes', () => {
-  const v = validateArmedOrder({ id: 'a2', level: 7460, strike: 7455, right: 'P', dir: 'down', expiry: ctx.expiry }, ctx);
+  const v = validateArmedOrder({ id: 'a2', level: 7460, strike: 7455, right: 'P', dir: 'down', expiry: ctx.expiry, qty: 5 }, ctx);
   assert.equal(v.ok, true);
+  assert.equal(v.armed.qty, 5);
+});
+
+test('armed quantity is an exact integer from 1 through the explicit server cap', () => {
+  const valid = { id: 'quantity', level: 7500, strike: 7505, right: 'C', dir: 'up', expiry: ctx.expiry };
+  for (const qty of [1, 2, 5, ARMED_QTY_MAX]) {
+    const result = validateArmedOrder({ ...valid, qty }, ctx);
+    assert.equal(result.ok, true, String(qty));
+    assert.equal(result.armed.qty, qty);
+  }
+  for (const qty of [0, -1, ARMED_QTY_MAX + 1, 1.5, '5', true, null, NaN, Infinity]) {
+    const result = validateArmedOrder({ ...valid, qty }, ctx);
+    assert.equal(result.ok, false, String(qty));
+    assert.match(result.reason, /quantity/);
+  }
+});
+
+test('malformed armed rows reject without throwing', () => {
+  for (const value of [null, undefined, 'arm', 5, true, []]) {
+    assert.deepEqual(validateArmedOrder(value, ctx), { ok: false, reason: 'malformed' });
+  }
+  assert.equal(addArmedOrderQuantity([], 1).ok, false);
+});
+
+test('quantity additions accept only +1/+2/+5 and never cross the cap', () => {
+  const arm = { id: 'quantity-add', qty: 2 };
+  assert.equal(addArmedOrderQuantity(arm, 1).armed.qty, 3);
+  assert.equal(addArmedOrderQuantity(arm, 2).armed.qty, 4);
+  assert.equal(addArmedOrderQuantity(arm, 5).armed.qty, 7);
+  assert.equal(addArmedOrderQuantity({ id: 'legacy' }, 5).armed.qty, 6);
+  for (const delta of [0, -1, 3, 1.5, '1', true, null]) {
+    assert.equal(addArmedOrderQuantity(arm, delta).ok, false, String(delta));
+  }
+  assert.deepEqual(
+    addArmedOrderQuantity({ id: 'at-cap', qty: ARMED_QTY_MAX }, 1),
+    { ok: false, reason: `armed quantity cannot exceed ${ARMED_QTY_MAX}` },
+  );
+});
+
+test('retarget shapes a moved candidate but leaves OTM/fence to the one validation path', () => {
+  const arm = { id: 'move', level: 7500, strike: 7505, right: 'C', dir: 'up', expiry: ctx.expiry, qty: 3 };
+  const moved = retargetArmedOrder(arm, { level: 7480, dir: 'down' });
+  assert.equal(moved.ok, true);
+  // Identity and quantity are preserved; only level + direction change.
+  assert.deepEqual(moved.armed, { ...arm, level: 7480, dir: 'down' });
+  // The moved candidate is validated by the SAME validateArmedOrder gate.
+  assert.equal(validateArmedOrder(moved.armed, { ...ctx, price: 7490 }).ok, true);
+  // An ITM move shapes fine here but the shared validator rejects it.
+  const itm = retargetArmedOrder(arm, { level: 7510, dir: 'up' });
+  assert.equal(itm.ok, true);
+  assert.equal(validateArmedOrder(itm.armed, ctx).ok, false);
+
+  for (const bad of [
+    [[], { level: 7480, dir: 'up' }],
+    [arm, { level: -1, dir: 'up' }],
+    [arm, { level: '7480', dir: 'up' }],
+    [arm, { level: 7480, dir: 'sideways' }],
+    [arm, { level: 7480 }],
+  ]) {
+    assert.equal(retargetArmedOrder(bad[0], bad[1]).ok, false, JSON.stringify(bad[1]));
+  }
 });
 
 test('either option right can fire on either crossing direction', () => {

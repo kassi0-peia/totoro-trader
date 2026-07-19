@@ -20,8 +20,9 @@ overlay and replay-mode practice fills.
   arm a **⏰ price alert**, or choose an exact CALL/PUT and then click a separate
   SPX trigger level for a two-step **⚔ entry**. Sells are limit-only by design.
 - **⚡ quick mode** (right-click a strike, armed) — instant 1-lot: **amber** =
-  marketable limit at ask + 1 tick; **red** = a real MKT (opt-in, SPX-only,
-  uncapped slippage — held until ~00:10 outside RTH).
+  marketable limit at ask + 1 tick; **red** = a real MKT (opt-in, SPX or guest,
+  uncapped slippage). Both have a restart-safe ~10-second lifetime; an ordinary
+  EXECUTE-ticket MKT remains separate and may be held until ~00:10 outside RTH.
 - **Alerts** — dashed line + axis tag only while armed; one-shot on crossing
   the live SPX-equiv (works overnight); toast + chime; survives reloads.
 - **Pinned position cards** — pin several exact open contracts, then move,
@@ -30,8 +31,9 @@ overlay and replay-mode practice fills.
 - **Brackets & exits** — optional TP (`LMT`) / SL (`STP`) at entry; an existing
   position can attach TP, SL, and/or an IBKR-native `TRAIL` in one OCA group.
 - **Multi-symbol** — 🔍 choose an exact US-stock contract → a guest cockpit with
-  its near-ATM chain and nearest listed option expiry; guest tickets are LMT-only
-  (the limit may rest). ★ watchlist snapshots live inside the same popover.
+  its near-ATM chain and nearest listed option expiry; exact guest BUY tickets
+  support MKT/LMT while SELL stays LMT-only. ★ watchlist snapshots live inside
+  the same popover.
 - **Journal** — the trades drawer holds today's blotter and the multi-day
   history: equity curve, win rate, per-day P/L with expandable fills.
 - **Replay** — off-hours SPX practice against a past 1-min tape, with separate
@@ -98,7 +100,8 @@ src/feed.js (useIbkrFeed) ── one snapshot stream + senders (orders, quotes,
      ▼
 src/App.jsx ── cockpit coordinator · src/Chart.jsx ── canvas coordinator
      │          src/app/* view/action seams · src/chart/* painters/interactions
-     └──────── server/{portfolio,history,quote-service,kill-*,guest-*}.js services
+     └──────── server/{portfolio,history,quote-service,order-*,quick-order-*,
+                        armed-state-store,kill-*,guest-*}.js services
 ```
 
 ## Market sessions & the ES↔SPX basis
@@ -136,17 +139,18 @@ so the chart shows front-month ES shifted to an SPX-equivalent scale
 
 ## Orders & account safety
 
-- There are exactly **two naked-MKT paths**. The **EXECUTE ticket** for an SPX
-  **BUY-to-open** opens with **MKT** selected
-  (instant fill, uncapped slippage, IBKR-simulated/held until ~00:10 outside
-  RTH); a marketable limit prefilled at the
-  ask is one toggle away. **Sell-to-open and guest-symbol tickets are limit-only**
-  (a market sell into a thin book is a blank check; the bridge rejects a guest
-  MKT). The red ⚡ arm is the other deliberate MKT path (SPX-only). Both MKT
-  paths require a fresh ask witness before the bridge will route them.
+- There are exactly **two naked-MKT path classes**. The **EXECUTE ticket** for a
+  **BUY-to-open** opens with **MKT** selected on SPX and an exact active guest
+  (a deliberate design choice — instant fill, uncapped slippage, IBKR-
+  simulated/held until ~00:10 outside RTH); a marketable limit prefilled at the
+  ask is one toggle away. **Sell-to-open is limit-only on every symbol**
+  (a market sell into a thin book is a blank check). The red ⚡ arm is the other
+  deliberate MKT path for SPX or an exact active guest, but unlike
+  the ordinary DAY EXECUTE order it carries the same restart-safe quick deadline
+  as amber. Both MKT paths require a fresh ask witness before the bridge routes.
 - **CLOSE / REVERSE / add / rung / staged KILL / amber ⚡** use side-aware
-  marketable limits (BUY crosses a fresh ask; SELL crosses a fresh bid). Guest
-  and SELL-to-open tickets require a positive `LMT` but may intentionally rest.
+  marketable limits (BUY crosses a fresh ask; SELL crosses a fresh bid).
+  SELL-to-open tickets require a positive `LMT` but may intentionally rest.
   Attached exits keep their native types: TP=`LMT`, SL=`STP`, TRAIL=`TRAIL`.
 - Positions and fills are **IBKR-authoritative**: real `avgFillPrice`, dedupe
   by `execId`, and a reconnect backfills anything missed via `reqExecutions`.
@@ -155,10 +159,22 @@ so the chart shows front-month ES shifted to an SPX-equivalent scale
   refs, plus every in-flight ref) is blocked or receives the first committed
   acknowledgement; an uncertain submission consumes the ref rather than risking
   a second order. This registry is process-local, not a cross-restart promise.
-- **⚔ armed entries** are SPX-only, BUY-only, one-lot, and capped at three. The
-  bridge revalidates the exact current-expiry contract and independent SPX trigger,
-  then fires once as a fresh-ask marketable limit with quick auto-cancel. The armed
-  list is currently wholesale across tabs and its fired-ID memory is process-local.
+- **⚔ armed entries** are SPX-only, BUY-only, default to one contract, and are
+  capped at three triggers. Each trigger's hover card can add `+1` / `+2` / `+5`
+  contracts up to 10. The bridge owns one persisted, account/expiry-bound,
+  revisioned armed book; browser storage is display cache only, so stale tabs
+  cannot resurrect or overwrite another tab's change. The UI waits for canonical
+  confirmation before changing quantity or hiding a disarmed row. The bridge
+  revalidates the exact current-expiry contract and independent SPX trigger,
+  durably consumes the one-shot before submission, then fires a fresh-ask
+  marketable limit. After 10 seconds, quick auto-cancel requests cancellation of
+  every still-working remainder, including after a partial fill.
+- **Quick lifetime survives process loss.** Amber LMT and red real-MKT quick
+  orders carry a broker `GTD` plus a compact `TTQ1` identity as a backstop to the
+  exact local timer. On reconnect, every exact app-owned TTQ1 row is stale:
+  the bridge cancels it and requires a fresh open-order snapshot proving it
+  absent before normal routing becomes ready. Foreign/manual identity is never
+  guessed; ambiguity fails closed.
 - Orders use `outsideRth: true` so they work the SPXW overnight (GTH) session;
   IBKR's code-399 "held until open" notice is informational, not a rejection.
 - Paper vs live is the Gateway login. `DU…` shows a green **PAPER** badge;

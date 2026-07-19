@@ -97,6 +97,8 @@ test('initial sync preserves first-account selection and readiness semantics', (
   assert.deepEqual(h.portfolio.publicSnapshot(), {
     account: null,
     accountType: null,
+    accountCount: 0,
+    accountAmbiguous: false,
     executionEnabled: false,
     positionsReady: false,
     positionsError: null,
@@ -115,6 +117,30 @@ test('initial sync preserves first-account selection and readiness semantics', (
   assert.equal(h.portfolio.onPositionEnd(), true);
   assert.equal(h.portfolio.isReady(), true);
   assert.equal(h.portfolio.publicSnapshot().positionsReady, true);
+});
+
+test('multiple managed accounts surface an ambiguity flag without changing selection', () => {
+  const h = harness();
+  h.portfolio.beginInitialSync();
+
+  // Single account: no ambiguity.
+  assert.equal(h.portfolio.onManagedAccounts('DU111'), true);
+  assert.equal(h.portfolio.publicSnapshot().account, 'DU111');
+  assert.equal(h.portfolio.publicSnapshot().accountCount, 1);
+  assert.equal(h.portfolio.publicSnapshot().accountAmbiguous, false);
+
+  // Two accounts: still routes the first, but flags the ambiguity + count.
+  assert.equal(h.portfolio.onManagedAccounts(' DU111, U222 '), true);
+  let snap = h.portfolio.publicSnapshot();
+  assert.equal(snap.account, 'DU111', 'selection stays on the first account');
+  assert.equal(snap.accountCount, 2);
+  assert.equal(snap.accountAmbiguous, true);
+
+  // Duplicates collapse; a repeated account is not "ambiguous".
+  assert.equal(h.portfolio.onManagedAccounts('DU111,DU111'), true);
+  snap = h.portfolio.publicSnapshot();
+  assert.equal(snap.accountCount, 1);
+  assert.equal(snap.accountAmbiguous, false);
 });
 
 test('same conId in two accounts cannot overwrite and exact signed rows retain the full contract', () => {
@@ -388,6 +414,8 @@ test('disconnect rejects every refresh, cancels all subscriptions, and clears au
   assert.deepEqual(disconnected, {
     account: null,
     accountType: null,
+    accountCount: 0,
+    accountAmbiguous: false,
     executionEnabled: false,
     positionsReady: false,
     positionsError: null,
@@ -501,4 +529,23 @@ test('constructor rejects missing or unsafe dependencies', () => {
     allocateReqId: () => 1,
     timers: {},
   }), /timers/);
+});
+
+test('a position contract with no exchange is stored routable (SMART), a real one is kept', () => {
+  // IBKR position callbacks omit the exchange. Downstream consumers need a
+  // routable contract: inactive-guest quote marks failed at the broker with
+  // "Please enter exchange", and KILL's exact-identity check refused the leg
+  // (fail-closed — it could not flatten a guest position). The conId pins the
+  // exact contract; SMART is only the routing instruction.
+  const h = harness();
+  h.portfolio.onManagedAccounts('DU111');
+  h.portfolio.beginInitialSync();
+  h.portfolio.onPosition('DU111', option({ conId: 9001, symbol: 'MSTR', tradingClass: 'MSTR', exchange: '' }), 5, 320);
+  h.portfolio.onPosition('DU111', option({ conId: 9002, strike: 7500, exchange: 'CBOE' }), 1, 900);
+  h.portfolio.onPositionEnd();
+  const rows = h.portfolio.publicSnapshot().positions;
+  const mstr = rows.find((p) => p.contract.conId === 9001);
+  const spx = rows.find((p) => p.contract.conId === 9002);
+  assert.equal(mstr.contract.exchange, 'SMART', 'missing exchange is stamped SMART');
+  assert.equal(spx.contract.exchange, 'CBOE', 'a real exchange is never overwritten');
 });

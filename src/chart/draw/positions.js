@@ -1,13 +1,15 @@
 import { plDollars } from '../../pl.js';
-import { fmtDelta, liveDeltaOf } from '../../drift.js';
+import { fmtDelta, fmtGamma, liveDeltaOf, liveGammaOf } from '../../drift.js';
 
 export function positionChartLabelParts(pos, pl) {
   const plKnown = Number.isFinite(pl);
   const sign = plKnown && pl >= 0 ? '+' : '−';
   const liveDelta = liveDeltaOf(pos.greeksLive);
   const delta = liveDelta == null ? '—' : fmtDelta(liveDelta);
+  const liveGamma = liveGammaOf(pos.greeksLive);
+  const gamma = liveGamma == null ? '—' : fmtGamma(liveGamma);
   return {
-    contract: `${pos.strike}${pos.type === 'call' ? 'C' : 'P'} ×${pos.qty}  Δ${delta}`,
+    contract: `${pos.strike}${pos.type === 'call' ? 'C' : 'P'} ×${pos.qty}  Δ${delta}  Γ${gamma}`,
     pl: plKnown ? `${sign}$${Math.abs(pl).toFixed(0)}` : '—'
   };
 }
