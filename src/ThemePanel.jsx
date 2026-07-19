@@ -1,5 +1,5 @@
-import React from 'react';
-import { THEMES, THEME_KEYS } from './themes.js';
+import React, { useState } from 'react';
+import { THEMES, THEME_TABS } from './themes.js';
 
 export default function ThemePanel({
   open, current, onPick, onClose,
@@ -11,15 +11,33 @@ export default function ThemePanel({
   showPositions = true, onToggleShowPositions = null,
   showMarkers = true, onToggleShowMarkers = null,
 }) {
+  // Open on whichever tab holds the active theme; picking never switches tabs.
+  const [themeTab, setThemeTab] = useState(
+    () => THEME_TABS.find((tab) => tab.keys.includes(current))?.id ?? THEME_TABS[0].id,
+  );
   if (!open) return null;
+  const shownKeys = (THEME_TABS.find((tab) => tab.id === themeTab) ?? THEME_TABS[0]).keys;
   return (
     <div className="theme-panel" onClick={(e) => e.stopPropagation()}>
       <div className="theme-panel-head">
         <span>Settings</span>
         <button className="x-btn" onClick={onClose} aria-label="close">×</button>
       </div>
+      <div className="theme-tabs" role="tablist">
+        {THEME_TABS.map((tab) => (
+          <button
+            key={tab.id}
+            role="tab"
+            aria-selected={tab.id === themeTab}
+            className={`theme-tab${tab.id === themeTab ? ' active' : ''}`}
+            onClick={() => setThemeTab(tab.id)}
+          >
+            {tab.name}
+          </button>
+        ))}
+      </div>
       <div className="theme-grid">
-        {THEME_KEYS.map((k) => {
+        {shownKeys.map((k) => {
           const t = THEMES[k];
           const active = k === current;
           return (

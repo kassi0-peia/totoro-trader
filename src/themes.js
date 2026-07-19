@@ -162,7 +162,56 @@ export const THEMES = {
     up: '#cf9b66', upFilled: true, down: '#7e93a6', downFilled: true,
     volUp: 'rgba(207, 155, 102, 0.32)', volDown: 'rgba(126, 147, 166, 0.32)',
     callLine: '#cf9b66', putLine: '#7e93a6', profit: '#cf9b66', loss: '#7e93a6'
+  },
+
+  // ── Extras (second tab): departures from the house dark-muted family.
+  // The cockpit pins its chrome to one neutral near-black (useCockpitSettings),
+  // so a theme here is really a candle/accent/text palette — a light theme
+  // cannot exist without unpinning that chrome first. Direction/P-L must stay
+  // legible in every one — Mono codes it purely by brightness (bright =
+  // up/profit, dim = down/loss), the rest keep two clearly separated hues.
+  mono: {
+    name: 'Mono',
+    bg: '#101010', surface: '#161616', surfaceAlt: '#1c1c1c', border: '#2b2b2b', grid: '#1a1a1a',
+    text: '#d6d6d6', muted: '#5d5d5d',
+    accent: '#9e9e9e', accentSoft: 'rgba(158, 158, 158, 0.18)',
+    up: '#e4e4e4', upFilled: true, down: '#616161', downFilled: true,
+    volUp: 'rgba(228, 228, 228, 0.22)', volDown: 'rgba(97, 97, 97, 0.35)',
+    callLine: '#cfcfcf', putLine: '#787878', profit: '#f0f0f0', loss: '#6b6b6b'
+  },
+  noir: {
+    name: 'Noir',
+    bg: '#121110', surface: '#181614', surfaceAlt: '#1e1b18', border: '#2e2a25', grid: '#1a1815',
+    text: '#d8d3cb', muted: '#635d54',
+    accent: '#b3aa9c', accentSoft: 'rgba(179, 170, 156, 0.18)',
+    up: '#d2ccc2', upFilled: true, down: '#a35555', downFilled: true,
+    volUp: 'rgba(210, 204, 194, 0.22)', volDown: 'rgba(163, 85, 85, 0.32)',
+    callLine: '#c4bdb1', putLine: '#a35555', profit: '#d2ccc2', loss: '#c25b5b'
+  },
+  synth: {
+    name: 'Synth',
+    bg: '#0d0916', surface: '#140e1f', surfaceAlt: '#191228', border: '#2c2140', grid: '#170f24',
+    text: '#d9d2ea', muted: '#5f5678',
+    accent: '#e05fbc', accentSoft: 'rgba(224, 95, 188, 0.18)',
+    up: '#5fe0d0', upFilled: true, down: '#e05fbc', downFilled: true,
+    volUp: 'rgba(95, 224, 208, 0.28)', volDown: 'rgba(224, 95, 188, 0.28)',
+    callLine: '#5fe0d0', putLine: '#e05fbc', profit: '#5fe0d0', loss: '#e05fbc'
+  },
+  arctic: {
+    name: 'Arctic',
+    bg: '#0e141c', surface: '#131a24', surfaceAlt: '#18202c', border: '#263242', grid: '#151d29',
+    text: '#d7e2ec', muted: '#5b6b7c',
+    accent: '#9fc6e0', accentSoft: 'rgba(159, 198, 224, 0.18)',
+    up: '#cfe6f5', upFilled: true, down: '#5e7285', downFilled: true,
+    volUp: 'rgba(207, 230, 245, 0.22)', volDown: 'rgba(94, 114, 133, 0.35)',
+    callLine: '#b9d8ec', putLine: '#6e849a', profit: '#cfe6f5', loss: '#8296aa'
   }
 };
 
 export const THEME_KEYS = Object.keys(THEMES);
+
+// Theme-picker tabs: the house family first, departures second.
+export const THEME_TABS = [
+  { id: 'house', name: 'HOUSE', keys: ['kisa', 'midnight', 'forest', 'classic', 'slate', 'sage', 'lagoon', 'indigo', 'plum', 'moss', 'harbor', 'ember'] },
+  { id: 'extras', name: 'EXTRAS', keys: ['mono', 'noir', 'synth', 'arctic'] },
+];

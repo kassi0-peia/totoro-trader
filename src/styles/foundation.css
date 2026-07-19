@@ -377,6 +377,29 @@ button {
   line-height: 1;
 }
 
+/* Theme-picker tabs: HOUSE (the muted family) / EXTRAS (departures). */
+.theme-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+.theme-tab {
+  flex: 1;
+  height: 24px;
+  border: 1px solid var(--c-border);
+  border-radius: 5px;
+  background: none;
+  color: var(--c-muted);
+  font-family: inherit;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  cursor: pointer;
+  transition: color 140ms, border-color 140ms;
+}
+.theme-tab:hover { color: var(--c-text); }
+.theme-tab.active { color: var(--c-accent); border-color: var(--c-accent); }
+
 .theme-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
