@@ -1625,10 +1625,10 @@ export default function App() {
             onRefresh={canRefreshPositionHistory(shown) ? refreshPositionHistory : null}
             executionEnabled={orderSurfaceExecutionEnabled}
             trailOk={!!feed.caps?.trail}
-            onActivate={() => {
+            onActivate={(at, moved) => {
               if (cardHideRef.current) { clearTimeout(cardHideRef.current); cardHideRef.current = null; }
               cardHoveredRef.current = false;
-              pinPosition(shown);
+              pinPosition(shown, at, moved);
             }}
             onHoverChange={(over) => {
               cardHoveredRef.current = over;

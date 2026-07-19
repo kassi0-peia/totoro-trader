@@ -40,10 +40,13 @@ export default function usePinnedCards({ setHoverPos }) {
     window.addEventListener('resize', resize);
     return () => window.removeEventListener('resize', resize);
   }, []);
-  const pinPosition = useCallback((position) => {
+  // `at` is an optional viewport point ({x, y}) where the pin should land —
+  // the hover card's own corner, so pinning never teleports the card. `moved`
+  // marks a deliberate drag-drop (relocates an already-pinned card).
+  const pinPosition = useCallback((position, at = null, moved = false) => {
     if (!position || position.status !== 'open') return;
     setHoverPos(null);
-    dispatchPinnedCard({ type: 'open', position, viewport: pinnedViewportRef.current });
+    dispatchPinnedCard({ type: 'open', position, at, moved, viewport: pinnedViewportRef.current });
   }, [setHoverPos]);
   const focusPinnedCard = useCallback((key) => {
     dispatchPinnedCard({ type: 'focus', key, viewport: pinnedViewportRef.current });

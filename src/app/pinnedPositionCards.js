@@ -125,8 +125,26 @@ function focusCards(cards, key, viewport) {
   ], viewport);
 }
 
-function defaultCard(identity, cards, viewport) {
+// A pin born from the hover card carries the exact viewport point where that
+// card sat (or was dropped); only pins with no such witness fall back to the
+// stacked top-right corner.
+function pinPoint(value) {
+  const x = finiteNumber(value?.x);
+  const y = finiteNumber(value?.y);
+  return x != null && y != null ? { x, y } : null;
+}
+
+function defaultCard(identity, cards, viewport, at = null) {
   const vp = normalizePinnedViewport(viewport);
+  if (at) {
+    const layout = clampPinnedCardLayout({
+      width: PINNED_CARD_DEFAULT_WIDTH,
+      height: PINNED_CARD_DEFAULT_HEIGHT,
+      x: at.x,
+      y: at.y,
+    }, vp);
+    return { ...identity, ...layout, z: cards.length + 1 };
+  }
   const offset = (cards.length % 8) * 24;
   const layout = clampPinnedCardLayout({
     width: PINNED_CARD_DEFAULT_WIDTH,
@@ -143,11 +161,19 @@ export function pinnedCardReducer(state = createPinnedCardState(), action = {}) 
   if (action.type === 'open') {
     const identity = pinnedPositionIdentity(action.position ?? action.identity);
     if (!identity) return state;
+    const at = pinPoint(action.at);
     if (cards.some((card) => card.key === identity.key)) {
-      const focused = focusCards(cards, identity.key, viewport);
+      // Already pinned: a plain click only raises the existing card where the
+      // user last placed it. A deliberate drag-drop relocates it to the drop.
+      const moved = at && action.moved
+        ? cards.map((card) => (card.key === identity.key
+          ? { ...card, ...clampPinnedCardLayout({ ...card, x: at.x, y: at.y }, viewport) }
+          : card))
+        : cards;
+      const focused = focusCards(moved, identity.key, viewport);
       return focused === cards ? state : { cards: focused };
     }
-    return { cards: compactCards([...cards, defaultCard(identity, cards, viewport)], viewport) };
+    return { cards: compactCards([...cards, defaultCard(identity, cards, viewport, at)], viewport) };
   }
   if (action.type === 'focus') {
     if (!cards.some((card) => card.key === action.key)) return state;
