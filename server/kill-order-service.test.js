@@ -210,30 +210,62 @@ test('open-order snapshots expose only the anchored account and missing row acco
   )));
 });
 
-test('foreign-client, manual, duplicate, and colliding option identities are preserved as hard blockers', async () => {
+test('foreign-client, manual, and colliding option identities are preserved as hard blockers', async () => {
   const h = harness();
   const snapshot = h.service.snapshotOpenOrders({ purpose: 'identity-blockers' });
-  const exactDuplicate = ibOrder({ clientId: CLIENT_ID, permId: 60_001 });
   h.service.onOpenOrder(21, option({ conId: 21 }), ibOrder({ clientId: 99, permId: 60_002 }), { status: 'Submitted' });
   h.service.onOpenOrder(-7, option({ conId: 22 }), ibOrder({ clientId: CLIENT_ID, permId: 60_003 }), { status: 'Submitted' });
-  h.service.onOpenOrder(23, option({ conId: 23 }), exactDuplicate, { status: 'Submitted' });
-  h.service.onOpenOrder(23, option({ conId: 23 }), exactDuplicate, { status: 'Submitted' });
+  // Bare orderId 24 shared by two DISTINCT orders (own vs foreign client, different
+  // contract + permId) — a genuine collision that must still fail closed.
   h.service.onOpenOrder(24, option({ conId: 24 }), ibOrder({ clientId: CLIENT_ID, permId: 60_004 }), { status: 'Submitted' });
   h.service.onOpenOrder(24, option({ conId: 25 }), ibOrder({ clientId: 98, permId: 60_005 }), { status: 'Submitted' });
   h.service.onOpenOrderEnd();
 
   const rows = await snapshot;
-  assert.equal(rows.length, 6, 'no row may overwrite another row with the same bare orderId');
+  assert.equal(rows.length, 4, 'no row may overwrite another row with the same bare orderId');
   const reasons = rows.map((row) => row.killOrderIdentity?.reason || '');
   assert.ok(reasons.some((reason) => /foreign API client/.test(reason)));
   assert.ok(reasons.some((reason) => /negative orderId/.test(reason)));
-  assert.equal(rows.filter((row) => row.orderId === 23).length, 2);
-  assert.ok(rows.filter((row) => row.orderId === 23).every((row) => row.killOrderIdentity.ambiguous));
   assert.ok(rows.filter((row) => row.orderId === 24).every((row) => row.killOrderIdentity.ambiguous));
   await rejectsCode(h.service.cancelOrder(21), 'ORDER_NOT_IN_SNAPSHOT');
-  await rejectsCode(h.service.cancelOrder(23), 'ORDER_NOT_IN_SNAPSHOT');
   await rejectsCode(h.service.cancelOrder(24), 'ORDER_NOT_IN_SNAPSHOT');
   assert.deepEqual(h.calls.cancels, []);
+});
+
+test('an exact-duplicate openOrder echo collapses to one safely cancellable identity', async () => {
+  // reqAllOpenOrders (sharing the live openOrder channel) can echo the same order
+  // twice inside one openOrderEnd cycle. That is one order, not a conflict, and
+  // must not trip `duplicate openOrder identity in one snapshot` (seen live
+  // 2026-07-18: closeProofError on an otherwise-flat staged KILL).
+  const h = harness();
+  const snapshot = h.service.snapshotOpenOrders({ purpose: 'exact-duplicate' });
+  const exact = ibOrder({ clientId: CLIENT_ID, permId: 60_101 });
+  h.service.onOpenOrder(31, option({ conId: 31 }), exact, { status: 'Submitted' });
+  h.service.onOpenOrder(31, option({ conId: 31 }), exact, { status: 'Submitted' });
+  h.service.onOpenOrderEnd();
+
+  const rows = await snapshot;
+  const row31 = rows.filter((row) => row.orderId === 31);
+  assert.equal(row31.length, 1, 'an exact duplicate is one order, not two');
+  assert.equal(row31[0].killOrderIdentity.ambiguous, false);
+  assert.equal(row31[0].killOrderIdentity.cancellable, true);
+  assert.equal(row31[0].killOrderIdentity.reason, null);
+});
+
+test('same bare orderId with a divergent client/perm identity still fails closed', async () => {
+  const h = harness();
+  const snapshot = h.service.snapshotOpenOrders({ purpose: 'divergent-identity' });
+  // Same account, clientId, and contract, but a DIFFERENT permId — not a byte
+  // echo of one order, so the fingerprints differ and the ambiguity guard holds.
+  h.service.onOpenOrder(32, option({ conId: 32 }), ibOrder({ clientId: CLIENT_ID, permId: 60_201 }), { status: 'Submitted' });
+  h.service.onOpenOrder(32, option({ conId: 32 }), ibOrder({ clientId: CLIENT_ID, permId: 60_202 }), { status: 'Submitted' });
+  h.service.onOpenOrderEnd();
+
+  const rows = await snapshot;
+  const row32 = rows.filter((row) => row.orderId === 32);
+  assert.equal(row32.length, 2, 'divergent identities are never deduped');
+  assert.ok(row32.every((row) => row.killOrderIdentity.ambiguous));
+  await rejectsCode(h.service.cancelOrder(32), 'ORDER_NOT_IN_SNAPSHOT');
 });
 
 test('a cross-client bare orderStatus collision can never satisfy a cancellation waiter', async () => {

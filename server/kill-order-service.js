@@ -490,6 +490,7 @@ export function createKillOrderService({
         timer: null,
         onAbort: null,
         rows: [],
+        seenFingerprints: new Set(),
         identityCounts: new Map(),
         identitiesByOrderId: new Map(),
         identitiesByPermId: new Map(),
@@ -561,7 +562,20 @@ export function createKillOrderService({
       rec.missingAccountRows.push({ orderId: orderIdValue });
       return true;
     }
-    if (identity) {
+    // reqAllOpenOrders (and the live openOrder channel it shares) can echo the
+    // SAME order twice inside one openOrderEnd cycle. An exact duplicate — same
+    // account + clientId + orderId + permId + contract — is one order, not a
+    // conflict, and must not inflate the ambiguity counters (which would make
+    // `duplicate openOrder identity in one snapshot` fail an otherwise-safe KILL
+    // cancellation, seen live 2026-07-18). Fingerprint includes the contract, so
+    // any real divergence (a bare orderId shared by two DISTINCT orders) is NOT
+    // deduped and still fails closed below.
+    const fingerprint = identity != null
+      ? `${rowAccount}|${identity}|${exactOptionKey(contract) ?? 'no-contract'}`
+      : null;
+    const echo = fingerprint != null && rec.seenFingerprints.has(fingerprint);
+    if (identity && !echo) {
+      rec.seenFingerprints.add(fingerprint);
       rec.identityCounts.set(identity, (rec.identityCounts.get(identity) || 0) + 1);
       let byOrderId = rec.identitiesByOrderId.get(snapshotOrderId);
       if (!byOrderId) {
@@ -580,6 +594,10 @@ export function createKillOrderService({
     // cross-account/client bare-orderId collision cannot satisfy a waiter, but
     // expose rows only for the transaction's selected account.
     if (rowAccount !== rec.account) return true;
+    // An exact-duplicate echo is already represented by its first row; a second
+    // copy would re-trip the cancel-witness "duplicate cancellable bare orderId"
+    // guard and could submit a redundant close.
+    if (echo) return true;
     rec.rows.push(row);
     return true;
   }

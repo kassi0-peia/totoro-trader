@@ -67,6 +67,28 @@ export function freshQuoteMid(quote, now = Date.now(), maxAgeMs = ORDER_QUOTE_FR
   return (bid + ask) / 2;
 }
 
+// SPX/SPXW (index) option price grid — IBKR's minimum price variation for these
+// contracts: $0.05 below $3.00 premium, $0.10 at/above $3.00. An off-grid limit
+// is hard-rejected (error 110, "price does not conform to the minimum price
+// variation"). Guest US-equity options are NOT on this grid (many names are
+// penny-quoted), so the snap below must be applied for the home cockpit only.
+export function optionTickSize(price) {
+  return Number(price) < 3 ? 0.05 : 0.10;
+}
+
+// Snap a user-typed home-grid option price to the NEAREST valid tick. Ties round
+// up (4.05 → 4.10). Computed in integer cents — the input is rounded to whole
+// cents first — so a floating-point 4.05 (stored as 4.0499999…) still lands on
+// 4.10 rather than collapsing to 4.00, and 41 × $0.10 never leaks a
+// 4.1000000000000005. A positive price never snaps below one tick.
+export function snapToOptionTick(price) {
+  if (!positiveFiniteNumber(price)) return price;
+  const cents = Math.round(price * 100);
+  const tickCents = price < 3 ? 5 : 10;
+  const snappedCents = Math.max(tickCents, Math.round(cents / tickCents) * tickCents);
+  return snappedCents / 100;
+}
+
 // Marketable option limit for an already-quoted contract. BUY crosses the ask
 // by one tick; SELL crosses the bid by one tick. Keeping this side-aware is
 // essential for short positions: buying a short back at bid-minus is not a
@@ -82,7 +104,7 @@ export function marketableLimitForAction(quote, action, now = Date.now()) {
   const buy = normalizedAction === 'BUY';
   const px = buy ? ask : bid;
   if (!positiveFiniteNumber(px)) return null;
-  const tick = px < 3 ? 0.05 : 0.10;
+  const tick = optionTickSize(px);
   const crossed = buy ? px + tick : Math.max(0.05, px - tick);
   return Math.round(crossed * 100) / 100;
 }

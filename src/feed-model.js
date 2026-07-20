@@ -251,6 +251,18 @@ export function applyMessage(s, msg, clock = Date.now) {
     return { ...s, orders: Array.isArray(msg.orders) ? msg.orders : [] };
   }
 
+  // A hard broker rejection (orderError) is authoritative that this exact order
+  // is dead. Prune it from the working-order projection immediately rather than
+  // wait for the next server `orders` broadcast — a bridge that failed to
+  // re-publish on reject would otherwise strand the row, blocking re-attach and
+  // defying cancel ("order not found"). Self-healing: a later authoritative
+  // `orders`/`portfolio` message still replaces the list wholesale.
+  if (msg.type === 'orderError' && msg.orderId != null) {
+    if (!Array.isArray(s.orders) || !s.orders.length) return s;
+    const orders = s.orders.filter((order) => order?.orderId !== msg.orderId);
+    return orders.length === s.orders.length ? s : { ...s, orders };
+  }
+
   if (msg.type === 'portfolio') {
     const hasPositions = Array.isArray(msg.positions);
     const hasOrders = Array.isArray(msg.orders);

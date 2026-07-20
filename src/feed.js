@@ -243,6 +243,13 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent, onGuestEvent }
           });
           return;
         }
+        // A hard reject is authoritative that the order is dead: prune it from
+        // the working-order projection now so the UI self-heals even if the
+        // bridge did not re-publish its order list. The callback still fires
+        // below for the toast + local lifecycle settlement.
+        if (msg.type === 'orderError' && msg.orderId != null) {
+          setSnapshot((s) => applyMessage(s, msg));
+        }
         // Order lifecycle events are transient — hand them to the callback.
         if (msg.type === 'orderAck' || msg.type === 'fill' || msg.type === 'orderError' || msg.type === 'orderWarning' || msg.type === 'orderAutoCancel' || msg.type === 'cancelAck' ||
             msg.type === 'armedFired' || msg.type === 'armedFailed' || msg.type === 'armedRejected' || msg.type === 'armedCleared' ||

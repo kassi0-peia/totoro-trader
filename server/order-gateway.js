@@ -594,8 +594,22 @@ export function createOrderGateway({
     if (quickOwn && quickRecovery.hazard && !DEAD_ORDER_STATUSES.has(record.status)) {
       surfaceQuickRecoveryHazard(stableKey, record, quickRecovery);
     }
-    log(`[ibkr] recovered ${own ? 'own' : 'read-only foreign'} order ${stableKey}: ${record.action} ${record.strike}${record.right} (${record.status})`);
-    publishOrders();
+    // openOrder is re-emitted verbatim (reqAllOpenOrders + the live channel echo
+    // the same row). Only re-log/re-publish when a projected field actually
+    // changed, so an identical echo does not double the "recovered own order"
+    // log line or re-broadcast an unchanged working-order list.
+    const recoverySig = [
+      record.status, record.action, record.strike, record.right, record.expiry,
+      record.qty, record.orderType, record.limit, record.aux, record.permId,
+      record.account, record.clientId, record.cancellable, record.symbol,
+      record.orderRef, record.tif, record.goodTillDate, record.ocaGroup,
+    ].join('|');
+    const unchanged = existing != null && existing.recoverySig === recoverySig;
+    record.recoverySig = recoverySig;
+    if (!unchanged) {
+      log(`[ibkr] recovered ${own ? 'own' : 'read-only foreign'} order ${stableKey}: ${record.action} ${record.strike}${record.right} (${record.status})`);
+      publishOrders();
+    }
     return {
       own,
       orderKey: stableKey,
@@ -649,6 +663,16 @@ export function createOrderGateway({
       if (candidates.length === 1) ({ row: o, own } = candidates[0]);
     }
     if (!o) return;
+    // The @stoqey/ib order channel re-emits an IDENTICAL orderStatus for the
+    // same transition (seen live 2026-07-18: every fill logged + broadcast +
+    // journaled twice). A byte-identical repeat carries no new lifecycle truth,
+    // so drop it before any downstream effect — the fill broadcast, onOrderFilled
+    // journaling, and the FILLED log all fire exactly once per real transition.
+    // Any genuine change (status/filled/remaining/avgFill/permId) differs and is
+    // processed normally, so real partial→full progressions are never suppressed.
+    const statusSig = `${status}|${filled}|${remaining}|${avgFillPrice}|${identity.permId ?? o.permId ?? ''}`;
+    if (o.lastStatusSig === statusSig) return;
+    o.lastStatusSig = statusSig;
     o.status = status;
     o.filled = filled;
     o.remaining = remaining;
@@ -733,6 +757,13 @@ export function createOrderGateway({
       o.status = 'error';
       clearQuickTimer(reqId);
       log(`[ibkr] order ${reqId} (${o.action} ${o.strike}${o.right}) REJECTED ${code}: ${reason}`);
+      // 'error' is a DEAD status, so the rejected row now falls out of the
+      // working-order projection — but only if we re-publish. Without this the
+      // client keeps the stale row forever: it blocks a re-attach ("an exit is
+      // already working") and can't be cancelled (findCancelableOrderId skips
+      // 'error'). Every client-initiated order (ticket, close, attached exit)
+      // shares this one path (seen live 2026-07-18, rejected TP at $4.05).
+      publishOrders();
       broadcast({ type: 'orderError', clientRef: o.clientRef, orderId: reqId, code, reason });
     } else {
       log(`[ibkr] order ${reqId} (${o.action} ${o.strike}${o.right}) warning ${code}: ${reason}`);

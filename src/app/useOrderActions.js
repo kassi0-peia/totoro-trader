@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { liveQuote } from '../feed.js';
 import { nearestOtmStrike } from '../options.js';
-import { buildOpenOrder, buildQuickOrder, freshQuoteMid } from '../order-payload.js';
+import { buildOpenOrder, buildQuickOrder, freshQuoteMid, snapToOptionTick } from '../order-payload.js';
 import { plDollars } from '../pl.js';
 import { executeKillIntent } from './killAction.js';
 import { rightOf } from './helpers.js';
@@ -125,10 +125,18 @@ export default function useOrderActions({
     }
     if (!feed.executionEnabled) { showToast('Execution disabled', 'err'); return; }
     const sell = pending.side === 'sell';
+    // Snap typed prices to the SPX/SPXW tick grid so an off-grid limit/bracket
+    // can't earn a broker reject (error 110). Home cockpit only — guest equity
+    // options are frequently penny-quoted and the app does not know their grid.
+    const homeGrid = !guestActive;
+    const gridLimit = homeGrid && limit != null ? snapToOptionTick(limit) : limit;
+    const gridTakeProfit = homeGrid && takeProfit != null ? snapToOptionTick(takeProfit) : takeProfit;
+    const gridStopLoss = homeGrid && stopLoss != null ? snapToOptionTick(stopLoss) : stopLoss;
     // Payload + guest/sell limit guards live in buildOpenOrder (order-payload.js).
     const refAtSend = freshQuoteMid(pending.quote);
     const built = buildOpenOrder({
-      side: pending.side, strike: pending.strike, type: pending.type, qty, limit, takeProfit, stopLoss,
+      side: pending.side, strike: pending.strike, type: pending.type, qty,
+      limit: gridLimit, takeProfit: gridTakeProfit, stopLoss: gridStopLoss,
       guestActive, activeSymbol, cockpitExpiry, refAtSend, quote: pending.quote
     });
     if (!built.ok) { showToast(built.reason, 'err'); return; }
@@ -379,11 +387,24 @@ export default function useOrderActions({
     if (replayActive) { showToast('Exits aren\'t simulated in replay — close manually', 'err'); return; }
     if (!requireLiveOrderSurface()) return;
     if (!feed.executionEnabled) { showToast('Execution disabled', 'err'); return; }
+    // Snap TP/SL/TRAIL to the SPX/SPXW tick grid before sending so an off-grid
+    // price (e.g. $4.05 at/above $3.00, where the tick is $0.10) never earns a
+    // broker reject. Home cockpit only — a guest equity option may be penny-
+    // quoted, so leave guest values untouched. Nearest tick; ties round up.
+    const homeGrid = positionSymbol(pos) === 'SPX';
+    const gridTp = homeGrid && tp != null ? snapToOptionTick(tp) : tp;
+    const gridSl = homeGrid && sl != null ? snapToOptionTick(sl) : sl;
+    const gridTrail = homeGrid && trail != null ? snapToOptionTick(trail) : trail;
+    const snapped = homeGrid && (
+      (tp != null && gridTp !== tp)
+      || (sl != null && gridSl !== sl)
+      || (trail != null && gridTrail !== trail)
+    );
     const plan = planAttachedExits({
       position: pos,
-      tp,
-      sl,
-      trail,
+      tp: gridTp,
+      sl: gridSl,
+      trail: gridTrail,
       trailSupported: !!feed.caps?.trail,
       workingOrders: feed.orders,
       activeSymbol,
@@ -405,7 +426,7 @@ export default function useOrderActions({
     if (missed.length) {
       showToast(`Exit part-attached — ${missed.join(' + ')} did not send, connection dropped`, 'err');
     } else {
-      showToast(`Exit attached ${tp != null ? `TP $${tp.toFixed(2)} ` : ''}${sl != null ? `SL $${sl.toFixed(2)} ` : ''}${trail != null ? `TRAIL $${trail.toFixed(2)}` : ''}`, 'ok');
+      showToast(`Exit attached ${gridTp != null ? `TP $${gridTp.toFixed(2)} ` : ''}${gridSl != null ? `SL $${gridSl.toFixed(2)} ` : ''}${gridTrail != null ? `TRAIL $${gridTrail.toFixed(2)}` : ''}${snapped ? '· snapped to $0.05/$0.10 grid' : ''}`, 'ok');
     }
     dispatchPositionLifecycle({
       type: POSITION_LIFECYCLE.EXITS_SUBMITTED,
