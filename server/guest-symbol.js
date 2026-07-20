@@ -65,6 +65,67 @@ export function strikeWindow(strikes, spot, n = 6) {
   return [...below, ...above].sort((a, b) => a - b);
 }
 
+// Choose one option trading class from the secdef rows IBKR returns. A single
+// underlying can expose several classes — a stock is usually just its own class,
+// but an index commonly exposes an AM-settled monthly class and a PM-settled
+// daily/weekly class (NDX vs NDXP, SPX vs SPXW). reqSecDefOptParams emits one row
+// per (listing exchange, trading class); rows are grouped by class here and their
+// expirations/strikes unioned across exchanges so a class's full grid is scored.
+//
+// Selection rule:
+//   - stocks (preferExpirations=false): the class with the MOST STRIKES wins —
+//     the historical "most complete chain" behavior;
+//   - indices (preferExpirations=true): the class with the MOST EXPIRATIONS wins,
+//     because the owner trades short-dated PM options and the daily/weekly class
+//     carries far more listed expirations than the monthly. Strikes break ties.
+// Returns { tradingClass, multiplier, exchange, expirations, strikes } or null.
+export function pickBestSecDef(rows, { preferExpirations = false } = {}) {
+  if (!Array.isArray(rows) || rows.length === 0) return null;
+  const groups = new Map();
+  for (const row of rows) {
+    if (!row || typeof row !== 'object') continue;
+    const tc = String(row.tradingClass ?? '').trim();
+    const key = tc || '(default)';
+    const exps = (Array.isArray(row.expirations) ? row.expirations : [])
+      .map(String).filter((e) => /^\d{8}$/.test(e));
+    const strikes = (Array.isArray(row.strikes) ? row.strikes : [])
+      .map(Number).filter((k) => Number.isFinite(k) && k > 0);
+    let g = groups.get(key);
+    if (!g) {
+      g = { tradingClass: tc || null, multiplier: null, exchange: null, bestStrikes: -1, exps: new Set(), strikes: new Set() };
+      groups.set(key, g);
+    }
+    for (const e of exps) g.exps.add(e);
+    for (const k of strikes) g.strikes.add(k);
+    // Take the multiplier/exchange from whichever row carries the most strikes for
+    // this class — the most-complete listing is the honest source for those fields.
+    if (strikes.length > g.bestStrikes) {
+      g.bestStrikes = strikes.length;
+      if (row.multiplier != null) g.multiplier = String(row.multiplier);
+      if (row.exchange != null) g.exchange = String(row.exchange);
+    }
+  }
+  let best = null;
+  for (const g of groups.values()) {
+    const cand = {
+      tradingClass: g.tradingClass,
+      multiplier: g.multiplier,
+      exchange: g.exchange,
+      expirations: [...g.exps].sort(),
+      strikes: [...g.strikes].sort((a, b) => a - b),
+    };
+    if (!best) { best = cand; continue; }
+    const primary = preferExpirations
+      ? cand.expirations.length - best.expirations.length
+      : cand.strikes.length - best.strikes.length;
+    const secondary = preferExpirations
+      ? cand.strikes.length - best.strikes.length
+      : cand.expirations.length - best.expirations.length;
+    if (primary > 0 || (primary === 0 && secondary > 0)) best = cand;
+  }
+  return best;
+}
+
 // Validate a guest order against the discovered contract params. The bridge NEVER
 // places a guessed contract: strike must be in the discovered strike list and
 // expiry in the discovered expirations, else reject with a reason the client
