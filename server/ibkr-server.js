@@ -1164,7 +1164,14 @@ function handleActivateSymbol(ws, msg) {
   const hintExchange = typeof msg.exchange === 'string' && msg.exchange.trim() ? msg.exchange.trim() : null;
   if (hintSecType) {
     const hintKey = `${String(msg.symbol ?? '').trim().toUpperCase()}|${Number(msg.conId)}`;
+    // Keys are client-supplied and set before activation validation; an activation
+    // that never starts leaves its entry behind, so trim oldest-first like
+    // guestDiscovery rather than trusting every socket to be well-behaved.
+    pendingGuestHints.delete(hintKey);
     pendingGuestHints.set(hintKey, { secType: hintSecType, exchange: hintExchange });
+    while (pendingGuestHints.size > GUEST_DISCOVERY_MAX) {
+      pendingGuestHints.delete(pendingGuestHints.keys().next().value);
+    }
     rememberGuestDiscovery(msg.conId, hintSecType, hintExchange);
   }
 
