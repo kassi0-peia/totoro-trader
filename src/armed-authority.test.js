@@ -7,6 +7,7 @@ import {
   ARMED_AUTHORITY_PROTOCOL,
   ARMED_AUTHORITY_QTY_DELTAS,
   armedAuthorityDisplay,
+  armedCommandConfirmation,
   buildArmedCreate,
   buildArmedDisarm,
   buildArmedQtyAdd,
@@ -659,4 +660,18 @@ test('legacy cached arms are UNKNOWN reminders, never authority or resendable wo
   assert.deepEqual(JSON.parse(serializeArmedAuthorityCache(parsed)), {
     schema: 1, confirmed: null, pending: null,
   });
+});
+
+test('armedCommandConfirmation covers every action and refuses junk', () => {
+  assert.equal(
+    armedCommandConfirmation({ action: 'CREATE', order: { strike: 7475, right: 'C', qty: 2, level: 7455 } }),
+    '⚔ ARMED · 7475C ×2 @ SPX 7455.00',
+  );
+  assert.equal(armedCommandConfirmation({ action: 'CREATE' }), '⚔ ARMED');
+  assert.equal(armedCommandConfirmation({ action: 'ADD_QTY', id: 'a', delta: 2 }), '⚔ QTY +2 CONFIRMED');
+  assert.equal(armedCommandConfirmation({ action: 'RETARGET', id: 'a', newTrigger: 7450 }), '⚔ RETARGET CONFIRMED · 7450.00');
+  assert.equal(armedCommandConfirmation({ action: 'RETARGET', id: 'a' }), '⚔ RETARGET CONFIRMED');
+  assert.equal(armedCommandConfirmation({ action: 'DISARM', id: 'a' }), '⚔ DISARMED');
+  assert.equal(armedCommandConfirmation(null), null);
+  assert.equal(armedCommandConfirmation({ action: 'NONSENSE' }), null);
 });

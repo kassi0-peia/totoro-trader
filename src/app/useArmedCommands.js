@@ -11,6 +11,7 @@ import { persistArmedCommandBeforeSend } from '../feed.js';
 import {
   ARMED_AUTHORITY_READY,
   armedAuthorityDisplay,
+  armedCommandConfirmation,
   buildArmedDisarm,
   buildArmedQtyAdd,
   buildArmedRetarget,
@@ -83,8 +84,22 @@ export function useArmedCommands({
 }) {
   useEffect(() => {
     if (!feed.socketOpen || !feed.armedState) return;
-    const reconciled = reconcileArmedPublicState(armedAuthorityRef.current, feed.armedState);
+    const before = armedAuthorityRef.current;
+    const reconciled = reconcileArmedPublicState(before, feed.armedState);
     if (reconciled.ok) {
+      // Close the command's toast lifecycle: the optimistic send showed a warn
+      // ("pending confirmation" / "RETARGETING…"); when THIS reconcile is the
+      // one that resolves that exact pending, say so explicitly.
+      const outcome = reconciled.state.lastOutcome;
+      if (before.pending && !reconciled.state.pending
+        && outcome?.requestId === before.pending.requestId) {
+        if (outcome.kind === 'APPLIED') {
+          const text = armedCommandConfirmation(before.pending);
+          if (text) showToast(text, 'ok');
+        } else if (outcome.kind === 'NOT_APPLIED' || outcome.kind === 'STALE_PENDING') {
+          showToast(`⚔ command did not apply — ${outcome.reason ?? outcome.kind}`, 'err');
+        }
+      }
       commitArmedAuthority(reconciled.state);
       return;
     }

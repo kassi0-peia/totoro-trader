@@ -362,6 +362,25 @@ export function buildArmedExitDisarm(model, { requestId, id, createdAt } = {}) {
   return beginCommand(model, { requestId, action: ARMED_EXIT_COMMAND.DISARM, id, createdAt });
 }
 
+// Toast line for an exit command the server has CONFIRMED applied — mirrors
+// armedCommandConfirmation on the entry book (see that comment).
+export function armedExitCommandConfirmation(pending) {
+  if (!pending) return null;
+  if (pending.action === ARMED_EXIT_COMMAND.CREATE) {
+    const o = pending.order;
+    return o
+      ? `⚔̸ ARMED · ${o.action === 'trail' ? `TRAIL $${Number(o.trail).toFixed(2)}` : 'CLOSE'} ×${o.qty} @ SPX ${Number(o.level).toFixed(2)}`
+      : '⚔̸ ARMED';
+  }
+  if (pending.action === ARMED_EXIT_COMMAND.RETARGET) {
+    return Number.isFinite(pending.newTrigger)
+      ? `⚔̸ RETARGET CONFIRMED · ${Number(pending.newTrigger).toFixed(2)}`
+      : '⚔̸ RETARGET CONFIRMED';
+  }
+  if (pending.action === ARMED_EXIT_COMMAND.DISARM) return '⚔̸ DISARMED';
+  return null;
+}
+
 function pendingApplied(pending, authority) {
   if (!pending) return false;
   const requestWitness = authority.phase === ARMED_EXIT_AUTHORITY_READY

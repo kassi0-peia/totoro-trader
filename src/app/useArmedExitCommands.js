@@ -7,6 +7,7 @@ import { persistArmedCommandBeforeSend } from '../feed.js';
 import {
   ARMED_EXIT_AUTHORITY_READY,
   armedExitAuthorityDisplay,
+  armedExitCommandConfirmation,
   buildArmedExitCreate,
   buildArmedExitDisarm,
   buildArmedExitRetarget,
@@ -67,8 +68,21 @@ export function useArmedExitCommands({
 }) {
   useEffect(() => {
     if (!feed.socketOpen || !feed.armedExitState) return;
-    const reconciled = reconcileArmedExitPublicState(armedExitAuthorityRef.current, feed.armedExitState);
+    const before = armedExitAuthorityRef.current;
+    const reconciled = reconcileArmedExitPublicState(before, feed.armedExitState);
     if (reconciled.ok) {
+      // Same confirmed/failed toast lifecycle as the entry book (see
+      // useArmedCommands): resolve the optimistic warn with an explicit answer.
+      const outcome = reconciled.state.lastOutcome;
+      if (before.pending && !reconciled.state.pending
+        && outcome?.requestId === before.pending.requestId) {
+        if (outcome.kind === 'APPLIED') {
+          const text = armedExitCommandConfirmation(before.pending);
+          if (text) showToast(text, 'ok');
+        } else if (outcome.kind === 'NOT_APPLIED' || outcome.kind === 'STALE_PENDING') {
+          showToast(`⚔̸ command did not apply — ${outcome.reason ?? outcome.kind}`, 'err');
+        }
+      }
       commitArmedExitAuthority(reconciled.state);
       return;
     }

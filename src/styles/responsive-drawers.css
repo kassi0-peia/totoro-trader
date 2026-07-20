@@ -211,18 +211,33 @@
   left: 50%;
   transform: translateX(-50%);
   padding: 8px 16px;
+  border: 1px solid;
   border-radius: 6px;
   font-size: 13px;
   font-weight: 600;
   letter-spacing: 0.04em;
-  color: #0a0c12;
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
   z-index: 15;
   animation: fill-pop 180ms ease;
+  backdrop-filter: blur(10px);
 }
-.fill-ok { background: var(--c-profit); }
-.fill-err { background: var(--c-loss); }
-.fill-warn { background: var(--c-warn); }
+/* Glass, not slab: dark translucent body tinted by the kind, colored border +
+   text. (The solid brights read as a wall over the tape.) */
+.fill-ok {
+  background: color-mix(in srgb, var(--c-profit) 14%, color-mix(in srgb, var(--c-bg) 72%, transparent));
+  border-color: color-mix(in srgb, var(--c-profit) 55%, transparent);
+  color: var(--c-profit);
+}
+.fill-err {
+  background: color-mix(in srgb, var(--c-loss) 14%, color-mix(in srgb, var(--c-bg) 72%, transparent));
+  border-color: color-mix(in srgb, var(--c-loss) 55%, transparent);
+  color: var(--c-loss);
+}
+.fill-warn {
+  background: color-mix(in srgb, var(--c-warn) 14%, color-mix(in srgb, var(--c-bg) 72%, transparent));
+  border-color: color-mix(in srgb, var(--c-warn) 55%, transparent);
+  color: var(--c-warn);
+}
 @keyframes fill-pop {
   from { opacity: 0; transform: translate(-50%, -6px); }
   to { opacity: 1; transform: translate(-50%, 0); }

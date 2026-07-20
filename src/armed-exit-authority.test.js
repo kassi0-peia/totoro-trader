@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   armedExitAuthorityDisplay,
+  armedExitCommandConfirmation,
   buildArmedExitCreate,
   buildArmedExitDisarm,
   createArmedExitAuthorityModel,
@@ -105,4 +106,19 @@ test('a stale-revision packet is refused; a fresh session adopts only when disco
   const adopted = reconcileArmedExitPublicState(offline, otherSession);
   assert.equal(adopted.ok, true);
   assert.equal(adopted.code, 'NEW_SESSION');
+});
+
+test('armedExitCommandConfirmation covers every action and refuses junk', () => {
+  assert.equal(
+    armedExitCommandConfirmation({ action: 'CREATE', order: { action: 'close', qty: 1, level: 7460.7 } }),
+    '⚔̸ ARMED · CLOSE ×1 @ SPX 7460.70',
+  );
+  assert.equal(
+    armedExitCommandConfirmation({ action: 'CREATE', order: { action: 'trail', trail: 0.3, qty: 2, level: 7467.71 } }),
+    '⚔̸ ARMED · TRAIL $0.30 ×2 @ SPX 7467.71',
+  );
+  assert.equal(armedExitCommandConfirmation({ action: 'RETARGET', id: 'x', newTrigger: 7468.35 }), '⚔̸ RETARGET CONFIRMED · 7468.35');
+  assert.equal(armedExitCommandConfirmation({ action: 'DISARM', id: 'x' }), '⚔̸ DISARMED');
+  assert.equal(armedExitCommandConfirmation(null), null);
+  assert.equal(armedExitCommandConfirmation({ action: 'ADD_QTY' }), null);
 });

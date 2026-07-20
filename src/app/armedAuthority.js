@@ -388,6 +388,27 @@ export function buildArmedDisarm(model, { requestId, id, createdAt } = {}) {
   return beginCommand(model, { requestId, action: ARMED_COMMAND.DISARM, id, createdAt });
 }
 
+// Toast line for a command the server has CONFIRMED applied — the counterpart
+// of the optimistic "pending confirmation" toasts, so every command lifecycle
+// ends with an explicit confirmed (here) or rejected (orderEvents) message.
+export function armedCommandConfirmation(pending) {
+  if (!pending) return null;
+  if (pending.action === ARMED_COMMAND.CREATE) {
+    const o = pending.order;
+    return o
+      ? `⚔ ARMED · ${o.strike}${o.right} ×${o.qty ?? 1} @ SPX ${Number(o.level).toFixed(2)}`
+      : '⚔ ARMED';
+  }
+  if (pending.action === ARMED_COMMAND.ADD_QTY) return `⚔ QTY +${pending.delta ?? ''} CONFIRMED`;
+  if (pending.action === ARMED_COMMAND.RETARGET) {
+    return Number.isFinite(pending.newTrigger)
+      ? `⚔ RETARGET CONFIRMED · ${Number(pending.newTrigger).toFixed(2)}`
+      : '⚔ RETARGET CONFIRMED';
+  }
+  if (pending.action === ARMED_COMMAND.DISARM) return '⚔ DISARMED';
+  return null;
+}
+
 function pendingApplied(pending, authority) {
   if (!pending) return false;
   const requestWitness = authority.phase === ARMED_AUTHORITY_READY
