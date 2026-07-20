@@ -141,6 +141,29 @@ test('guest intent persistence requires an exact per-tab symbol and conId', () =
   assert.equal(values.has(GUEST_INTENT_KEY), true);
   writeGuestIntent(null, storage);
   assert.equal(readGuestIntent(storage), null);
+
+  // An index guest (NDX) persists its discovery hint so a reload can re-route it
+  // as secType IND on its native exchange without a fresh search.
+  assert.deepEqual(
+    parseGuestIntent('{"symbol":"NDX","conId":416904,"secType":"IND","exchange":"NASDAQ"}'),
+    { symbol: 'NDX', conId: 416904, secType: 'IND', exchange: 'NASDAQ' },
+  );
+  // A stock hint keeps no exchange (SMART is implied); a bogus secType is dropped.
+  assert.deepEqual(
+    parseGuestIntent('{"symbol":"SPY","conId":756733,"secType":"STK","exchange":"SMART"}'),
+    { symbol: 'SPY', conId: 756733, secType: 'STK' },
+  );
+  assert.deepEqual(
+    parseGuestIntent('{"symbol":"SPY","conId":756733,"secType":"FUT"}'),
+    { symbol: 'SPY', conId: 756733 },
+  );
+  // An index secType with no exchange still round-trips its secType.
+  assert.deepEqual(
+    parseGuestIntent('{"symbol":"NDX","conId":416904,"secType":"IND"}'),
+    { symbol: 'NDX', conId: 416904, secType: 'IND' },
+  );
+  writeGuestIntent({ symbol: 'ndx', conId: 416904, secType: 'IND', exchange: 'NASDAQ' }, storage);
+  assert.deepEqual(readGuestIntent(storage), { symbol: 'NDX', conId: 416904, secType: 'IND', exchange: 'NASDAQ' });
 });
 
 test('symbol-only shortcuts resolve only one exact conId and fail closed on ambiguity', () => {

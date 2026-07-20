@@ -127,7 +127,13 @@ export function parseGuestIntent(raw) {
     const conId = Number(value?.conId);
     if (!/^[A-Z][A-Z0-9.-]{0,15}$/.test(symbol) || symbol === 'SPX') return null;
     if (!Number.isSafeInteger(conId) || conId <= 0) return null;
-    return { symbol, conId };
+    // Optional discovery hint so a reload can re-activate an index guest (NDX)
+    // without a fresh search: the bridge process may have restarted and lost its
+    // remembered discovery. Absent/malformed → a plain stock intent, as before.
+    const secType = value?.secType === 'IND' || value?.secType === 'STK' ? value.secType : undefined;
+    const exchange = secType === 'IND' && typeof value?.exchange === 'string' && value.exchange.trim()
+      ? value.exchange.trim() : undefined;
+    return { symbol, conId, ...(secType ? { secType } : {}), ...(exchange ? { exchange } : {}) };
   } catch { return null; }
 }
 

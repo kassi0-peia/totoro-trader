@@ -83,7 +83,9 @@ export default function SymbolSearch({
   const fresh = results && results.q && text.trim().toUpperCase().startsWith(results.q.toUpperCase());
 
   const pick = (m) => {
-    onActivate(m.symbol, m.conId);
+    // Relay the discovered secType/exchange so the bridge routes an index (NDX)
+    // vs a stock correctly; the activation layer treats it as a hint only.
+    onActivate(m.symbol, m.conId, { secType: m.secType, exchange: m.exchange });
     collapse();
   };
 

@@ -431,11 +431,17 @@ export function useIbkrFeed({ url = defaultWsUrl(), onOrderEvent, onGuestEvent }
     return sendWsJson(ws, { type: 'symbolSearch', q });
   }, []);
 
-  const activateSymbol = useCallback((symbol, conId) => {
+  const activateSymbol = useCallback((symbol, conId, hint = null) => {
     const ws = socketRef.current;
     if (!guestClientReadyRef.current) return null;
     const requestId = `guest-activate-${clientRefGeneratorRef.current()}`;
-    if (!sendWsJson(ws, { type: 'activateSymbol', requestId, symbol, conId })) return null;
+    // secType/exchange are a discovery HINT relayed from the search result so the
+    // bridge routes an index (secType IND, native exchange) vs a stock (STK, SMART)
+    // correctly. Omitted for the legacy stock flow; the bridge defaults to STK and
+    // also remembers its own discovery, so an absent hint never blocks activation.
+    const secType = hint?.secType === 'IND' || hint?.secType === 'STK' ? hint.secType : undefined;
+    const exchange = secType && typeof hint?.exchange === 'string' && hint.exchange ? hint.exchange : undefined;
+    if (!sendWsJson(ws, { type: 'activateSymbol', requestId, symbol, conId, ...(secType ? { secType } : {}), ...(exchange ? { exchange } : {}) })) return null;
     return requestId;
   }, []);
 

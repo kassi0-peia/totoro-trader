@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { pickExpiry, deriveStrikeStep, strikeWindow, validateOrder } from './guest-symbol.js';
+import { pickExpiry, deriveStrikeStep, strikeWindow, pickBestSecDef, validateOrder } from './guest-symbol.js';
 
 // Epoch ms for a given wall-clock ET moment. DST-proof the same way session.js
 // does: ET is UTC-4 (EDT) or UTC-5 (EST) — try both and keep the one that lands.
@@ -154,4 +154,100 @@ test('validateOrder: rejects non-positive / missing strike', () => {
 
 test('validateOrder: empty discovered lists reject everything', () => {
   assert.equal(validateOrder({ strike: 450, right: 'C', expiry: '20260710' }, {}).ok, false);
+});
+
+// ── pickBestSecDef ─────────────────────────────────────────────────────────
+// A stock exposes one option class; an index exposes an AM-settled monthly class
+// (NDX) and a PM-settled daily/weekly class (NDXP) with many more expirations.
+
+test('pickBestSecDef: stock — single class returns unchanged shape', () => {
+  const rows = [{ tradingClass: 'AAPL', multiplier: '100', exchange: 'SMART', expirations: ['20260717', '20260724'], strikes: [180, 185, 190] }];
+  const best = pickBestSecDef(rows, { preferExpirations: false });
+  assert.equal(best.tradingClass, 'AAPL');
+  assert.equal(best.multiplier, '100');
+  assert.deepEqual(best.expirations, ['20260717', '20260724']);
+  assert.deepEqual(best.strikes, [180, 185, 190]);
+});
+
+test('pickBestSecDef: stock — most strikes wins across classes', () => {
+  const rows = [
+    { tradingClass: 'THIN', expirations: ['20260717', '20260724', '20260731'], strikes: [10, 15] },
+    { tradingClass: 'WIDE', expirations: ['20260717'], strikes: [10, 12.5, 15, 17.5, 20] },
+  ];
+  const best = pickBestSecDef(rows, { preferExpirations: false });
+  assert.equal(best.tradingClass, 'WIDE'); // more strikes, despite fewer expirations
+});
+
+test('pickBestSecDef: index — most expirations wins (NDX monthly vs NDXP daily)', () => {
+  const rows = [
+    { tradingClass: 'NDX', multiplier: '100', exchange: 'NASDAQ', expirations: ['20260717', '20260821'], strikes: [20000, 20100, 20200, 20300, 20400, 20500] },
+    { tradingClass: 'NDXP', multiplier: '100', exchange: 'NASDAQ', expirations: ['20260714', '20260715', '20260716', '20260717', '20260718'], strikes: [20000, 20100, 20200] },
+  ];
+  const best = pickBestSecDef(rows, { preferExpirations: true });
+  assert.equal(best.tradingClass, 'NDXP'); // daily class has far more expirations
+  assert.equal(best.expirations.length, 5);
+});
+
+test('pickBestSecDef: index preference ignored for stocks — same rows pick by strikes', () => {
+  const rows = [
+    { tradingClass: 'NDX', expirations: ['20260717', '20260821'], strikes: [20000, 20100, 20200, 20300, 20400, 20500] },
+    { tradingClass: 'NDXP', expirations: ['20260714', '20260715', '20260716', '20260717', '20260718'], strikes: [20000, 20100, 20200] },
+  ];
+  const best = pickBestSecDef(rows, { preferExpirations: false });
+  assert.equal(best.tradingClass, 'NDX'); // most strikes wins under stock policy
+});
+
+test('pickBestSecDef: multi-exchange rows for one class union their expirations + strikes', () => {
+  const rows = [
+    { tradingClass: 'NDXP', multiplier: '100', exchange: 'NASDAQ', expirations: ['20260714', '20260715'], strikes: [20000, 20100] },
+    { tradingClass: 'NDXP', multiplier: '100', exchange: 'CBOE', expirations: ['20260715', '20260716'], strikes: [20100, 20200] },
+  ];
+  const best = pickBestSecDef(rows, { preferExpirations: true });
+  assert.equal(best.tradingClass, 'NDXP');
+  assert.deepEqual(best.expirations, ['20260714', '20260715', '20260716']); // unioned + deduped
+  assert.deepEqual(best.strikes, [20000, 20100, 20200]);
+});
+
+test('pickBestSecDef: multiplier/exchange taken from the richest row of the class', () => {
+  const rows = [
+    { tradingClass: 'NDXP', multiplier: '100', exchange: 'NASDAQ', expirations: ['20260714'], strikes: [20000] },
+    { tradingClass: 'NDXP', multiplier: '100', exchange: 'CBOE', expirations: ['20260715'], strikes: [20000, 20100, 20200, 20300] },
+  ];
+  const best = pickBestSecDef(rows, { preferExpirations: true });
+  assert.equal(best.exchange, 'CBOE'); // the row carrying the most strikes
+});
+
+test('pickBestSecDef: expirations tie-break falls to strikes under index policy', () => {
+  const rows = [
+    { tradingClass: 'A', expirations: ['20260717', '20260724'], strikes: [10, 20] },
+    { tradingClass: 'B', expirations: ['20260717', '20260724'], strikes: [10, 20, 30, 40] },
+  ];
+  const best = pickBestSecDef(rows, { preferExpirations: true });
+  assert.equal(best.tradingClass, 'B'); // equal expirations → more strikes wins
+});
+
+test('pickBestSecDef: filters malformed expirations and non-positive strikes', () => {
+  const rows = [{ tradingClass: 'X', expirations: ['20260717', '2026-07-24', 'nope', ''], strikes: [10, -5, 0, 'bad', 20] }];
+  const best = pickBestSecDef(rows, { preferExpirations: false });
+  assert.deepEqual(best.expirations, ['20260717']);
+  assert.deepEqual(best.strikes, [10, 20]);
+});
+
+test('pickBestSecDef: skips non-object / null rows without throwing', () => {
+  const rows = [null, 42, 'x', { tradingClass: 'OK', expirations: ['20260717'], strikes: [10, 20] }];
+  const best = pickBestSecDef(rows, { preferExpirations: false });
+  assert.equal(best.tradingClass, 'OK');
+});
+
+test('pickBestSecDef: empty / garbage input → null', () => {
+  assert.equal(pickBestSecDef([], { preferExpirations: true }), null);
+  assert.equal(pickBestSecDef(null), null);
+  assert.equal(pickBestSecDef([null, 'x', 3]), null); // no usable rows
+});
+
+test('pickBestSecDef: a blank trading class still groups and returns (default key)', () => {
+  const rows = [{ tradingClass: '', expirations: ['20260717'], strikes: [10, 20, 30] }];
+  const best = pickBestSecDef(rows, { preferExpirations: false });
+  assert.equal(best.tradingClass, null); // normalized empty → null
+  assert.deepEqual(best.strikes, [10, 20, 30]);
 });

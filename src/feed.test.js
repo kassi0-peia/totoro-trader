@@ -513,6 +513,26 @@ test('guest message: activates the guest cockpit without disturbing SPX fields',
   assert.equal(s1.guestGreeksMap.get('450C').premium, 5.1);
 });
 
+test('guest message: an index guest carries secType/exchange/settlement through', () => {
+  const s0 = spxState();
+  const s1 = applyMessage(s0, {
+    type: 'guest',
+    guest: {
+      symbol: 'NDX', conId: 416904, price: 20123.4,
+      candles: [{ t: 10, close: 20123.4 }],
+      greeks: [{ strike: 20100, type: 'call', premium: 88.2 }],
+      expiry: '20260710', strikeStep: 25, expirations: ['20260710', '20260711'],
+      secType: 'IND', tradingClass: 'NDXP', exchange: 'NASDAQ', settlement: 'cash', live: true,
+    },
+  });
+  assert.equal(s1.guest.symbol, 'NDX');
+  assert.equal(s1.guest.secType, 'IND');
+  assert.equal(s1.guest.tradingClass, 'NDXP');
+  assert.equal(s1.guest.exchange, 'NASDAQ');
+  assert.equal(s1.guest.settlement, 'cash'); // PM cash-settled like SPX
+  assert.equal(s1.price, s0.price); // SPX untouched
+});
+
 test('guest:null tears the guest cockpit down and clears its greeks', () => {
   const s0 = { ...spxState(), guest: { symbol: 'SPCX' }, guestGreeksMap: new Map([['450C', {}]]) };
   const s1 = applyMessage(s0, { type: 'guest', guest: null });

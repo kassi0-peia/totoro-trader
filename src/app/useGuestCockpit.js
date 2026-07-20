@@ -26,6 +26,12 @@ export default function useGuestCockpit({
   const [savedGuestIntent] = useState(readGuestIntent);
   const [activeSymbol, setActiveSymbol] = useState('SPX');
   const activeConIdRef = useRef(savedGuestIntent?.conId ?? null);
+  // The discovery hint (secType/exchange) for the active guest, so a reconnect or
+  // process-restart re-activation re-routes an index correctly without a fresh
+  // search. Seeded from the persisted intent; refreshed on every activation.
+  const activeHintRef = useRef(
+    savedGuestIntent?.secType ? { secType: savedGuestIntent.secType, exchange: savedGuestIntent.exchange } : null,
+  );
   const pendingGuestRequestRef = useRef(null);
   const pendingSymbolResolutionRef = useRef(null);
   const guestActive = activeSymbol !== 'SPX'
@@ -72,6 +78,7 @@ export default function useGuestCockpit({
     pendingGuestRequestRef.current = null;
     pendingSymbolResolutionRef.current = null;
     activeConIdRef.current = null;
+    activeHintRef.current = null;
     setActiveSymbol('SPX');
     writeGuestIntent(null);
     feed.deactivateSymbol();
@@ -80,7 +87,7 @@ export default function useGuestCockpit({
   // Activate a searched symbol: tell the bridge, and optimistically flip the
   // active symbol so the header chip + gating update immediately (the cockpit
   // itself waits for feed.guest to confirm via guestActive).
-  const activateGuest = useCallback((symbol, conId) => {
+  const activateGuest = useCallback((symbol, conId, hint = null) => {
     const sym = String(symbol || '').toUpperCase();
     const exactConId = Number(conId);
     if (!sym || sym === 'SPX') return null;
@@ -105,7 +112,11 @@ export default function useGuestCockpit({
     clearSymbolTransient();
     const existingIsSame = feed.guest?.symbol === sym && Number(feed.guest?.conId) === exactConId;
     if (!existingIsSame && (activeSymbol !== 'SPX' || feed.guest)) feed.deactivateSymbol();
-    const requestId = feed.activateSymbol(sym, exactConId);
+    // Refresh the routing hint for this exact symbol (index vs stock). A hint-less
+    // activation clears it — the bridge falls back to its remembered discovery.
+    activeHintRef.current = hint?.secType === 'IND' || hint?.secType === 'STK'
+      ? { secType: hint.secType, exchange: hint.exchange } : null;
+    const requestId = feed.activateSymbol(sym, exactConId, activeHintRef.current);
     if (!requestId) {
       showToast('Symbol switch was not sent — guest transport is not ready', 'err');
       return null;
@@ -123,7 +134,10 @@ export default function useGuestCockpit({
     const resolved = resolveExactGuestMatch(requested, result.matches);
     pendingSymbolResolutionRef.current = null;
     if (resolved.status === 'exact') {
-      activateGuest(resolved.match.symbol, resolved.match.conId);
+      activateGuest(resolved.match.symbol, resolved.match.conId, {
+        secType: resolved.match.secType,
+        exchange: resolved.match.exchange,
+      });
     } else {
       showToast(
         resolved.status === 'none'
@@ -156,8 +170,18 @@ export default function useGuestCockpit({
   useEffect(() => {
     if (!guestActive || !feed.guest) return;
     pendingGuestRequestRef.current = null;
-    writeGuestIntent({ symbol: feed.guest.symbol, conId: feed.guest.conId });
-  }, [guestActive, feed.guest?.symbol, feed.guest?.conId]);
+    // Persist the confirmed discovery so a reload re-routes an index guest even if
+    // the bridge process restarted and lost its remembered discovery.
+    const secType = feed.guest.secType === 'IND' ? 'IND' : feed.guest.secType === 'STK' ? 'STK' : undefined;
+    const exchange = secType === 'IND' && feed.guest.exchange ? feed.guest.exchange : undefined;
+    if (secType) activeHintRef.current = { secType, exchange };
+    writeGuestIntent({
+      symbol: feed.guest.symbol,
+      conId: feed.guest.conId,
+      ...(secType ? { secType } : {}),
+      ...(exchange ? { exchange } : {}),
+    });
+  }, [guestActive, feed.guest?.symbol, feed.guest?.conId, feed.guest?.secType, feed.guest?.exchange]);
 
   useEffect(() => {
     if (!feed.live) pendingGuestRequestRef.current = null;
@@ -171,7 +195,7 @@ export default function useGuestCockpit({
     if (!feed.socketOpen || !feed.guestClientReady || !feed.live || pendingGuestRequestRef.current) return;
     if (feed.guest && feed.guest.symbol === activeSymbol
         && Number(feed.guest.conId) === Number(activeConIdRef.current)) return;
-    const requestId = feed.activateSymbol(activeSymbol, activeConIdRef.current);
+    const requestId = feed.activateSymbol(activeSymbol, activeConIdRef.current, activeHintRef.current);
     if (requestId) pendingGuestRequestRef.current = requestId;
   }, [feed.socketOpen, feed.guestClientReady, feed.live, feed.guest?.symbol, feed.guest?.conId, activeSymbol]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -181,7 +205,9 @@ export default function useGuestCockpit({
   useEffect(() => {
     if (symRestoredRef.current || !feed.socketOpen || !feed.guestClientReady || !feed.live) return;
     if (savedGuestIntent && activeSymbol === 'SPX') {
-      if (activateGuest(savedGuestIntent.symbol, savedGuestIntent.conId)) symRestoredRef.current = true;
+      const hint = savedGuestIntent.secType
+        ? { secType: savedGuestIntent.secType, exchange: savedGuestIntent.exchange } : null;
+      if (activateGuest(savedGuestIntent.symbol, savedGuestIntent.conId, hint)) symRestoredRef.current = true;
     } else {
       symRestoredRef.current = true;
     }

@@ -20,7 +20,7 @@ import { computeSession, etParts, ymd } from './session.js';
 import { createGuestActivationCache } from './guest-activation-cache.js';
 import { createBasisController } from './basis-controller.js';
 import { createHomeMarket } from './home-market.js';
-import { pickExpiry, deriveStrikeStep, strikeWindow, validateOrder as validateGuestOrder } from './guest-symbol.js';
+import { pickExpiry, deriveStrikeStep, strikeWindow, pickBestSecDef, validateOrder as validateGuestOrder } from './guest-symbol.js';
 import { normalizeWatchlist, shapeWatchQuote } from './watchlist.js';
 import {
   addArmedOrderQuantity,
@@ -178,6 +178,38 @@ const guestResources = new Map(); // resource generation -> starting/active hand
 const guestPendingStarts = new Map(); // resource generation -> unsettled start handle
 const guestHistoryTargets = new WeakMap();
 let guestConnectionEpoch = 0;
+// Guest underlying discovery. A guest is EITHER a US stock (secType STK, SMART
+// routed) or an index (secType IND, e.g. NDX, quoted on its native exchange with
+// a PM-settled daily option class). reqMatchingSymbols already discovered which:
+// remember it per conId so a later activation of the same conId — even a hint-less
+// one from an old client — routes the correct reqContractDetails/reqSecDefOptParams.
+// PLAIN DATA ONLY (no live handles); bounded so a long session can't grow it.
+const GUEST_DISCOVERY_MAX = 512;
+const guestDiscovery = new Map(); // conId -> { secType, exchange }
+function rememberGuestDiscovery(conId, secType, exchange) {
+  const id = Number(conId);
+  const type = secType === 'IND' ? 'IND' : secType === 'STK' ? 'STK' : null;
+  if (!Number.isSafeInteger(id) || id <= 0 || !type) return;
+  const exch = typeof exchange === 'string' && exchange.trim() ? exchange.trim() : null;
+  guestDiscovery.delete(id); // re-insert so the Map's iteration order is LRU
+  guestDiscovery.set(id, { secType: type, exchange: exch });
+  while (guestDiscovery.size > GUEST_DISCOVERY_MAX) {
+    guestDiscovery.delete(guestDiscovery.keys().next().value);
+  }
+}
+// A client MAY relay the discovered secType/exchange on activateSymbol (the search
+// result carried them). It is only a routing HINT for the discovery request — the
+// contract that ever reaches the wire is still the reqContractDetails response,
+// validated by exact conId + symbol. Keyed by symbol|conId, consumed by the start.
+const pendingGuestHints = new Map(); // `${symbol}|${conId}` -> { secType, exchange }
+function resolveGuestUnderlying(symbol, conId) {
+  // Prefer this activation's own hint; fall back to what a prior search remembered;
+  // default to the historical stock behavior (STK / SMART) so nothing regresses.
+  const source = pendingGuestHints.get(`${symbol}|${conId}`) || guestDiscovery.get(Number(conId)) || null;
+  const secType = source?.secType === 'IND' ? 'IND' : 'STK';
+  const exchange = secType === 'IND' ? (source?.exchange || 'SMART') : 'SMART';
+  return { secType, exchange };
+}
 function newGuestSeries() {
   return { ...newCandleSeries(), recentBars: [], lastTick: 0 };
 }
@@ -904,18 +936,24 @@ function wireHandlers(api) {
     for (const d of contractDescriptions || []) {
       const c = d?.contract;
       if (!c) continue;
-      // Stocks on US exchanges only (Phase A). derivativeSecTypes must include OPT
-      // so we don't offer a symbol that has no options to trade.
-      if (c.secType !== 'STK') continue;
+      // US stocks OR indices (SPX-like: an index whose options include the
+      // PM-settled daily class, e.g. NDX→NDXP). derivativeSecTypes must include
+      // OPT so we never offer a symbol that has no options to trade.
+      if (c.secType !== 'STK' && c.secType !== 'IND') continue;
       if (c.currency && c.currency !== 'USD') continue;
       const hasOpt = Array.isArray(d.derivativeSecTypes) && d.derivativeSecTypes.includes('OPT');
       if (!hasOpt) continue;
+      const exchange = c.primaryExch || c.exchange || (c.secType === 'IND' ? null : 'SMART');
+      // Remember what discovery said this conId is, so a later activation routes
+      // its reqContractDetails/reqSecDefOptParams correctly even if the client
+      // relays no hint (old client, watchlist tab, reload restore).
+      rememberGuestDiscovery(c.conId, c.secType, exchange);
       matches.push({
         symbol: c.symbol,
         name: c.description || c.symbol,
         conId: c.conId,
         secType: c.secType,
-        exchange: c.primaryExch || c.exchange || 'SMART',
+        exchange: exchange || 'SMART',
         currency: c.currency || 'USD'
       });
       if (matches.length >= 8) break;
@@ -932,7 +970,7 @@ function wireHandlers(api) {
       const s = subs.get(reqId);
       if (s?.kind === 'watch-secdef') {
         if (Number(underlyingConId) !== s.conId) return;
-        s.secdefRaw = pickBestSecDef(s.secdefRaw, { exchange, tradingClass, multiplier, expirations, strikes });
+        s.secdefRows.push({ exchange, tradingClass, multiplier, expirations, strikes });
         return;
       }
       const resource = s?.kind === 'guest-secdef' ? guestResourceForSub(s, api) : null;
@@ -946,6 +984,11 @@ function wireHandlers(api) {
     if (!resource || resource.secdefReqId !== reqId) return;
     subs.delete(reqId);
     resource.secdefReqId = null;
+    // Group + pick across all rows now that the full set has arrived. A null pick
+    // (no rows) leaves any previously-settled secdef intact — finishGuestSecDef
+    // fails a cold start but no-ops once settled (warm background revalidate).
+    const picked = chooseSecDef(resource.secdefRows, resource.underlyingSecType);
+    if (picked) resource.secdefRaw = picked;
     finishGuestSecDef(resource);
   });
 
@@ -1113,6 +1156,18 @@ function handleActivateSymbol(ws, msg) {
     });
   }
 
+  // Record the client-relayed discovery hint (secType/exchange from the search
+  // result) keyed exactly as the resource token will be. It only steers the
+  // discovery request; the wire contract is still the validated reqContractDetails
+  // response. An old client sends none — the server-remembered discovery covers it.
+  const hintSecType = msg.secType === 'IND' ? 'IND' : msg.secType === 'STK' ? 'STK' : null;
+  const hintExchange = typeof msg.exchange === 'string' && msg.exchange.trim() ? msg.exchange.trim() : null;
+  if (hintSecType) {
+    const hintKey = `${String(msg.symbol ?? '').trim().toUpperCase()}|${Number(msg.conId)}`;
+    pendingGuestHints.set(hintKey, { secType: hintSecType, exchange: hintExchange });
+    rememberGuestDiscovery(msg.conId, hintSecType, hintExchange);
+  }
+
   const socket = new WeakRef(ws);
   const activation = guestRegistry.activate(ws, { symbol: msg.symbol, conId: msg.conId });
   const expectedGeneration = guestRegistry.attachClient(ws).generation;
@@ -1199,6 +1254,12 @@ function startGuestResource(token) {
     tradingClass: null,
     exchange: 'SMART',
     secdefRaw: null,
+    secdefRows: [],
+    // What kind of underlying this guest is: 'STK' (default, SMART-routed) or 'IND'
+    // (an index like NDX, quoted on its native exchange, whose PM daily option
+    // class carries the most expirations). Resolved from discovery/hint below.
+    underlyingSecType: 'STK',
+    underlyingExchange: 'SMART',
     live: false,
     pausedHome: false,
   };
@@ -1209,6 +1270,13 @@ function startGuestResource(token) {
   }, GUEST_START_TIMEOUT_MS);
   resource.startTimer.unref?.();
 
+  // Decide STK vs IND before any discovery request. The hint is one-shot: consume
+  // it so a superseded activation can't reuse a stale routing choice.
+  const underlying = resolveGuestUnderlying(token.symbol, token.conId);
+  pendingGuestHints.delete(`${token.symbol}|${token.conId}`);
+  resource.underlyingSecType = underlying.secType;
+  resource.underlyingExchange = underlying.exchange;
+
   // Warm fast path: a same-day cache hit lets us skip the reqContractDetails round
   // trip (and, when its expiry is still live, the slow reqSecDefOptParams too) and
   // paint the chart instantly from cached bars. Fresh history is still fetched and
@@ -1217,6 +1285,11 @@ function startGuestResource(token) {
   if (cached?.contract) {
     try {
       resource.contract = cached.contract; // already a deep copy out of the cache
+      // The cached contract is the authoritative record of what this conId is.
+      if (cached.contract.secType === 'IND' || cached.contract.secType === 'STK') {
+        resource.underlyingSecType = cached.contract.secType;
+      }
+      if (cached.contract.exchange) resource.underlyingExchange = cached.contract.exchange;
       const cachedBars = cached.series?.candles?.length ? cached.series.candles : null;
       if (cachedBars) {
         // Seed bars so the chart paints immediately; DO NOT set resource.price —
@@ -1254,8 +1327,20 @@ function startGuestResource(token) {
     const reqId = nextRequestId();
     resource.contractReqId = reqId;
     subs.set(reqId, guestSub(resource, 'guest-cd'));
-    api.reqContractDetails(reqId, { conId: token.conId, exchange: 'SMART' });
-    console.log(`[ibkr] guest activate: ${token.symbol} (conId=${token.conId}, generation=${token.resourceGeneration})`);
+    // A stock resolves on SMART (byte-identical to before); an index resolves as
+    // secType IND on its native exchange. Indices are never SMART-routed, so a
+    // 'SMART' here means "unknown" — omit it and let the conId pin the contract
+    // (the reqContractDetails response carries the real native exchange back).
+    const query = resource.underlyingSecType === 'IND'
+      ? {
+        conId: token.conId,
+        secType: 'IND',
+        ...(resource.underlyingExchange && resource.underlyingExchange !== 'SMART'
+          ? { exchange: resource.underlyingExchange } : {}),
+      }
+      : { conId: token.conId, exchange: 'SMART' };
+    api.reqContractDetails(reqId, query);
+    console.log(`[ibkr] guest activate: ${token.symbol} (conId=${token.conId}, ${resource.underlyingSecType}, generation=${token.resourceGeneration})`);
   } catch (error) {
     failGuestStart(resource, `guest reqContractDetails failed: ${error.message}`);
   }
@@ -1284,16 +1369,25 @@ function guestResourceForSub(sub, api) {
 function onGuestContractDetails(resource, _sub, details) {
   if (resource.contract) return;
   const c = details?.contract;
+  const wantType = resource.underlyingSecType === 'IND' ? 'IND' : 'STK';
   if (!c
       || Number(c.conId) !== resource.conId
       || String(c.symbol || '').toUpperCase() !== resource.symbol
-      || (c.secType && c.secType !== 'STK')) return;
+      || (c.secType && c.secType !== wantType)) return;
+  // Reflect the returned secType; index underlyings quote on their native
+  // exchange (SMART is not valid for an index), stocks stay SMART-routed.
+  const secType = c.secType === 'IND' || c.secType === 'STK' ? c.secType : wantType;
+  const exchange = secType === 'IND'
+    ? (c.exchange || c.primaryExch || resource.underlyingExchange || 'SMART')
+    : 'SMART';
+  resource.underlyingSecType = secType;
+  resource.underlyingExchange = exchange;
   resource.contract = {
     conId: resource.conId,
     symbol: resource.symbol,
-    secType: 'STK',
-    exchange: 'SMART',
-    primaryExch: c.primaryExch || c.exchange || undefined,
+    secType,
+    exchange,
+    primaryExch: secType === 'STK' ? (c.primaryExch || c.exchange || undefined) : undefined,
     currency: c.currency || 'USD',
   };
   guestActivationCache.remember(resource.conId, etDayKey(), { contract: resource.contract });
@@ -1344,8 +1438,9 @@ function requestGuestSecDef(resource) {
   try {
     const reqId = nextRequestId();
     resource.secdefReqId = reqId;
+    resource.secdefRows = []; // fresh accumulation; a background revalidate re-picks
     subs.set(reqId, guestSub(resource, 'guest-secdef'));
-    resource.api.reqSecDefOptParams(reqId, resource.symbol, '', 'STK', resource.conId);
+    resource.api.reqSecDefOptParams(reqId, resource.symbol, '', resource.underlyingSecType, resource.conId);
   } catch (error) {
     if (resource.secdefReqId != null) subs.delete(resource.secdefReqId);
     resource.secdefReqId = null;
@@ -1353,25 +1448,19 @@ function requestGuestSecDef(resource) {
   }
 }
 
-// Multiple secdef rows can arrive (one per listing exchange); keep the row with
-// the most strikes — usually the SMART/OCC-complete set. Shared by the guest
-// activation path and the watchlist warm-up (both accumulate the best-so-far row).
-// Returns `prev` unchanged when the incoming row is not richer.
-function pickBestSecDef(prev, { exchange, tradingClass, multiplier, expirations, strikes }) {
-  const n = Array.isArray(strikes) ? strikes.length : 0;
-  const bestN = prev ? prev.strikes.length : -1;
-  if (n <= bestN) return prev;
-  return {
-    exchange,
-    tradingClass,
-    multiplier,
-    expirations: (expirations || []).map(String),
-    strikes: (strikes || []).map(Number).filter((strike) => Number.isFinite(strike) && strike > 0),
-  };
+// One securityDefinitionOptionParameter row arrives per (listing exchange,
+// trading class). Accumulate them all; the End event groups by class and picks —
+// stocks by most-strikes (historical), indices by most-expirations (the PM daily
+// class, e.g. NDXP over the AM monthly NDX). See pickBestSecDef in guest-symbol.js.
+function onGuestSecDef(resource, params) {
+  resource.secdefRows.push(params);
 }
 
-function onGuestSecDef(resource, params) {
-  resource.secdefRaw = pickBestSecDef(resource.secdefRaw, params);
+// Reduce accumulated secdef rows to the chosen trading class. Indices prefer the
+// class with the most listed expirations (the short-dated daily/weekly class the
+// owner trades); stocks keep the most-complete-chain (most-strikes) behavior.
+function chooseSecDef(rows, secType) {
+  return pickBestSecDef(rows, { preferExpirations: secType === 'IND' });
 }
 
 function finishGuestSecDef(resource) {
@@ -1615,8 +1704,15 @@ function guestMsg(resource) {
       strikeStep: resource.strikeStep,
       strikes: resource.strikes,
       expirations: resource.expirations,
-      secType: 'STK',
-      settlement: 'physical',
+      // An index guest (NDX) is PM cash-settled like SPX; a stock guest is
+      // American, physically settled. The client keys its tick grid + settlement
+      // warning off this. tradingClass rides along for the ticket header (NDXP).
+      secType: resource.underlyingSecType || 'STK',
+      tradingClass: resource.tradingClass,
+      // The native quoting exchange of the underlying (SMART for a stock). Lets a
+      // reload persist enough to re-route an index guest after a bridge restart.
+      exchange: resource.underlyingExchange || 'SMART',
+      settlement: resource.underlyingSecType === 'IND' ? 'cash' : 'physical',
       live: resource.live,
       // Staleness heartbeat seed for the guest cockpit (see snapshotMsg.tickTs).
       lastTickTs: resource.series.lastTick || null
@@ -1776,7 +1872,7 @@ function pumpWatchWarm() {
 function fireWatchWarm(symbol, contract) {
   const reqId = nextRequestId();
   watchWarmInFlight.set(symbol, reqId);
-  subs.set(reqId, { kind: 'watch-secdef', symbol, conId: contract.conId, contract, secdefRaw: null });
+  subs.set(reqId, { kind: 'watch-secdef', symbol, conId: contract.conId, contract, secdefRows: [] });
   try {
     ib.reqSecDefOptParams(reqId, symbol, '', 'STK', contract.conId);
   } catch (e) {
@@ -1807,12 +1903,14 @@ function finishWatchWarm(reqId, { drop = false } = {}) {
   if (!s || s.kind !== 'watch-secdef') return;
   subs.delete(reqId);
   if (watchWarmInFlight.get(s.symbol) === reqId) watchWarmInFlight.delete(s.symbol);
-  if (!drop && s.secdefRaw && s.contract) {
+  // Watchlist symbols are stocks (STK); pick the most-complete chain (most strikes).
+  const picked = drop ? null : chooseSecDef(s.secdefRows, 'STK');
+  if (picked && s.contract) {
     guestActivationCache.remember(s.contract.conId, etDayKey(), {
       contract: s.contract,
-      secdefRaw: s.secdefRaw,
+      secdefRaw: picked,
     });
-    console.log(`[ibkr] watchlist warm ${s.symbol}: cached secdef (${s.secdefRaw.strikes.length} strikes)`);
+    console.log(`[ibkr] watchlist warm ${s.symbol}: cached secdef (${picked.strikes.length} strikes)`);
   }
   scheduleNextWatchWarm();
 }

@@ -49,6 +49,14 @@ export default function useOrderActions({
   const [pulse, setPulse] = useState(false);
   const guestActivationPending = !replayActive && activeSymbol !== 'SPX' && !guestActive;
 
+  // Index guests (NDX, secType IND) share SPX's option premium grid ($0.05 below
+  // $3, $0.10 at/above), so typed limits/exits snap the same way the home cockpit
+  // does — an off-grid index price earns a broker reject (error 110). Equity
+  // guests are frequently penny-quoted with grids the app can't know, so they are
+  // NEVER snapped. `indexGridFor` answers this for an exit's specific position.
+  const guestIsIndex = guestActive && guest?.secType === 'IND';
+  const indexGridFor = (sym) => sym === 'SPX' || (guestIsIndex && sym === activeSymbol);
+
   // Once the replay picker or a loading replay shell owns the surface, no live
   // order mutation may slip through the still-visible live chart underneath it.
   // Active replay orders remain local and take their normal branches below;
@@ -126,9 +134,9 @@ export default function useOrderActions({
     if (!feed.executionEnabled) { showToast('Execution disabled', 'err'); return; }
     const sell = pending.side === 'sell';
     // Snap typed prices to the SPX/SPXW tick grid so an off-grid limit/bracket
-    // can't earn a broker reject (error 110). Home cockpit only — guest equity
-    // options are frequently penny-quoted and the app does not know their grid.
-    const homeGrid = !guestActive;
+    // can't earn a broker reject (error 110). Home cockpit AND index guests (NDX)
+    // share this grid; equity guests are penny-quoted and left untouched.
+    const homeGrid = !guestActive || guestIsIndex;
     const gridLimit = homeGrid && limit != null ? snapToOptionTick(limit) : limit;
     const gridTakeProfit = homeGrid && takeProfit != null ? snapToOptionTick(takeProfit) : takeProfit;
     const gridStopLoss = homeGrid && stopLoss != null ? snapToOptionTick(stopLoss) : stopLoss;
@@ -389,9 +397,9 @@ export default function useOrderActions({
     if (!feed.executionEnabled) { showToast('Execution disabled', 'err'); return; }
     // Snap TP/SL/TRAIL to the SPX/SPXW tick grid before sending so an off-grid
     // price (e.g. $4.05 at/above $3.00, where the tick is $0.10) never earns a
-    // broker reject. Home cockpit only — a guest equity option may be penny-
-    // quoted, so leave guest values untouched. Nearest tick; ties round up.
-    const homeGrid = positionSymbol(pos) === 'SPX';
+    // broker reject. SPX and index guests (NDX) share the grid; a guest equity
+    // option may be penny-quoted, so leave those untouched. Ties round up.
+    const homeGrid = indexGridFor(positionSymbol(pos));
     const gridTp = homeGrid && tp != null ? snapToOptionTick(tp) : tp;
     const gridSl = homeGrid && sl != null ? snapToOptionTick(sl) : sl;
     const gridTrail = homeGrid && trail != null ? snapToOptionTick(trail) : trail;
