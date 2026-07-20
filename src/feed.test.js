@@ -901,3 +901,27 @@ test('armed pending state is synchronously persisted and published before any so
   assert.deepEqual(failed, { persisted: false, sent: false });
   assert.equal(sent, false);
 });
+
+test('applyMessage: a hard orderError prunes exactly the dead order from the projection', () => {
+  const rows = [
+    { orderId: 10, action: 'SELL', strike: 6300, right: 'C', status: 'Submitted' },
+    { orderId: 11, action: 'SELL', strike: 6300, right: 'C', status: 'Submitted' },
+  ];
+  const s0 = { ...createInitialSnapshot(), orders: rows };
+  const s1 = applyMessage(s0, { type: 'orderError', orderId: 10, code: 110, reason: 'minimum price variation' });
+  assert.deepEqual(s1.orders.map((o) => o.orderId), [11]);
+
+  // No matching row (or no orderId at all) leaves the snapshot identity untouched.
+  assert.equal(applyMessage(s1, { type: 'orderError', orderId: 999, code: 110, reason: 'x' }), s1);
+  assert.equal(applyMessage(s1, { type: 'orderError', code: 110, reason: 'x' }), s1);
+  const empty = { ...createInitialSnapshot(), orders: [] };
+  assert.equal(applyMessage(empty, { type: 'orderError', orderId: 10, code: 110, reason: 'x' }), empty);
+});
+
+test('applyMessage: a later authoritative orders broadcast still replaces the pruned list wholesale', () => {
+  const s0 = { ...createInitialSnapshot(), orders: [{ orderId: 10, status: 'Submitted' }] };
+  const pruned = applyMessage(s0, { type: 'orderError', orderId: 10, code: 201, reason: 'rejected' });
+  assert.deepEqual(pruned.orders, []);
+  const s1 = applyMessage(pruned, { type: 'orders', orders: [{ orderId: 12, status: 'Submitted' }] });
+  assert.deepEqual(s1.orders.map((o) => o.orderId), [12]);
+});

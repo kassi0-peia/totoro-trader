@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildOpenOrder, buildQuickOrder, freshQuoteMid, marketableLimitForAction } from './order-payload.js';
+import { buildOpenOrder, buildQuickOrder, freshQuoteMid, marketableLimitForAction, optionTickSize, snapToOptionTick } from './order-payload.js';
 
 // Shared context knobs that mirror App.jsx's live values at call time.
 const NOW = 1_000_000;
@@ -274,4 +274,44 @@ test('quick payload is flagged quick and carries the ask as its reference', () =
   assert.equal(r.payload.quick, true);
   assert.equal(r.payload.refAtSend, 2.1);
   assert.equal(r.payload.limit, 2.15);
+});
+
+test('optionTickSize: $0.05 below $3.00 premium, $0.10 at and above', () => {
+  assert.equal(optionTickSize(0.05), 0.05);
+  assert.equal(optionTickSize(2.95), 0.05);
+  assert.equal(optionTickSize(3), 0.10);
+  assert.equal(optionTickSize(12.4), 0.10);
+});
+
+test('snapToOptionTick: nearest tick with ties up, on both grid halves', () => {
+  assert.equal(snapToOptionTick(4.05), 4.10); // the live 2026-07-18 reject: tie rounds UP
+  assert.equal(snapToOptionTick(4.04), 4.00);
+  assert.equal(snapToOptionTick(4.06), 4.10);
+  assert.equal(snapToOptionTick(2.97), 2.95);
+  assert.equal(snapToOptionTick(2.98), 3.00);
+  assert.equal(snapToOptionTick(1.12), 1.10);
+  assert.equal(snapToOptionTick(1.13), 1.15);
+});
+
+test('snapToOptionTick: on-grid prices pass through exact', () => {
+  for (const px of [0.05, 0.10, 1.15, 2.95, 3.00, 3.10, 4.10, 12.4]) {
+    assert.equal(snapToOptionTick(px), px);
+  }
+});
+
+test('snapToOptionTick: float representations cannot fall off the grid', () => {
+  // 4.05 is stored as 4.0499999…; naive tick math would collapse it to 4.00.
+  assert.equal(snapToOptionTick(8.15 - 4.10), 4.10);
+  // 41 dimes accumulated in floating point (4.1000000000000005) stays 4.10.
+  let px = 0;
+  for (let i = 0; i < 41; i++) px += 0.10;
+  assert.equal(snapToOptionTick(px), 4.10);
+});
+
+test('snapToOptionTick: a positive price never snaps below one tick; junk passes through', () => {
+  assert.equal(snapToOptionTick(0.01), 0.05);
+  assert.equal(snapToOptionTick(0.02), 0.05);
+  for (const bad of [null, undefined, 0, -1, NaN, Infinity]) {
+    assert.equal(snapToOptionTick(bad), bad);
+  }
 });

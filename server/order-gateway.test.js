@@ -962,3 +962,45 @@ test('disconnect drops every record so an empty map never reads as flat truth', 
   assert.equal(h.gateway.workingOrdersList().length, 0);
   assert.equal(h.gateway.hasOwnOrder(10), false);
 });
+
+// ── orderStatus echo dedupe + reject re-publish ─────────────────────────────
+
+test('an identical orderStatus echo fires the fill lifecycle exactly once', () => {
+  // The @stoqey/ib channel re-emits byte-identical orderStatus events (seen
+  // live 2026-07-18: every fill logged, broadcast, and journaled twice).
+  const h = harness();
+  h.gateway.placeOrderRequest(h.ws, openBuy({ limit: 2.55 }));
+  h.gateway.onOrderStatus(10, 'Filled', 1, 0, 2.55, 700, 0, 2.55, CLIENT_ID);
+  h.gateway.onOrderStatus(10, 'Filled', 1, 0, 2.55, 700, 0, 2.55, CLIENT_ID);
+  assert.equal(h.calls.fills.length, 1, 'journal fires once');
+  assert.equal(h.broadcastsOfType('fill').length, 1, 'fill broadcast fires once');
+  assert.equal(h.calls.logs.filter((line) => /FILLED order 10/.test(line)).length, 1);
+});
+
+test('the echo guard never suppresses a real partial-to-full progression', () => {
+  const h = harness();
+  h.gateway.placeOrderRequest(h.ws, openBuy({ qty: 2, limit: 2.55 }));
+  h.gateway.onOrderStatus(10, 'Submitted', 1, 1, 2.55, 700, 0, 2.55, CLIENT_ID);
+  h.gateway.onOrderStatus(10, 'Submitted', 1, 1, 2.55, 700, 0, 2.55, CLIENT_ID); // echo — dropped
+  h.gateway.onOrderStatus(10, 'Filled', 2, 0, 2.56, 700, 0, 2.57, CLIENT_ID);
+  const fills = h.broadcastsOfType('fill');
+  assert.equal(fills.length, 2, 'partial then full each broadcast once');
+  assert.equal(fills[1].status, 'Filled');
+  assert.equal(h.calls.fills.length, 1, 'journal fires only on the full fill');
+});
+
+test('a hard reject re-publishes the working-order list without the dead row', () => {
+  // 'error' is DEAD, so the row leaves the projection only if the reject
+  // re-publishes (seen live 2026-07-18: a rejected TP at $4.05 stranded a ghost
+  // row that blocked re-attach and refused cancellation).
+  const h = harness();
+  h.gateway.placeOrderRequest(h.ws, openBuy({ limit: 4.05 }));
+  const before = h.broadcastsOfType('orders').length;
+  const handled = h.gateway.onOrderError(10, 110, new Error('price does not conform to the minimum price variation'));
+  assert.equal(handled, true);
+  const after = h.broadcastsOfType('orders');
+  assert.ok(after.length > before, 'reject must re-broadcast the order list');
+  const last = after[after.length - 1];
+  assert.ok(last.orders.every((row) => row.orderId !== 10), 'the rejected row is out of the projection');
+  assert.equal(h.broadcastsOfType('orderError').length, 1);
+});
