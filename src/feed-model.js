@@ -55,6 +55,7 @@ export function createInitialSnapshot() {
     journal: null,         // multi-day fill archive: "YYYYMMDD" -> [fill, ...] (null until requested)
     settlements: {},       // expiry-day underlying closes { "SYMBOL|EXPIRY": price } for ITM held-to-expiry P/L
     funds: null,           // { availableFunds, buyingPower, netLiquidation }
+    brokerPnl: null,       // IBKR's own marks: { account, daily, unrealized, realized, legs: { conId: {...} } }
     spxClose: null,        // previous trading day's 4:00 PM SPX cash close
     // ── Guest-symbol layer (multi-symbol Phase A) ──
     // null when no guest is active; otherwise the guest instrument's cockpit
@@ -216,6 +217,7 @@ export function applyMessage(s, msg, clock = Date.now) {
       ...positionAuthority,
       orders: Array.isArray(msg.orders) ? msg.orders : s.orders,
       funds: msg.funds ?? s.funds,
+      brokerPnl: msg.brokerPnl ?? s.brokerPnl,
       spxClose: msg.spxClose ?? s.spxClose
     };
   }
@@ -373,6 +375,10 @@ export function applyMessage(s, msg, clock = Date.now) {
 
   if (msg.type === 'funds') {
     return { ...s, funds: msg.funds ?? null };
+  }
+
+  if (msg.type === 'brokerPnl') {
+    return { ...s, brokerPnl: msg.brokerPnl ?? null };
   }
 
   if (msg.type === 'vix') {

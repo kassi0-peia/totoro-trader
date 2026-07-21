@@ -1,12 +1,12 @@
 import React from 'react';
-import { plDollars, plSign } from './pl.js';
+import { plDollars, plSign, isUnmarked, openPLOf } from './pl.js';
 import { unrepresentedWorkingOrders } from './app/positionModel.js';
 
 function plOf(pos) {
   // A missing, unsupported, or settled quote has no honest mark. In particular,
   // never turn a settled-but-unreconciled broker row into fake $0 P/L by falling
   // back to its entry premium.
-  if (['nodata', 'unavailable', 'settled'].includes(pos.greeksLive?.source)) {
+  if (isUnmarked(pos)) {
     return { live: null, dollars: null, pct: null };
   }
   const live = pos.greeksLive?.premium ?? pos.entryPremium ?? 0;
@@ -21,7 +21,7 @@ function fmtMoney(v) {
   return v.toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
 }
 
-export default function Positions({ positions, theme, onClose, onReverse, onCancelOrder, onCancelWorkingOrder, onInspect, onHoverPos, workingOrders = [], executionEnabled = false, funds = null, dayPL = null, fillFlash = null }) {
+export default function Positions({ positions, theme, onClose, onReverse, onCancelOrder, onCancelWorkingOrder, onInspect, onHoverPos, workingOrders = [], executionEnabled = false, funds = null, dayPL = null, brokerUnrealized = null, fillFlash = null }) {
   // "Working" = open, or any in-flight order (pending fill / closing).
   const working = positions.filter((p) => p.status === 'open' || p.status === 'pending' || p.status === 'closing');
   const done = positions.filter((p) => p.status === 'closed' || p.status === 'rejected');
@@ -40,9 +40,13 @@ export default function Positions({ positions, theme, onClose, onReverse, onCanc
   // each local in-flight position. Distinct same-contract orders remain visible.
   const serverOrders = unrepresentedWorkingOrders(workingOrders, positions);
 
-  const openPL = positions
-    .filter((p) => p.status === 'open' && p.entryPremium != null)
-    .reduce((s, p) => s + (plOf(p).dollars ?? 0), 0);
+  // `?? 0` here used to defeat plOf's own guard: an unmarked book summed to a
+  // confident +$0.00. An incomplete total is shown as — instead.
+  const open = openPLOf(positions);
+  // Same rule as App: our own sum when every leg is marked, otherwise IBKR's
+  // account-level unrealized — never a per-leg blend of the two cost bases.
+  const openShown = open.complete ? open.dollars : brokerUnrealized;
+  const openFromBroker = !open.complete && openShown != null;
   const closedPL = done.reduce((s, p) => s + (p.closedPL || 0), 0);
 
   // Net greeks of the open book (roadmap #6, the owner's clutter rule: one line in
@@ -75,9 +79,23 @@ export default function Positions({ positions, theme, onClose, onReverse, onCanc
         </div>
         <div className="pl-block pl-push">
           <span>Open P/L</span>
-          <b style={{ color: openPL >= 0 ? theme.profit : theme.loss }}>
-            {openPL >= 0 ? '+' : '−'}${Math.abs(openPL).toFixed(2)}
-          </b>
+          {openShown != null ? (
+            <b
+              style={{ color: openShown >= 0 ? theme.profit : theme.loss }}
+              data-tip={openFromBroker
+                ? `IBKR's own mark — ${open.unknown} open ${open.unknown === 1 ? 'leg has' : 'legs have'} no live quote`
+                : undefined}
+            >
+              {openShown >= 0 ? '+' : '−'}${Math.abs(openShown).toFixed(2)}{openFromBroker ? '*' : ''}
+            </b>
+          ) : (
+            <b
+              style={{ color: theme.muted }}
+              data-tip={`${open.unknown} open ${open.unknown === 1 ? 'leg has' : 'legs have'} no live mark — awaiting quotes or broker settlement`}
+            >
+              —
+            </b>
+          )}
         </div>
         <div className="pl-block">
           <span>Closed P/L</span>
@@ -85,12 +103,21 @@ export default function Positions({ positions, theme, onClose, onReverse, onCanc
             {closedPL >= 0 ? '+' : '−'}${Math.abs(closedPL).toFixed(2)}
           </b>
         </div>
-        {dayPL != null && (
-          <div className="pl-block" data-tip="Blotter cash flow + marked value of open positions (today)">
+        {(dayPL != null || !open.complete) && (
+          <div
+            className="pl-block"
+            data-tip={dayPL == null
+              ? 'Blotter cash flow is known, but an open leg has no live mark — the day total cannot be stated yet'
+              : 'Blotter cash flow + marked value of open positions (today)'}
+          >
             <span>Day P/L</span>
-            <b style={{ color: dayPL >= 0 ? theme.profit : theme.loss }}>
-              {dayPL >= 0 ? '+' : '−'}${Math.abs(dayPL).toFixed(0)}
-            </b>
+            {dayPL == null ? (
+              <b style={{ color: theme.muted }}>—</b>
+            ) : (
+              <b style={{ color: dayPL >= 0 ? theme.profit : theme.loss }}>
+                {dayPL >= 0 ? '+' : '−'}${Math.abs(dayPL).toFixed(0)}
+              </b>
+            )}
           </div>
         )}
         {net.on && (

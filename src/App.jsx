@@ -22,7 +22,7 @@ import { useIbkrFeed, liveQuote } from './feed.js';
 import { nearestOtmStrike, replayVolAt } from './options.js';
 import { classifyRegime } from './regime.js';
 import BusStopPanel from './BusStopPanel.jsx';
-import { plDollars } from './pl.js';
+import { openPLOf, openValueOf, num } from './pl.js';
 import { deriveDayLevels } from './levels.js';
 import useReplayController from './app/useReplayController.js';
 import { replayAccess, replayBlocksLiveOrders, shouldExitReplay } from './app/replayAccess.js';
@@ -758,36 +758,33 @@ export default function App() {
 
   // Day P/L: blotter cash flow plus the marked value of what's still open.
   // In replay: the practice session's P/L (closed + open marks vs entries).
+  // null when any open leg has no honest mark — an unmarked book must not read
+  // as a confident number (it used to value those legs at their entry premium,
+  // which is exactly the fake-$0 the pl.js guard exists to prevent).
+  // Broker-marked fallbacks. Never blended per-leg with our own numbers: IBKR
+  // marks against ITS average cost and we mark against our own avgFillPrice, so
+  // mixing the two in one sum would silently combine cost bases. It's all ours
+  // or all theirs.
+  const brokerDaily = replayActive ? null : num(feed.brokerPnl?.daily);
+  const brokerUnrealized = replayActive ? null : num(feed.brokerPnl?.unrealized);
+
   const dayPL = useMemo(() => {
     if (replayActive) {
-      return positionsLive.reduce((s, p) => {
-        if (p.status === 'closed') return s + (p.closedPL ?? 0);
-        if (p.status === 'open') {
-          return s + plDollars(
-            p,
-            p.greeksLive?.premium ?? p.entryPremium ?? 0,
-            p.entryPremium ?? 0
-          );
-        }
-        return s;
-      }, 0);
+      const closed = positionsLive.reduce((s, p) => (p.status === 'closed' ? s + (p.closedPL ?? 0) : s), 0);
+      const open = openPLOf(positionsLive);
+      return open.complete ? closed + open.dollars : null;
     }
     const cash = (feed.trades || []).reduce((s, t) => s + (t.action === 'SELL' ? 1 : -1) * t.price * 100 * t.qty, 0);
-    const open = positionsLive
-      .filter((p) => p.status === 'open')
-      .reduce((s, p) => s + (p.greeksLive?.premium ?? p.entryPremium ?? 0) * 100 * p.qty * (p.side === 'long' ? 1 : -1), 0);
-    return cash + open;
-  }, [feed.trades, positionsLive, replayActive]);
+    const open = openValueOf(positionsLive);
+    return open.complete ? cash + open.value : brokerDaily;
+  }, [feed.trades, positionsLive, replayActive, brokerDaily]);
 
-  const openPL = positionsLive
-    .filter((p) => p.status === 'open' && p.entryPremium != null)
-    .reduce((s, p) => {
-      const live = p.greeksLive?.premium ?? p.entryPremium;
-      return s + plDollars(p, live);
-    }, 0);
+  const openBook = openPLOf(positionsLive);
+  const openPL = openBook.complete ? openBook.dollars : brokerUnrealized;
   const openCount = positionsLive.filter((p) => p.status === 'open').length;
 
-  const mood = openPL > 200 ? 'happy' : openPL < -200 ? 'sad' : 'calm';
+  // Don't emote on a number we don't have.
+  const mood = openPL == null ? 'calm' : openPL > 200 ? 'happy' : openPL < -200 ? 'sad' : 'calm';
   const earsUp = (() => {
     const hist = moveHistRef.current;
     if (hist.length < 2) return false;
@@ -1595,6 +1592,7 @@ export default function App() {
                 executionEnabled={orderSurfaceExecutionEnabled}
                 funds={feed.funds}
                 dayPL={dayPL}
+                brokerUnrealized={brokerUnrealized}
                 fillFlash={replayActive ? null : fillFlashFresh}
               />
             </div>
@@ -1616,9 +1614,9 @@ export default function App() {
           <span className="ms-caret">{bottomShown ? '▾' : '▴'}</span>
           <span
             className="ms-pl"
-            style={{ color: openCount === 0 ? theme.muted : openPL >= 0 ? theme.profit : theme.loss }}
+            style={{ color: openCount === 0 || openPL == null ? theme.muted : openPL >= 0 ? theme.profit : theme.loss }}
           >
-            {openCount === 0 ? 'FLAT' : `${openPL >= 0 ? '+' : '−'}$${Math.abs(openPL).toFixed(0)}`}
+            {openCount === 0 ? 'FLAT' : openPL == null ? '—' : `${openPL >= 0 ? '+' : '−'}$${Math.abs(openPL).toFixed(0)}`}
           </span>
           <span className="ms-count">{openCount === 0 ? 'no positions' : `${openCount} open`}</span>
           <span className="ms-acct" style={{ color: '#0a0c12', background: acctColor }}>{acctLabel}</span>

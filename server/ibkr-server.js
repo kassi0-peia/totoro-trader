@@ -64,6 +64,7 @@ import { createKillSwitchCoordinator } from './kill-switch.js';
 import { createOrderGateway } from './order-gateway.js';
 import { createOrderRequestRegistry, fingerprintOrderRequest } from './order-request-registry.js';
 import { createPortfolioController } from './portfolio.js';
+import { createPnlService } from './pnl-service.js';
 import { isPortfolioReady, portfolioMessage } from './portfolio-sync.js';
 import { createQuoteService } from './quote-service.js';
 import { recoverQuickOrders } from './quick-order-recovery.js';
@@ -307,6 +308,18 @@ const portfolio = createPortfolioController({
   getBroker: () => ib,
   allocateReqId: nextRequestId,
   publish: publishPortfolioState,
+});
+
+// Broker-marked P&L (read-only). The app's own P/L is derived from the SPXW
+// chain, which is dark overnight and silent for settled rows — this is the
+// authoritative number the client falls back to instead of valuing an unmarked
+// leg at its entry premium.
+const pnlService = createPnlService({
+  getBroker: () => ib,
+  allocateReqId: nextRequestId,
+  isConnected: () => connected,
+  onChange: () => broadcast({ type: 'brokerPnl', brokerPnl: pnlService.toWire() }),
+  log: (m) => console.log(m),
 });
 
 const quoteService = createQuoteService({
@@ -761,6 +774,16 @@ function wireHandlers(api) {
     portfolio.onAccountSummary(_reqId, _acct, tag, value);
   });
 
+  // Broker-marked P&L: account totals and per-leg unrealized. Read-only.
+  api.on(EventName.pnl, (reqId, dailyPnL, unrealizedPnL, realizedPnL) => {
+    if (api !== ib) return;
+    pnlService.onPnl(reqId, dailyPnL, unrealizedPnL, realizedPnL);
+  });
+  api.on(EventName.pnlSingle, (reqId, pos, dailyPnL, unrealizedPnL, realizedPnL, value) => {
+    if (api !== ib) return;
+    pnlService.onPnlSingle(reqId, pos, dailyPnL, unrealizedPnL, realizedPnL, value);
+  });
+
   api.on(EventName.disconnected, () => {
     if (api !== ib) return;
     console.log('[ibkr] socket disconnected');
@@ -772,6 +795,7 @@ function wireHandlers(api) {
     killOrderService.disconnect('IBKR disconnected');
     quoteService.onDisconnect();
     portfolio.disconnect();
+    pnlService.disconnect();
     setStatus(false);
     // Invalidate guest callbacks before clearing generic request ownership. The
     // registry keeps browser attachments, but exact resources must be rebuilt
@@ -3313,6 +3337,21 @@ function publishPortfolioState(state) {
     orders: workingOrdersList(),
   }));
   broadcast({ type: 'funds', funds: state.funds });
+  // Track the broker's own P&L for exactly the account and legs that authority
+  // just published. Read-only: it can never route.
+  syncPnlSubscriptions(state);
+}
+
+// Bind the P&L view to the selected account and its current option legs. Called
+// off the authoritative portfolio emit so it can never disagree about which
+// account or which positions are real.
+function syncPnlSubscriptions(state = portfolio.publicSnapshot()) {
+  try {
+    pnlService.setAccount(state.account ?? null);
+    pnlService.syncPositions((state.positions ?? []).map((p) => p.conId));
+  } catch (e) {
+    console.log('[pnl] subscription sync failed:', e.message);
+  }
 }
 
 function requestAccountSummary() {
@@ -3621,6 +3660,10 @@ function snapshotMsg() {
     positions: portfolioState.positions,
     orders: workingOrdersList(),
     funds: portfolioState.funds,
+    // IBKR's own marks: account daily/unrealized/realized plus per-conId legs.
+    // The client prefers its live chain and falls back to this rather than
+    // valuing an unmarked leg at its entry premium.
+    brokerPnl: pnlService.toWire(),
     spxClose: basisState.spxClose,
     // Staleness heartbeat: when the displayed price last ticked. Seeds the client's
     // freshness clock at (re)connect for the price it actually shows — SPX cash in
