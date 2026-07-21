@@ -577,6 +577,58 @@
 
 .pos-pinned-card .limit-input { width: 56px; }
 
+/* Exit plan fold: a full-width bar at the card's base. Collapsed by default so
+   the pinned card stays a clean price + greeks glance; opening it drops the
+   exit drawer below. */
+.pos-exit-toggle {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+  padding: 5px 9px;
+  border: 1px solid var(--c-border);
+  border-radius: 8px;
+  background: var(--c-surfaceAlt);
+  color: var(--c-muted);
+  font-size: 9px;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease;
+}
+
+.pos-exit-toggle:hover,
+.pos-exit-toggle.open {
+  color: var(--pos-exit-color, var(--c-text));
+  border-color: var(--pos-exit-color, var(--c-border));
+}
+
+.pos-exit-chev { font-size: 8px; opacity: 0.85; }
+
+/* The drawer hangs off the pinned card's bottom edge in the same fixed layer.
+   Pointer-events auto so its controls take input; the layer itself is inert. */
+.pos-exit-drawer {
+  pointer-events: auto;
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid;
+  border-radius: 12px;
+  background: var(--c-surface);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.65);
+  animation: exitDrawerIn 150ms ease-out;
+}
+
+@keyframes exitDrawerIn {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.pos-exit-drawer .qty-row { flex-wrap: wrap; }
+.pos-exit-drawer .order-kind { flex: 1 1 180px; justify-content: flex-end; flex-wrap: wrap; }
+.pos-exit-drawer .limit-input { width: 56px; }
+
 .pos-card-unavailable {
   flex: 1 1 auto;
   min-height: 180px;

@@ -41,6 +41,7 @@ export default function PositionModal({
   const [cursor, setCursor] = useState(null); // {x,y} over the premium graph
   const [view, setView] = useState(null);     // {lo,hi} times for the scroll-zoom window; null = full
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
+  const [exitOpen, setExitOpen] = useState(false); // pinned card: exit plan drawer folded away by default
   const pinned = floating != null;
   const displayIdentity = pos ?? identity;
 
@@ -48,6 +49,7 @@ export default function PositionModal({
     setView(null);
     hoverDragRef.current = null;
     setHoverDragOffset(null);
+    setExitOpen(false);
   }, [floating?.key, pos?.id]);
 
   // (Re)request the premium history while open — server caches for 60 s.
@@ -443,6 +445,54 @@ export default function PositionModal({
     event.currentTarget.releasePointerCapture?.(event.pointerId);
   };
 
+  // The exit surface, shared between the legacy centered modal (inline) and the
+  // pinned card (folded into a drop-down drawer below the card, so the graph +
+  // greeks stay uncluttered until the plan is opened).
+  const exitControls = pos ? (
+    <ExitControls
+      pos={pos}
+      color={color}
+      executionEnabled={executionEnabled}
+      trailOk={trailOk}
+      onAttachExit={onAttachExit}
+      armedExitOk={armedExitOk}
+      armedExitMaxQty={armedExitMaxQty}
+      onArmExit={onArmExit}
+      armedExitRows={armedExitRows}
+      onDisarmExit={onDisarmExit}
+    />
+  ) : null;
+
+  // Pinned-only: the exit plan expands the card *downwards* as a drawer that
+  // hangs off the card's bottom edge (outside its own overflow), flipping above
+  // when there's no room below. Positioned from the persisted layout so it rides
+  // the card through moves/resizes without measuring live geometry.
+  const exitDrawer = (pinned && pos && exitOpen && exitControls) ? (() => {
+    const vh = typeof window !== 'undefined' ? window.innerHeight : 800;
+    const spaceBelow = vh - (floating.y + floating.height) - 8;
+    const DRAWER_MIN = 150;
+    const dropUp = spaceBelow < DRAWER_MIN && floating.y > DRAWER_MIN;
+    const style = {
+      position: 'absolute',
+      left: floating.x,
+      width: floating.width,
+      zIndex: floating.z,
+      borderColor: color,
+      ...(dropUp
+        ? { bottom: vh - floating.y + 4, maxHeight: floating.y - 8 }
+        : { top: floating.y + floating.height + 4, maxHeight: Math.max(DRAWER_MIN, spaceBelow) }),
+    };
+    return (
+      <div
+        className="pos-exit-drawer"
+        style={style}
+        onPointerDown={() => onCardFocus?.(floating.key)}
+      >
+        {exitControls}
+      </div>
+    );
+  })() : null;
+
   const card = (
       <div
         ref={cardRef}
@@ -531,19 +581,18 @@ export default function PositionModal({
               </div>
             )}
 
-        {!anchor && (
-          <ExitControls
-            pos={pos}
-            color={color}
-            executionEnabled={executionEnabled}
-            trailOk={trailOk}
-            onAttachExit={onAttachExit}
-            armedExitOk={armedExitOk}
-            armedExitMaxQty={armedExitMaxQty}
-            onArmExit={onArmExit}
-            armedExitRows={armedExitRows}
-            onDisarmExit={onDisarmExit}
-          />
+        {!anchor && !pinned && exitControls}
+        {pinned && exitControls && (
+          <button
+            type="button"
+            className={`pos-exit-toggle${exitOpen ? ' open' : ''}`}
+            style={{ '--pos-exit-color': color }}
+            aria-expanded={exitOpen}
+            onClick={(e) => { e.stopPropagation(); setExitOpen((v) => !v); }}
+          >
+            <span>⚔̸ Exit Plan</span>
+            <span className="pos-exit-chev" aria-hidden="true">{exitOpen ? '▴' : '▾'}</span>
+          </button>
         )}
           </>
         )}
@@ -555,7 +604,8 @@ export default function PositionModal({
       </div>
   );
 
-  if (anchor || pinned) return card;
+  if (anchor) return card;
+  if (pinned) return <>{card}{exitDrawer}</>;
   return (
     <div className="modal-backdrop" onClick={onClose}>
       {card}
