@@ -54,26 +54,28 @@ function TradeRow({ t, theme, editing = false, onEdit = null, onSave = null }) {
         >
           @ ${Number(t.price).toFixed(2)}
         </span>
-        {t.shot && (
-          <button
-            className={`th-shot-btn${showShot ? ' on' : ''}`}
-            onClick={(e) => { e.stopPropagation(); setShowShot((v) => !v); }}
-            data-tip={showShot ? 'Hide the tape' : 'The tape at fill time'}
-            aria-label="Fill snapshot"
-          >
-            📷
-          </button>
-        )}
-        {onEdit && (
-          <button
-            className={`th-note-btn${t.note ? ' has' : ''}`}
-            onClick={(e) => { e.stopPropagation(); onEdit(t.id); }}
-            data-tip={t.note ? 'Edit note' : 'Add a note — why this trade?'}
-            aria-label="Note"
-          >
-            ✎
-          </button>
-        )}
+        <span className="th-actions">
+          {t.shot && (
+            <button
+              className={`th-shot-btn${showShot ? ' on' : ''}`}
+              onClick={(e) => { e.stopPropagation(); setShowShot((v) => !v); }}
+              data-tip={showShot ? 'Hide the tape' : 'The tape at fill time'}
+              aria-label="Fill snapshot"
+            >
+              📷
+            </button>
+          )}
+          {onEdit && (
+            <button
+              className={`th-note-btn${t.note ? ' has' : ''}`}
+              onClick={(e) => { e.stopPropagation(); onEdit(t.id); }}
+              data-tip={t.note ? 'Edit note' : 'Add a note — why this trade?'}
+              aria-label="Note"
+            >
+              ✎
+            </button>
+          )}
+        </span>
       </div>
       {t.shot && showShot && (
         <img className="th-shot" src={`/shots/${t.shot}`} alt={`Chart at ${fmtTime(t.ts)} fill`} loading="lazy" />
