@@ -37,23 +37,23 @@ export function TimeframeButtons({ value, onChange, theme, className = 'tf-group
 export default function TimeframeBar({ value, onChange, theme, onCloseAll, canCloseAll, onReplay = null, replayOn = false, replayDisabled = false, replayTip = null }) {
   return (
     <div className="tf-bar">
+      {onReplay && (
+        <button
+          className="tf-panic tf-replay"
+          onClick={onReplay}
+          disabled={replayDisabled}
+          aria-disabled={replayDisabled}
+          data-tip={replayTip || 'Replay a past day (practice mode — simulated fills)'}
+          style={replayOn
+            ? { background: theme.accent, borderColor: theme.accent, color: '#0a0c12' }
+            : { borderColor: theme.accent, color: theme.accent }}
+        >
+          REPLAY
+        </button>
+      )}
       <span className="tf-label">TIMEFRAME</span>
       <TimeframeButtons value={value} onChange={onChange} theme={theme} />
       <div className="tf-actions">
-        {onReplay && (
-          <button
-            className="tf-panic tf-replay"
-            onClick={onReplay}
-            disabled={replayDisabled}
-            aria-disabled={replayDisabled}
-            data-tip={replayTip || 'Replay a past day (practice mode — simulated fills)'}
-            style={replayOn
-              ? { background: theme.accent, borderColor: theme.accent, color: '#0a0c12' }
-              : { borderColor: theme.accent, color: theme.accent }}
-          >
-            REPLAY
-          </button>
-        )}
         <button
           className="tf-panic"
           onClick={() => window.open('https://www.interactivebrokers.com/sso/Login', '_blank', 'noopener')}
