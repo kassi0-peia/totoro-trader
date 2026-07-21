@@ -34,6 +34,11 @@ const localDayKey = (t) => {
 // each other (a 4h session day is only ~2 bars).
 const DAY_LABEL_PX = 40;
 
+const minutesOfDay = (t) => {
+  const d = new Date(t);
+  return d.getHours() * 60 + d.getMinutes();
+};
+
 export function selectTimeAxisLabels(slots, {
   timeframe,
   candleW,
@@ -42,6 +47,13 @@ export function selectTimeAxisLabels(slots, {
   if (!Array.isArray(slots) || !(candleW > 0) || !(targetPx > 0)) return [];
   const minBars = Math.max(1, Math.round(targetPx / candleW));
   const minDayBars = Math.max(1, Math.round(DAY_LABEL_PX / candleW));
+  // Intraday labels land on round clock times (…09:45, 10:00, 10:15…) rather
+  // than on every Nth bar, which produced arbitrary stamps like 09:34 / 09:47.
+  // The step is the nice increment nearest the pixel target; a label is emitted
+  // on the first bar of each step block, so session gaps can't shift the phase.
+  const timeStep = niceTimeStep(minBars * (timeframe || 1), timeframe || 1);
+  const minTimeBars = Math.max(1, Math.round((targetPx / 2) / candleW));
+  let previousBlock = null;
   const labels = [];
   let previousDay = null;
   let lastLabelIndex = -Infinity;
@@ -78,6 +90,9 @@ export function selectTimeAxisLabels(slots, {
       lastLabelIndex = i;
       continue;
     }
+    const block = Math.floor(minutesOfDay(candle.t) / timeStep);
+    const blockBoundary = previousBlock !== null && block !== previousBlock;
+    previousBlock = block;
     if (dayBoundary || firstVisible) {
       labels.push({
         index: i,
@@ -85,7 +100,7 @@ export function selectTimeAxisLabels(slots, {
         label: new Date(candle.t).toLocaleDateString([], { month: 'short', day: 'numeric' }),
       });
       lastLabelIndex = i;
-    } else if (i - lastLabelIndex >= minBars) {
+    } else if (blockBoundary && i - lastLabelIndex >= minTimeBars) {
       labels.push({ index: i, kind: 'time', label: fmtTime(candle.t) });
       lastLabelIndex = i;
     }
