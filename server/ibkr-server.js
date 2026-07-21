@@ -754,6 +754,7 @@ function wireHandlers(api) {
     if (api !== ib) return;
     portfolio.onPositionEnd();
     finishPortfolioRecoveryIfReady();
+    syncPnlSubscriptions(); // the account may have been published pre-connection
     settlementPump(); // backfill any missing expiry-day closes once we're up
   });
 

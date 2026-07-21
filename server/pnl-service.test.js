@@ -112,3 +112,51 @@ test('invalid conIds are refused', () => {
   svc.syncPositions([0, -5, null, undefined, 1.5, 42]);
   assert.equal(calls.filter((c) => c[0] === 'reqPnLSingle').length, 1);
 });
+
+test('an account bound before the connection subscribes on the next sync', () => {
+  // The live failure: portfolio authority publishes the account while the
+  // connection flag is still false. Recording the account must not count as
+  // having subscribed, or the idempotency check blocks every retry forever.
+  let connected = false;
+  const calls = [];
+  let next = 100;
+  const api = {
+    reqPnL: (...a) => calls.push(['reqPnL', ...a]),
+    cancelPnL: () => {},
+    reqPnLSingle: (...a) => calls.push(['reqPnLSingle', ...a]),
+    cancelPnLSingle: () => {},
+  };
+  const svc = createPnlService({
+    getBroker: () => api,
+    allocateReqId: () => next++,
+    isConnected: () => connected,
+  });
+
+  svc.setAccount('DU123');
+  assert.deepEqual(calls, [], 'nothing attempted while disconnected');
+
+  connected = true;
+  svc.setAccount('DU123');           // same account, now connected
+  assert.deepEqual(calls[0], ['reqPnL', 100, 'DU123', '']);
+
+  svc.setAccount('DU123');           // still idempotent once subscribed
+  assert.equal(calls.filter((c) => c[0] === 'reqPnL').length, 1);
+});
+
+test('a position sync alone can recover a missed account subscription', () => {
+  let connected = false;
+  const calls = [];
+  let next = 100;
+  const api = {
+    reqPnL: (...a) => calls.push(['reqPnL', ...a]),
+    cancelPnL: () => {},
+    reqPnLSingle: (...a) => calls.push(['reqPnLSingle', ...a]),
+    cancelPnLSingle: () => {},
+  };
+  const svc = createPnlService({ getBroker: () => api, allocateReqId: () => next++, isConnected: () => connected });
+  svc.setAccount('DU123');
+  connected = true;
+  svc.syncPositions([42]);
+  assert.ok(calls.some((c) => c[0] === 'reqPnL'), 'account subscription recovered');
+  assert.ok(calls.some((c) => c[0] === 'reqPnLSingle'), 'leg subscribed too');
+});

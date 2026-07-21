@@ -63,12 +63,23 @@ export function createPnlService({
 
   // Bind to one account. A different account tears the whole view down first —
   // a stale P&L row from the previous login must never survive the switch.
+  //
+  // The account is *desired* state, deliberately separate from whether we have
+  // actually subscribed: portfolio authority publishes the account before the
+  // connection flag flips, so the first attempt routinely finds no broker. If
+  // recording the account also counted as subscribing, the idempotency check
+  // below would then block every retry and no P&L would ever arrive.
   function setAccount(next) {
     const normalized = typeof next === 'string' && next.trim() ? next.trim() : null;
-    if (normalized === account) return;
-    reset();
-    account = normalized;
-    if (!account) return;
+    if (normalized !== account) {
+      reset();
+      account = normalized;
+    }
+    ensureAccountSubscription();
+  }
+
+  function ensureAccountSubscription() {
+    if (!account || accountReqId != null) return;
     const api = broker();
     if (!api) return;
     try {
@@ -86,6 +97,7 @@ export function createPnlService({
   // positionEnd.
   function syncPositions(conIds) {
     if (!account) return;
+    ensureAccountSubscription(); // covers a first bind that predated the connection
     const wanted = new Set((conIds ?? []).filter((id) => Number.isSafeInteger(id) && id > 0));
     for (const conId of [...legs.keys()]) if (!wanted.has(conId)) cancelLeg(conId);
     const api = broker();
