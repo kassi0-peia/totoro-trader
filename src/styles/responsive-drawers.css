@@ -303,16 +303,22 @@
 /* 📸 fill snapshots: the camera earns pixels only when a shot exists; the
    still unfolds under its fill, full row width, folded again on click. */
 .th-shot-btn {
-  opacity: 0.55;
-  border: none;
-  background: none;
+  opacity: 0.9;
+  border: 1px solid var(--c-border);
+  border-radius: 5px;
+  background: var(--c-surfaceAlt);
   cursor: pointer;
-  font-size: 11px;
-  padding: 0 2px;
-  filter: grayscale(1);
-  transition: opacity 140ms, filter 140ms;
+  font-size: 12px;
+  line-height: 1;
+  padding: 1px 4px;
+  transition: opacity 140ms, border-color 140ms, background 140ms;
 }
-.th-rowwrap:hover .th-shot-btn, .th-shot-btn.on { opacity: 1; filter: none; }
+.th-rowwrap:hover .th-shot-btn { opacity: 1; }
+.th-shot-btn:hover, .th-shot-btn.on {
+  opacity: 1;
+  border-color: var(--c-accent);
+  background: var(--c-accentSoft, var(--c-surfaceAlt));
+}
 .th-shot {
   display: block;
   width: calc(100% - 28px);
