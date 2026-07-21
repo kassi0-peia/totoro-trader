@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { journalStats, mergeToday } from './journal-stats.js';
 
 function fmtTime(ts) {
@@ -35,12 +36,45 @@ function etToday() {
 // Notes (the owner 2026-07-10: "the journal had numbers, not whys"): a ✎ appears on
 // hover (accent-lit when a note exists); the note itself is a quiet italic line
 // under the fill, click-to-edit. Enter saves (empty clears), Esc/blur cancels.
+// The inline fill snapshot is drawer-width (~300px) for a still that is really
+// 1200px wide. Clicking it opens the full frame. Esc or any click closes; there
+// is deliberately nothing to aim at to get out — the whole backdrop is the
+// target, so this can never trap you with an order ticket underneath.
+//
+// Two traps this had to survive, both found by running it:
+//  · PORTAL, not an inline child. `position: fixed` is contained by ANY
+//    transformed ancestor, and the trades drawer slides on a transform — so
+//    rendered in place the "full-screen" overlay was clipped to the drawer and
+//    the image came out 331px, barely larger than the thumbnail.
+//  · CAPTURE the Escape key and stop it. Otherwise the app's own Esc handlers
+//    also fire and the drawer closes out from under the lightbox.
+function ShotLightbox({ src, alt, onClose }) {
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key !== 'Escape') return;
+      e.stopPropagation();
+      onClose();
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [onClose]);
+  return createPortal(
+    <div className="shot-lightbox" onClick={onClose} role="dialog" aria-modal="true" aria-label={alt}>
+      <img className="shot-lightbox-img" src={src} alt={alt} onClick={onClose} />
+      <span className="shot-lightbox-hint">click anywhere or press Esc to close</span>
+    </div>,
+    document.body,
+  );
+}
+
 function TradeRow({ t, theme, editing = false, onEdit = null, onSave = null }) {
   const buy = t.action === 'BUY';
   const c = t.right === 'C' ? theme.callLine : theme.putLine;
   // 📸 fill snapshot: rows that carry one grow a camera; click unfolds the
   // still of the tape as it looked at fill time, click again folds it away.
   const [showShot, setShowShot] = useState(false);
+  const [bigShot, setBigShot] = useState(false);
+  const shotAlt = `Chart at ${fmtTime(t.ts)} fill`;
   return (
     <div className="th-rowwrap">
       <div className="th-row">
@@ -78,7 +112,17 @@ function TradeRow({ t, theme, editing = false, onEdit = null, onSave = null }) {
         </span>
       </div>
       {t.shot && showShot && (
-        <img className="th-shot" src={`/shots/${t.shot}`} alt={`Chart at ${fmtTime(t.ts)} fill`} loading="lazy" />
+        <img
+          className="th-shot"
+          src={`/shots/${t.shot}`}
+          alt={shotAlt}
+          loading="lazy"
+          data-tip="Click to enlarge"
+          onClick={(e) => { e.stopPropagation(); setBigShot(true); }}
+        />
+      )}
+      {t.shot && bigShot && (
+        <ShotLightbox src={`/shots/${t.shot}`} alt={shotAlt} onClose={() => setBigShot(false)} />
       )}
       {editing ? (
         <input

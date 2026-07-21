@@ -346,7 +346,43 @@
   margin: 0 14px 8px;
   border: 1px solid var(--c-border);
   border-radius: 6px;
+  cursor: zoom-in;
+  transition: border-color 140ms;
 }
+.th-shot:hover { border-color: var(--c-accent); }
+
+/* Full-screen fill snapshot. Sits above every drawer and modal; the backdrop
+   itself is the close target so there is nothing to aim at to get out. */
+.shot-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.88);
+  cursor: zoom-out;
+  animation: shot-lightbox-in 120ms ease-out;
+}
+@keyframes shot-lightbox-in { from { opacity: 0; } to { opacity: 1; } }
+.shot-lightbox-img {
+  max-width: 100%;
+  max-height: calc(100% - 34px);
+  object-fit: contain;
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  cursor: zoom-out;
+}
+.shot-lightbox-hint {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--c-muted);
+  user-select: none;
+}
+@media (prefers-reduced-motion: reduce) { .shot-lightbox { animation: none; } }
 .th-note {
   padding: 0 14px 7px 108px;
   font-size: 11px;
