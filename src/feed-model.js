@@ -53,6 +53,7 @@ export function createInitialSnapshot() {
     replayDays: {},        // replay mode: "YYYYMMDD" -> full 1-min RTH session
     historyErrors: {},     // `${kind}:${key}` -> last keyed request failure
     journal: null,         // multi-day fill archive: "YYYYMMDD" -> [fill, ...] (null until requested)
+    settlements: {},       // expiry-day underlying closes { "SYMBOL|EXPIRY": price } for ITM held-to-expiry P/L
     funds: null,           // { availableFunds, buyingPower, netLiquidation }
     spxClose: null,        // previous trading day's 4:00 PM SPX cash close
     // ── Guest-symbol layer (multi-symbol Phase A) ──
@@ -209,6 +210,7 @@ export function applyMessage(s, msg, clock = Date.now) {
       // the snapshot builder's caps note. Gates order fields the bridge must
       // understand to route safely.
       caps: msg.caps && typeof msg.caps === 'object' ? msg.caps : {},
+      settlements: msg.settlements && typeof msg.settlements === 'object' ? msg.settlements : s.settlements,
       trades: Array.isArray(msg.trades) ? msg.trades : s.trades,
       positions: Array.isArray(msg.positions) ? msg.positions : s.positions,
       ...positionAuthority,
@@ -354,8 +356,19 @@ export function applyMessage(s, msg, clock = Date.now) {
     return { ...s, trades, journal };
   }
 
+  // 💵 an expiry-day settlement close landed — merge it so ITM held-to-expiry
+  // legs re-price live. The bridge sends the full map; prefer it, else patch one.
+  if (msg.type === 'settlementResult') {
+    const settlements = msg.settlements && typeof msg.settlements === 'object'
+      ? msg.settlements
+      : (Number.isFinite(msg.price) && msg.symbol && /^\d{8}$/.test(String(msg.expiry))
+        ? { ...s.settlements, [`${msg.symbol}|${msg.expiry}`]: msg.price }
+        : s.settlements);
+    return { ...s, settlements };
+  }
+
   if (msg.type === 'journalResult') {
-    return { ...s, journal: msg.days || {} };
+    return { ...s, journal: msg.days || {}, settlements: msg.settlements && typeof msg.settlements === 'object' ? msg.settlements : s.settlements };
   }
 
   if (msg.type === 'funds') {

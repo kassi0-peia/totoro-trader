@@ -1533,6 +1533,7 @@ export default function App() {
                     view={drawerView}
                     onSetView={setDrawerView}
                     journal={feed.journal}
+                    settlements={feed.settlements}
                     today={feed.live ? feed.expiry : null}
                     connected={feed.socketOpen}
                     noteRequest={noteReq}

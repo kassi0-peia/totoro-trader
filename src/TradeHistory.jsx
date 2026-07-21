@@ -142,13 +142,13 @@ function EquityCurve({ rows, theme }) {
 // History view: equity curve + stats row + per-day list (newest first; click a
 // day to expand its fills). All math lives in journal-stats.js (unit-tested);
 // the P/L convention is the blotter's own cash-flow accounting.
-function JournalHistory({ trades, journal, today, theme, connected = false, noteEdit = null, onNoteEdit = null, onNoteSave = null }) {
+function JournalHistory({ trades, journal, settlements = null, today, theme, connected = false, noteEdit = null, onNoteEdit = null, onNoteSave = null }) {
   const [expanded, setExpanded] = useState(null);
   const openDay = today || etToday();
   const { days, stats } = useMemo(() => {
     const merged = mergeToday(journal, openDay, trades);
-    return { days: merged, stats: journalStats(merged, openDay) };
-  }, [journal, trades, openDay]);
+    return { days: merged, stats: journalStats(merged, openDay, settlements) };
+  }, [journal, trades, openDay, settlements]);
 
   if (journal == null) {
     return (
@@ -233,7 +233,7 @@ function JournalHistory({ trades, journal, today, theme, connected = false, note
 // server-recorded, so it survives reloads and shows every device's fills).
 // HISTORY = the multi-day journal (equity curve + daily P/L). The view toggle
 // lives here in the drawer header — no new cockpit chrome.
-export default function TradeHistory({ trades = [], theme, view = 'today', onSetView = null, journal, today = null, connected = false, noteRequest = null, onSaveNote = null }) {
+export default function TradeHistory({ trades = [], theme, view = 'today', onSetView = null, journal, settlements = null, today = null, connected = false, noteRequest = null, onSaveNote = null }) {
   const rows = [...trades].reverse();
   const history = view === 'history';
   // Fill-note editor: one row at a time. App's N hotkey requests the latest
@@ -269,7 +269,7 @@ export default function TradeHistory({ trades = [], theme, view = 'today', onSet
         )}
       </div>
       {history ? (
-        <JournalHistory trades={trades} journal={journal} today={today} theme={theme} connected={connected} noteEdit={noteEdit} onNoteEdit={onSaveNote ? setNoteEdit : null} onNoteSave={saveNote} />
+        <JournalHistory trades={trades} journal={journal} settlements={settlements} today={today} theme={theme} connected={connected} noteEdit={noteEdit} onNoteEdit={onSaveNote ? setNoteEdit : null} onNoteSave={saveNote} />
       ) : (
         <div className="th-list">
           {rows.length === 0 ? (

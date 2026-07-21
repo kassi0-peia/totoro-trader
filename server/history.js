@@ -5,6 +5,7 @@ export const HISTORY_KIND = Object.freeze({
   TIMEFRAME: 'tf-hist',
   OPTION: 'opt-hist',
   REPLAY: 'replay-day',
+  SETTLEMENT: 'settlement-day',
 });
 
 const SPX_CONTRACT = {
@@ -51,6 +52,7 @@ export function createHistoryService({
   setTimer = setTimeout,
   clearTimer = clearTimeout,
   spyVolumeForRange = () => 0,
+  onSettlement = () => {},
   timeoutMs = DEFAULT_TIMEOUT_MS,
   log = () => {},
 } = {}) {
@@ -256,9 +258,54 @@ export function createHistoryService({
     });
   }
 
+  // A single daily bar for one expiry day, whose CLOSE is the settlement basis
+  // (SPX index close for SPXW; stock close for equity guests). Server-initiated
+  // (not client-requested) — the result flows to onSettlement, not the wire.
+  function requestSettlement({ symbol, expiry, contract }) {
+    const exp = String(expiry || '');
+    if (!/^\d{8}$/.test(exp) || !contract) return { status: 'invalid', reqId: null };
+    const closeMs = etCloseEpoch(+exp.slice(0, 4), +exp.slice(4, 6), +exp.slice(6, 8));
+    if (closeMs == null) return { status: 'invalid', reqId: null };
+    const key = `${symbol}|${exp}`;
+    return begin({
+      kind: HISTORY_KIND.SETTLEMENT,
+      key,
+      ownerKey: requestOwnerKey(HISTORY_KIND.SETTLEMENT, key),
+      symbol,
+      expiry: exp,
+      date: exp,
+    }, {
+      contract,
+      end: histEndUtc(closeMs),
+      duration: '1 D',
+      barSize: '1 day',
+      whatToShow: 'TRADES',
+      useRth: 1,
+      formatDate: 2,
+      keepUpToDate: false,
+    });
+  }
+
   function complete(reqId) {
     const rec = take(reqId);
     if (!rec) return false;
+
+    if (rec.kind === HISTORY_KIND.SETTLEMENT) {
+      // Keep only the bar whose ET date is the requested expiry (IBKR answers a
+      // holiday/weekend with the prior session), then take its close.
+      const bar = rec.candles.filter((c) => {
+        const e = etParts(new Date(c.t));
+        return ymd(e.y, e.mo, e.d) === rec.date;
+      }).pop() ?? rec.candles[rec.candles.length - 1] ?? null;
+      const close = bar && Number.isFinite(bar.close) ? bar.close : null;
+      if (close != null && close > 0) {
+        log(`[ibkr] settlement ${rec.key} = ${close}`);
+        try { onSettlement(rec.symbol, rec.expiry, close); } catch (err) { log(`[ibkr] onSettlement failed: ${err?.message ?? err}`); }
+      } else {
+        log(`[ibkr] settlement ${rec.key}: no usable close bar`);
+      }
+      return true;
+    }
 
     if (rec.kind === HISTORY_KIND.TIMEFRAME) {
       tfCache.set(rec.tf, { candles: rec.candles, ts: now() });
@@ -339,6 +386,7 @@ export function createHistoryService({
     requestTimeframe,
     requestOption,
     requestReplay,
+    requestSettlement,
     handleData,
     handleError,
     ownsRequestId: (reqId) => byReqId.has(reqId),

@@ -72,6 +72,7 @@ import { createReverseCoordinator } from './reverse.js';
 import { waitForPositionAuthority } from './position-authority-fence.js';
 import { createRoutingLockStore } from './routing-lock-store.js';
 import { createTradeJournal } from './trade-journal.js';
+import { createSettlementStore } from './settlement-store.js';
 
 // Last-resort backstop: an unexpected throw in one handler must not kill the whole
 // bridge while working orders/brackets are live at IBKR. Log loudly and stay up —
@@ -92,6 +93,7 @@ const KILL_LOCK_FILE = path.join(__dirname, '.kill-lock.json');
 const REVERSE_LOCK_FILE = path.join(__dirname, '.reverse-lock.json');
 const ARMED_STATE_FILE = path.join(__dirname, '.armed-state.json');
 const ARMED_EXIT_STATE_FILE = path.join(__dirname, '.armed-exit-state.json');
+const SETTLEMENTS_FILE = path.join(__dirname, '.settlements.json'); // expiry-day underlying closes for ITM held-to-expiry settlement
 const SHOTS_DIR = path.join(__dirname, '.journal-shots'); // 📸 fill snapshots (client-rendered chart stills)
 
 // HTTPS is opt-in (TLS=1 or explicit TLS_CERT/TLS_KEY) so the default HTTP mode
@@ -464,6 +466,13 @@ const basisCtl = createBasisController({
 basisCtl.load();
 tradeJournal.load();
 
+// Settlement prices (expiry-day underlying closes) for legs held through
+// expiry, so ITM ones realize real intrinsic cash instead of the old $0
+// expired-worthless lie. The pump (settlementPump) fills gaps from IBKR
+// historical closes; the store persists and serves them into the snapshot.
+const settlementStore = createSettlementStore({ settlementsFile: SETTLEMENTS_FILE, log: console });
+settlementStore.load();
+
 // The single owner of the home-market data domain: the SPX/ES/VIX/SPY/SPXW
 // subscription lifecycle, the two candle series, the SPXW chain, the front-month
 // ES contract, its own request-id map, the candle-runaway/feed watchdog, and the
@@ -518,7 +527,7 @@ wss.on('connection', (ws) => {
     else if (msg.type === 'history') handleHistoryRequest(ws, msg);
     else if (msg.type === 'optHistory') handleOptHistoryRequest(ws, msg);
     else if (msg.type === 'replayDay') handleReplayDayRequest(ws, msg);
-    else if (msg.type === 'journal') { if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'journalResult', days: tradeJournal.days() })); }
+    else if (msg.type === 'journal') { if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'journalResult', days: tradeJournal.days(), settlements: settlementStore.toWire() })); }
     else if (msg.type === 'quote') handleQuoteRequest(ws, msg);
     else if (msg.type === 'cancel') orderGateway.cancelOrder(ws, msg);
     else if (msg.type === 'cancelAll') orderGateway.cancelAllOrders(ws, msg);
@@ -732,6 +741,7 @@ function wireHandlers(api) {
     if (api !== ib) return;
     portfolio.onPositionEnd();
     finishPortfolioRecoveryIfReady();
+    settlementPump(); // backfill any missing expiry-day closes once we're up
   });
 
   // Correlated fresh reads used by safety workflows such as staged KILL. These
@@ -3344,8 +3354,41 @@ const historyService = createHistoryService({
   broadcast,
   publish: publishGuestHistory,
   spyVolumeForRange: (t, spanMs) => homeMarket.spyVolumeForRange(t, spanMs),
+  onSettlement: (symbol, expiry, close) => {
+    // A settlement close landed: persist it and, if new, tell every client so
+    // the journal's ITM held-to-expiry legs re-price without a reload.
+    if (settlementStore.setPrice(symbol, expiry, close, 'ibkr')) {
+      broadcast({ type: 'settlementResult', symbol, expiry, price: close, settlements: settlementStore.toWire() });
+    }
+  },
   log: (message) => console.log(message),
 });
+
+// The underlying whose expiry-day close settles a symbol's options: SPX is the
+// index (SPXW is PM-settled on the SPX close); a guest equity settles on its
+// own stock close. Index guests would be IND, but none are held to expiry;
+// default STK/SMART for equities and revisit if an index guest ever settles.
+function settlementUnderlying(symbol) {
+  if (symbol === 'SPX') return { symbol: 'SPX', secType: 'IND', exchange: 'CBOE', currency: 'USD' };
+  return { symbol, secType: 'STK', exchange: 'SMART', currency: 'USD' };
+}
+
+// Fill gaps in the settlement store from IBKR historical closes: one request at
+// a time (IBKR paces historical data hard), only while connected. Idempotent —
+// re-running after a fill or a new day just picks up whatever is still missing.
+let settlementPumpTimer = null;
+function settlementPump() {
+  if (settlementPumpTimer != null) return;             // one in flight
+  if (!ib || !connected) return;                        // needs the broker
+  const pending = settlementStore.pending(tradeJournal.days(), session.expiry);
+  if (!pending.length) return;
+  const { symbol, expiry } = pending[0];
+  const result = historyService.requestSettlement({ symbol, expiry, contract: settlementUnderlying(symbol) });
+  // Space the next attempt out whether this one submitted, deduped, or failed;
+  // onSettlement/store.has() makes the following pass skip whatever resolved.
+  settlementPumpTimer = setTimeout(() => { settlementPumpTimer = null; settlementPump(); },
+    result.status === 'submitted' ? 4_000 : 1_000);
+}
 
 function handleHistoryRequest(_ws, msg) {
   historyService.requestTimeframe(msg.tf);
@@ -3569,7 +3612,11 @@ function snapshotMsg() {
       guestMarket: true,
       guestQuick: true,
       guestRung: true,
+      settlement: true,
     },
+    // Expiry-day underlying closes { 'SYMBOL|EXPIRY': price } so the journal's
+    // ITM held-to-expiry legs realize real intrinsic instead of $0.
+    settlements: settlementStore.toWire(),
     trades: tradeJournal.trades,
     positions: portfolioState.positions,
     orders: workingOrdersList(),
