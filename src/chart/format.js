@@ -39,6 +39,10 @@ const minutesOfDay = (t) => {
   return d.getHours() * 60 + d.getMinutes();
 };
 
+// The two clock times the cockpit is actually flown by: the RTH open and 4:00 PM.
+// They always get a label on an intraday axis, whatever the step works out to.
+const SESSION_ANCHORS = [9 * 60 + 30, 16 * 60];
+
 export function selectTimeAxisLabels(slots, {
   timeframe,
   candleW,
@@ -51,8 +55,14 @@ export function selectTimeAxisLabels(slots, {
   // than on every Nth bar, which produced arbitrary stamps like 09:34 / 09:47.
   // The step is the nice increment nearest the pixel target; a label is emitted
   // on the first bar of each step block, so session gaps can't shift the phase.
-  const timeStep = niceTimeStep(minBars * (timeframe || 1), timeframe || 1);
+  const tfMin = timeframe || 1;
+  const timeStep = niceTimeStep(minBars * tfMin, tfMin);
   const minTimeBars = Math.max(1, Math.round((targetPx / 2) / candleW));
+  // A single-day intraday view doesn't need the date at the left edge — the
+  // whole axis is that day — so its opening label is the clock time (09:30 on
+  // an RTH-only chart). Multi-day views keep date labels at each boundary.
+  const singleDay = timeframe < 60
+    && new Set(slots.filter((c) => c && Number.isFinite(c.t)).map((c) => localDayKey(c.t))).size <= 1;
   let previousBlock = null;
   const labels = [];
   let previousDay = null;
@@ -90,15 +100,26 @@ export function selectTimeAxisLabels(slots, {
       lastLabelIndex = i;
       continue;
     }
-    const block = Math.floor(minutesOfDay(candle.t) / timeStep);
+    const mins = minutesOfDay(candle.t);
+    const block = Math.floor(mins / timeStep);
     const blockBoundary = previousBlock !== null && block !== previousBlock;
     previousBlock = block;
-    if (dayBoundary || firstVisible) {
+    // A bar "is" an anchor when its bucket contains 09:30 or 16:00, so the
+    // label survives timeframes that don't divide the anchor evenly.
+    const anchor = SESSION_ANCHORS.some((a) => mins <= a && a < mins + tfMin);
+    if ((dayBoundary || firstVisible) && !(singleDay && anchor)) {
       labels.push({
         index: i,
         kind: 'date',
         label: new Date(candle.t).toLocaleDateString([], { month: 'short', day: 'numeric' }),
       });
+      lastLabelIndex = i;
+    } else if (anchor) {
+      // Anchors outrank the pixel guard: if a regular label crowds this one,
+      // the regular label yields.
+      const previous = labels[labels.length - 1];
+      if (previous && previous.kind === 'time' && i - previous.index < minTimeBars) labels.pop();
+      labels.push({ index: i, kind: 'time', label: fmtTime(candle.t) });
       lastLabelIndex = i;
     } else if (blockBoundary && i - lastLabelIndex >= minTimeBars) {
       labels.push({ index: i, kind: 'time', label: fmtTime(candle.t) });
@@ -120,7 +141,9 @@ export function priceDecimals(step) {
   return step >= 1 ? 1 : 2;
 }
 // Nice time-axis increments in minutes, so labels land on round clock times.
-export const TIME_STEPS = [1, 2, 5, 10, 15, 20, 30, 60, 120, 240, 360, 720, 1440];
+// 20 is deliberately absent: 09:30 isn't a multiple of it, so a 20-minute step
+// would run the whole axis off the session grid (09:40, 10:00, 10:20…).
+export const TIME_STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 240, 360, 720, 1440];
 export function niceTimeStep(rawMin, tfMin) {
   for (const s of TIME_STEPS) if (s >= rawMin && s >= tfMin) return s;
   return TIME_STEPS[TIME_STEPS.length - 1];

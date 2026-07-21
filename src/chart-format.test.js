@@ -60,25 +60,46 @@ test('zoomed-out 4h day numbers thin by pixel distance instead of stacking', () 
 
 test('time-axis density adapts to candle pixels while day boundaries always win', () => {
   const slots = Array.from({ length: 10 }, (_, index) => ({ t: at(16, 9, 30 + index * 5) }));
-  // 20px candles ≈ a label every 80px → a 20-minute step, so the clock labels
-  // land on :40 and :00 rather than on every 4th bar (09:50, 10:10).
+  // 20px candles ≈ a label every 80px → a 30-minute step, on the session grid.
   assert.deepEqual(
     selectTimeAxisLabels(slots, { timeframe: 5, candleW: 20, targetPx: 80 }),
     [
-      { index: 0, kind: 'date', label: new Date(at(16, 9, 30)).toLocaleDateString([], { month: 'short', day: 'numeric' }) },
-      { index: 2, kind: 'time', label: '09:40' },
+      { index: 0, kind: 'time', label: '09:30' },
       { index: 6, kind: 'time', label: '10:00' },
     ],
   );
-  // Half the candle width → the step widens to the hour.
+  // Half the candle width → the same step, now near the pixel floor.
   assert.deepEqual(
-    selectTimeAxisLabels(slots, { timeframe: 5, candleW: 10, targetPx: 100 })
-      .map(({ index, kind, label }) => ({ index, kind, label })),
+    selectTimeAxisLabels(slots, { timeframe: 5, candleW: 10, targetPx: 100 }),
     [
-      { index: 0, kind: 'date', label: new Date(at(16, 9, 30)).toLocaleDateString([], { month: 'short', day: 'numeric' }) },
+      { index: 0, kind: 'time', label: '09:30' },
       { index: 6, kind: 'time', label: '10:00' },
     ],
   );
+});
+
+test('multi-day intraday views keep the date at each day boundary', () => {
+  const slots = [
+    ...Array.from({ length: 4 }, (_, i) => ({ t: at(16, 15, i * 15) })),
+    ...Array.from({ length: 4 }, (_, i) => ({ t: at(17, 9, 30 + i * 15) })),
+  ];
+  const labels = selectTimeAxisLabels(slots, { timeframe: 15, candleW: 30, targetPx: 100 });
+  assert.equal(labels[0].kind, 'date');
+  assert.equal(labels.find((l) => l.index === 4)?.kind, 'date');
+});
+
+test('5m and 15m axes always label the 09:30 open and the 16:00 close', () => {
+  for (const timeframe of [5, 15]) {
+    // A full RTH session, plus the zoom levels that thin hardest.
+    const bars = (16 * 60 - (9 * 60 + 30)) / timeframe + 1;
+    const slots = Array.from({ length: bars }, (_, i) => ({ t: at(16, 9, 30 + i * timeframe) }));
+    for (const candleW of [4, 8, 16, 30]) {
+      const labels = selectTimeAxisLabels(slots, { timeframe, candleW, targetPx: 100 })
+        .map((l) => l.label);
+      assert.ok(labels.includes('09:30'), `${timeframe}m @${candleW}px lost 09:30 (${labels})`);
+      assert.ok(labels.includes('16:00'), `${timeframe}m @${candleW}px lost 16:00 (${labels})`);
+    }
+  }
 });
 
 test('1-minute axis labels land on round clock times, never arbitrary ones', () => {
@@ -86,7 +107,7 @@ test('1-minute axis labels land on round clock times, never arbitrary ones', () 
   const labels = selectTimeAxisLabels(slots, { timeframe: 1, candleW: 7, targetPx: 100 });
   assert.deepEqual(
     labels.filter((l) => l.kind === 'time').map((l) => l.label),
-    ['09:45', '10:00', '10:15', '10:30', '10:45', '11:00', '11:15'],
+    ['09:30', '09:45', '10:00', '10:15', '10:30', '10:45', '11:00', '11:15'],
   );
 });
 
