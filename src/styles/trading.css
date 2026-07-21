@@ -308,6 +308,12 @@
   cursor: pointer;
 }
 .liveness-alarm-btn:hover { background: rgba(255, 255, 255, 0.24); }
+.liveness-alarm-restart {
+  background: #fff;
+  color: #111;
+  border-color: #fff;
+}
+.liveness-alarm-restart:hover { background: rgba(255, 255, 255, 0.85); }
 .liveness-alarm-recon {
   font-size: 10px;
   font-style: italic;

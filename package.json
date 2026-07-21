@@ -8,6 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "server": "node server/ibkr-server.js",
+    "helper": "node server/bridge-helper.js",
     "start": "concurrently -k -n SERVER,WEB -c cyan,magenta \"npm:server\" \"npm:dev\"",
     "serve": "vite build && node server/ibkr-server.js",
     "serve:https": "vite build && cross-env TLS=1 IBKR_MD_TYPE=1 node server/ibkr-server.js",

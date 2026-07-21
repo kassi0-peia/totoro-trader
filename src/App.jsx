@@ -1237,6 +1237,24 @@ export default function App() {
           </div>
           <div className="liveness-alarm-fix">
             <span className="liveness-alarm-hint">Restart the bridge:</span>
+            <button
+              type="button"
+              className="liveness-alarm-btn liveness-alarm-restart"
+              onClick={async () => {
+                // The helper is a separate localhost service (server/bridge-helper.js)
+                // that survives the bridge being down. If it isn't running — or the
+                // page is loaded from the phone over the LAN, where 127.0.0.1 is the
+                // phone — the fetch fails and we fall back to copying the command.
+                try {
+                  const r = await fetch('http://127.0.0.1:8788/restart-bridge', { method: 'POST' });
+                  if (r.ok) showToast('Restarting bridge…', 'ok');
+                  else showToast('Helper couldn’t restart — run the command', 'err');
+                } catch {
+                  try { navigator.clipboard?.writeText('systemctl --user restart totoro-bridge'); } catch { /* clipboard optional */ }
+                  showToast('Helper not running — command copied instead', 'err');
+                }
+              }}
+            >Restart now</button>
             <code className="liveness-alarm-cmd">systemctl --user restart totoro-bridge</code>
             <button
               type="button"
