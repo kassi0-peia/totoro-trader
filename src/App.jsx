@@ -1504,7 +1504,7 @@ export default function App() {
             )}
             <button
               className={`trades-pull${tradesPeek ? ' open' : ''}`}
-              style={{ left: tradesPeek ? 'min(340px, 86%)' : 0, borderColor: theme.accent, color: theme.accent }}
+              style={{ borderColor: theme.accent, color: theme.accent }}
               onClick={() => (tradesPeek ? closeTrades() : openTrades())}
               onMouseEnter={armHoverOpen}
               onMouseLeave={disarmHoverOpen}

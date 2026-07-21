@@ -10,6 +10,12 @@ import { drawCandles } from './chart/draw/candles.js';
 import { drawPriceLine } from './chart/draw/priceline.js';
 import { drawAxisChain } from './chart/draw/axisChain.js';
 import { drawPositions } from './chart/draw/positions.js';
+
+// 📸 Fill-snapshot encoding. Line art, not photography — the cap only bites on
+// very wide or HiDPI canvases, and the quality is set so 1px gridlines and 9px
+// axis text survive the encoder.
+const SHOT_MAX_W = 2400;
+const SHOT_QUALITY = 0.94;
 import {
   DEFAULT_VISIBLE,
   MAX_VISIBLE,
@@ -757,20 +763,30 @@ export default function Chart({
     apiRef.current = {
       snapToNow,
       hover: !armPlacement && hover && hover.future ? { strike: hover.strike, type: hover.type } : null,
-      // 📸 one still frame of the tape, downscaled for the journal (fill
-      // snapshots). webp where the browser can encode it; toDataURL silently
-      // falls back to png elsewhere — the bridge accepts both.
+      // 📸 one still frame of the tape for the journal (fill snapshots). webp
+      // where the browser can encode it; toDataURL silently falls back to png
+      // elsewhere — the bridge accepts both.
+      //
+      // This is line art: 1px gridlines and 9–11px monospace. It used to be
+      // capped at 1200px and encoded at q0.8, which downscaled the canvas by a
+      // non-integer factor and then lossily compressed exactly the thin strokes
+      // and small glyphs you open the snapshot to read — hence a soft, muddy
+      // still. Native resolution is kept up to a cap that only very large or
+      // HiDPI canvases reach, and quality is high enough that text stays sharp.
       frame: () => {
         const canvas = canvasRef.current;
         if (!canvas || !canvas.width || !canvas.height) return null;
         try {
-          const scale = Math.min(1, 1200 / canvas.width);
-          if (scale >= 1) return canvas.toDataURL('image/webp', 0.8);
+          const scale = Math.min(1, SHOT_MAX_W / canvas.width);
+          if (scale >= 1) return canvas.toDataURL('image/webp', SHOT_QUALITY);
           const off = document.createElement('canvas');
           off.width = Math.round(canvas.width * scale);
           off.height = Math.round(canvas.height * scale);
-          off.getContext('2d').drawImage(canvas, 0, 0, off.width, off.height);
-          return off.toDataURL('image/webp', 0.8);
+          const octx = off.getContext('2d');
+          octx.imageSmoothingEnabled = true;
+          octx.imageSmoothingQuality = 'high';
+          octx.drawImage(canvas, 0, 0, off.width, off.height);
+          return off.toDataURL('image/webp', SHOT_QUALITY);
         } catch { return null; }
       }
     };

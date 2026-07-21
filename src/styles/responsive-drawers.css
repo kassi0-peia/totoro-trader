@@ -41,8 +41,15 @@
 
 .chart-area { position: relative; }
 
-/* Today's-trades slide-in drawer (peek over the chart from the right edge) */
+/* Today's-trades slide-in drawer (peek over the chart from the right edge).
+   ONE width, used by both the drawer and the pull tab that must sit on its
+   edge. These were two hardcoded numbers (380px / 340px) that drifted apart
+   when the drawer was widened, leaving the pull 40px inside the drawer, on
+   top of the first row's camera button. */
+.trades-peek-layer, .trades-pull { --trades-drawer-w: min(380px, 88%); }
+
 .trades-pull {
+  left: 0;
   position: absolute;
   top: 50%;
   transform: translateY(-50%);
@@ -65,7 +72,7 @@
   transition: left 280ms cubic-bezier(0.4, 0, 0.2, 1), opacity 140ms;
 }
 .trades-pull:hover { opacity: 1; }
-.trades-pull.open { z-index: 26; }
+.trades-pull.open { z-index: 26; left: var(--trades-drawer-w); }
 
 /* Invisible left-edge strip — hover 2s (or click) to peek the drawer open. */
 .trades-hotzone {
@@ -103,7 +110,7 @@
   top: 0;
   left: 0;
   bottom: 0;
-  width: min(380px, 88%);
+  width: var(--trades-drawer-w);
   background: var(--c-surface);
   border-right: 1px solid var(--c-border);
   box-shadow: 10px 0 28px rgba(0, 0, 0, 0.38);
