@@ -96,6 +96,60 @@ test('unclosed leg on a PAST expiry settles at $0 (expired-worthless convention)
   assert.equal(s2.openLegs, 1);
 });
 
+test('held-past-expiry leg cash-settles at intrinsic when a settlement price is known', () => {
+  // Long 7560 put bought at $12.60, held to expiry; SPX settled 7548.10 → ITM
+  // intrinsic (7560 − 7548.10) = 11.90. P/L = (11.90 − 12.60) × 100 = −$70,
+  // not the −$1260 the $0 convention would have booked.
+  const fills = [row('BUY', 7560, 'P', 12.6, 1, { expiry: '20260715' })];
+  const settlements = { 'SPX|20260715': 7548.1 };
+  const s = dayStats(fills, '20260716', settlements);
+  assert.equal(Math.round(s.pl), -70);
+  assert.equal(s.realizedLegs, 1);
+  assert.equal(s.openLegs, 0);
+  // A deep-ITM call turns the same held leg into a real gain.
+  const calls = [row('BUY', 7500, 'C', 4.6, 2, { expiry: '20260715' })];
+  const sc = dayStats(calls, '20260716', { 'SPX|20260715': 7548.1 });
+  assert.equal(Math.round(sc.pl), Math.round((48.1 - 4.6) * 100 * 2)); // +$8700
+  assert.equal(sc.wins, 1);
+});
+
+test('OTM held-past-expiry leg still settles worthless (intrinsic 0), same as the $0 path', () => {
+  const fills = [row('BUY', 7600, 'C', 0.5, 1, { expiry: '20260715' })];
+  const settled = { 'SPX|20260715': 7548.1 }; // below strike → worthless
+  assert.equal(dayStats(fills, '20260716', settled).pl, -50);
+  assert.equal(dayStats(fills, '20260716', null).pl, -50); // matches $0 fallback
+});
+
+test('short held-past-expiry leg pays intrinsic on assignment', () => {
+  // Sold 7500 call for $4.60, assigned at 7548.10 settlement → pay 48.10.
+  // P/L = (4.60 − 48.10) × 100 = −$4350.
+  const fills = [row('SELL', 7500, 'C', 4.6, 1, { expiry: '20260715' })];
+  const s = dayStats(fills, '20260716', { 'SPX|20260715': 7548.1 });
+  assert.equal(Math.round(s.pl), -4350);
+  // Unknown settlement → the short keeps its full premium (worthless expiry).
+  assert.equal(Math.round(dayStats(fills, '20260716', null).pl), 460);
+});
+
+test('settlement keys are per underlying+expiry; a guest leg uses its own close', () => {
+  const fills = [
+    row('BUY', 7500, 'C', 4.0, 1, { expiry: '20260717' }),                      // SPX
+    row('BUY', 95, 'P', 1.0, 1, { expiry: '20260717', symbol: 'MSTR' }),        // guest MSTR
+  ];
+  const settlements = { 'SPX|20260717': 7510, 'MSTR|20260717': 90 };
+  const s = dayStats(fills, '20260718', settlements);
+  // SPX call intrinsic 10 → (10 − 4) × 100 = +600; MSTR put intrinsic 5 → (5 − 1) × 100 = +400
+  assert.equal(s.pl, 600 + 400);
+  assert.equal(s.wins, 2);
+});
+
+test('journalStats threads settlements into the equity curve', () => {
+  const days = { '20260715': [row('BUY', 7560, 'P', 12.6, 1, { expiry: '20260715' })] };
+  const withS = journalStats(days, '20260716', { 'SPX|20260715': 7548.1 });
+  const without = journalStats(days, '20260716');
+  assert.equal(Math.round(withS.total), -70);
+  assert.equal(without.total, -1260); // $0 fallback still available
+});
+
 test('old rows without symbol read as SPXW; a guest row at the same strike is a separate leg', () => {
   const fills = [
     row('BUY', 100, 'C', 2.0, 1, { expiry: '20260709' }),                       // no symbol → SPX

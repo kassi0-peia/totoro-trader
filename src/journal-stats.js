@@ -4,12 +4,17 @@
 // later round trip through the same strike is a new episode, so a morning win
 // and afternoon loss cannot collapse into one fake scratch. Scale-ins, partial
 // exits, shorts, and fills that reverse through flat are quantity-aware. P/L is
-// still (sell premiums − buy premiums) × 100. Exact for episodes closed intraday; an episode
-// held through a PAST expiry counts at $0 settlement (right for
-// expired-worthless 0DTE; ITM cash settlement isn't modeled). What this file
-// adds over the old modal math: a leg that is still open on the CURRENT trade
-// date (`openDay`) is EXCLUDED from realized P/L instead of being marked as a
-// full loss while it's still working.
+// still (sell premiums − buy premiums) × 100. Exact for episodes closed intraday. An episode
+// held through a PAST expiry cash-settles at intrinsic when the underlying's
+// settlement price is known (the `settlements` map — 4:00 PM close for PM-settled
+// SPXW and equity guests), and falls back to $0 (expired-worthless) when it is
+// not. What this file adds over the old modal math: a leg that is still open on
+// the CURRENT trade date (`openDay`) is EXCLUDED from realized P/L instead of
+// being marked as a full loss while it's still working.
+//
+// `settlements`: `{ 'SYMBOL|EXPIRY': price }`, SYMBOL matching symOf (SPX for
+// SPXW). The bridge fills it from IBKR historical closes; absent → $0 fallback,
+// preserving the old behavior exactly.
 //
 // Row shape (bridge blotter/journal): { id, ts, action:'BUY'|'SELL', strike,
 // right:'C'|'P', expiry:'YYYYMMDD', qty, price, symbol? } — `symbol` absent
@@ -72,9 +77,28 @@ function episodePl(episode) {
     : episode.entryCash - episode.exitCash;
 }
 
+// Cash-settlement value of an episode held through its expiry, given the
+// underlying's settlement price S (the 4:00 PM close for PM-settled SPXW and
+// equity guests). Intrinsic only — a call pays max(0, S−K), a put max(0, K−S),
+// times 100 times the held size. This is booked as the episode's closing cash
+// for BOTH directions: a long RECEIVES it (like a closing sell), a short PAYS
+// it on assignment (like a closing buy) — episodePl already handles the sign,
+// so exitCash is the right bucket either way. Unknown S → null → the caller
+// keeps the $0 expired-worthless fallback.
+function settlementExitCash(episode, settlements) {
+  const S = settlements ? settlements[`${episode.symbol}|${episode.expiry}`] : undefined;
+  if (!Number.isFinite(S)) return null;
+  const intrinsic = episode.right === 'C'
+    ? Math.max(0, S - episode.strike)
+    : Math.max(0, episode.strike - S);
+  return { exitCash: intrinsic * 100 * Math.abs(episode.netQty), settlePrice: S };
+}
+
 // Project each exact contract independently. One fill may flatten an episode
-// and use its remaining quantity to open the opposite direction.
-function episodesOf(fills, openDay) {
+// and use its remaining quantity to open the opposite direction. `settlements`
+// maps `${symbol}|${expiry}` → underlying settlement price; a held-past-expiry
+// episode settles at intrinsic when its price is known, else at $0.
+function episodesOf(fills, openDay, settlements = null) {
   const active = new Map();
   const realized = [];
 
@@ -112,8 +136,11 @@ function episodesOf(fills, openDay) {
   const open = [];
   for (const episode of active.values()) {
     const settled = openDay != null && episode.expiry < String(openDay);
-    if (settled) realized.push({ ...episode, pl: episodePl(episode), settled: true });
-    else open.push(episode);
+    if (settled) {
+      const cash = settlementExitCash(episode, settlements);
+      if (cash) episode.exitCash += cash.exitCash;
+      realized.push({ ...episode, pl: episodePl(episode), settled: true, settlePrice: cash?.settlePrice ?? null });
+    } else open.push(episode);
   }
   return { realized, open };
 }
@@ -140,9 +167,9 @@ export function legsOf(fills) {
 // An unclosed leg with expiry < openDay has settled; its remainder counts at
 // $0 (the journal's long-standing expired-worthless convention). When openDay
 // is null every unclosed leg is treated as open (conservative).
-export function dayStats(fills, openDay = null) {
+export function dayStats(fills, openDay = null, settlements = null) {
   const out = { pl: 0, fills: (fills || []).length, legs: 0, realizedLegs: 0, openLegs: 0, wins: 0, losses: 0 };
-  const episodes = episodesOf(fills, openDay);
+  const episodes = episodesOf(fills, openDay, settlements);
   out.legs = episodes.realized.length + episodes.open.length;
   out.realizedLegs = episodes.realized.length;
   out.openLegs = episodes.open.length;
@@ -159,7 +186,7 @@ export function dayStats(fills, openDay = null) {
 // plus the summary numbers the drawer's stats row shows. Days with no fills
 // are skipped. `days` is the bridge's journalResult shape:
 // { 'YYYYMMDD': [fill, ...], ... }.
-export function journalStats(days, openDay = null) {
+export function journalStats(days, openDay = null, settlements = null) {
   const dates = Object.keys(days || {}).filter((d) => (days[d] || []).length > 0).sort();
   const rows = [];
   let equity = 0;
@@ -169,7 +196,7 @@ export function journalStats(days, openDay = null) {
   let lossSum = 0;
   const winsLosses = { winCount: 0, lossCount: 0 };
   for (const date of dates) {
-    const s = dayStats(days[date], openDay);
+    const s = dayStats(days[date], openDay, settlements);
     equity += s.pl;
     rows.push({ date, ...s, equity });
     wins += s.wins;
@@ -177,7 +204,7 @@ export function journalStats(days, openDay = null) {
   }
   // avg win / avg loss are per LEG, so re-walk legs for the sums.
   for (const date of dates) {
-    for (const { pl } of episodesOf(days[date], openDay).realized) {
+    for (const { pl } of episodesOf(days[date], openDay, settlements).realized) {
       if (pl > 0) { winSum += pl; winsLosses.winCount++; }
       else if (pl < 0) { lossSum += pl; winsLosses.lossCount++; }
     }
