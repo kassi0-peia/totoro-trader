@@ -329,6 +329,17 @@
   border-color: var(--c-accent);
   background: var(--c-accentSoft, var(--c-surfaceAlt));
 }
+/* The camera/note sit at the drawer's right edge, and .th-list clips overflow,
+   so a centered tooltip spills past the edge and gets cut. Anchor it to the
+   button's right so it opens leftward (inward), staying above and in-bounds —
+   same edge-anchor trick the chart's screen-edge controls use. */
+.th-shot-btn[data-tip]::after, .th-note-btn[data-tip]::after {
+  left: auto; right: -1px; transform: translateX(0) translateY(3px);
+}
+.th-shot-btn[data-tip]:hover::after, .th-note-btn[data-tip]:hover::after,
+.th-shot-btn[data-tip]:focus-visible::after, .th-note-btn[data-tip]:focus-visible::after {
+  transform: translateX(0) translateY(0);
+}
 .th-shot {
   display: block;
   width: calc(100% - 28px);
