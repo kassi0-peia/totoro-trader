@@ -1328,13 +1328,6 @@ export default function App() {
             vix={feed.vix}
             regime={regime}
             theme={theme}
-            replayOn={replay != null || replayBarOpen}
-            replayDisabled={!replayGate.allowed}
-            replayTip={replayGate.reason}
-            // Replay is SPX-only (disabled in guest mode). VIX stays (global).
-            // During SPX cash hours it disappears entirely; overnight account
-            // risk leaves it visible-but-disabled with an exact explanation.
-            onReplay={activeSymbol === 'SPX' && !replayGate.hidden ? toggleReplaySafe : null}
           />
           {/* One control line (the owner 2026-07-09): acct · 🚏 · ⚡ · 🔍, right-aligned
               under the ATM strip. The acct cluster moved up from its old float
@@ -1580,6 +1573,13 @@ export default function App() {
                 theme={theme}
                 onCloseAll={closeAllPositions}
                 canCloseAll={orderSurfaceExecutionEnabled && positionsLive.some((p) => p.status === 'open')}
+                // Replay moved out of the top strip to here (the owner 2026-07-21):
+                // SPX-only, desktop-only, gated. Cash hours hide it entirely;
+                // overnight account risk leaves it visible-but-disabled with the reason.
+                replayOn={replay != null || replayBarOpen}
+                replayDisabled={!replayGate.allowed}
+                replayTip={replayGate.reason}
+                onReplay={activeSymbol === 'SPX' && !replayGate.hidden ? toggleReplaySafe : null}
               />
               <Positions
                 positions={inspectablePositions}
