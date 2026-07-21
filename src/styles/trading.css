@@ -243,6 +243,77 @@
   cursor: pointer;
 }
 
+/* Liveness alarm — the loud backstop for a dead bridge / frozen feed. Two rows:
+   the failure + exposure, then the restart command with copy/silence. 'down'
+   gets the hard alarm red (like the kill arm); 'frozen' a warning amber. When
+   silenced the pulse stops but the banner stays until recovery. */
+.liveness-alarm {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: #fff;
+  letter-spacing: 0.06em;
+  animation: kill-pulse 1s ease-in-out infinite;
+}
+.liveness-down { background: #d92b39; }
+.liveness-frozen { background: #b5731f; }
+.liveness-alarm.silenced { animation: none; }
+.liveness-alarm-line {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.liveness-alarm-msg { font-size: 12px; font-weight: 700; }
+.liveness-alarm-exposure {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  opacity: 0.9;
+  padding: 1px 7px;
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.28);
+}
+.liveness-alarm-fix {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  flex-wrap: wrap;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+.liveness-alarm-hint { font-size: 11px; opacity: 0.9; }
+.liveness-alarm-cmd {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.35);
+  color: #fff;
+  user-select: all;
+}
+.liveness-alarm-btn {
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  font: inherit;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 2px 9px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.liveness-alarm-btn:hover { background: rgba(255, 255, 255, 0.24); }
+.liveness-alarm-recon {
+  font-size: 10px;
+  font-style: italic;
+  opacity: 0.72;
+}
+
 .acct-block {
   display: none;            /* desktop: feed status lives in the title block */
   flex-direction: column;

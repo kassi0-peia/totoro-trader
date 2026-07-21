@@ -33,6 +33,7 @@ const MARKS = [
   ['±EM dashed pair', 'expected move priced by the ATM straddle'],
   ['↗ TREND / ⇄ CHOP', 'regime meter (hidden when unsure)'],
   ['dimmed price', 'no ticks for 5s — feed may be stalled'],
+  ['⚠ red/amber alarm banner', 'bridge died / feed froze — klaxon + restart command'],
   ['dimmed candles + ES', 'overnight ES proxy on an SPX scale'],
   ['• tab in the control line', 'a symbol holding an open position'],
 ];

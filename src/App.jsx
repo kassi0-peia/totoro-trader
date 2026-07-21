@@ -68,6 +68,7 @@ import {
 } from './app/positionQuotePolicy.js';
 import { createGreeksResolvers } from './app/markResolution.js';
 import usePinnedCards from './app/usePinnedCards.js';
+import useLivenessAlarm from './app/useLivenessAlarm.js';
 import useTradesDrawer from './app/useTradesDrawer.js';
 import useBusStops from './app/useBusStops.js';
 import useGuestCockpit from './app/useGuestCockpit.js';
@@ -497,6 +498,17 @@ export default function App() {
     : 0;
   const priceStale = priceStaleMs > PRICE_STALE_MS;
   const priceStaleSecs = Math.round(priceStaleMs / 1000);
+
+  // Liveness alarm: the loud backstop when the bridge dies or the feed freezes
+  // (the heartbeat above only dims the price). Shares the same tick clock.
+  const livenessAlarm = useLivenessAlarm({
+    live: feed.live,
+    delayed: feed.delayed,
+    replayActive,
+    rth: feed.rth,
+    tickTs: activeTickTs,
+    now,
+  });
 
   fillUnderlyingRef.current = new Map([
     ['SPX', { price: feed.price, ts: feed.tickTs }],
@@ -1199,6 +1211,48 @@ export default function App() {
               aria-label="Dismiss REVERSE result"
             >×</button>
           )}
+        </div>
+      )}
+
+      {livenessAlarm && (
+        <div
+          className={`safety-banner liveness-alarm liveness-${livenessAlarm.level}${livenessAlarm.silenced ? ' silenced' : ''}`}
+          role="alert"
+        >
+          <div className="liveness-alarm-line">
+            <span className="liveness-alarm-msg">⚠ {livenessAlarm.reason}</span>
+            {(() => {
+              const open = Array.isArray(positions) ? positions.filter((p) => p?.status === 'open').length : 0;
+              const working = Array.isArray(feed.orders) ? feed.orders.length : 0;
+              if (!open && !working) return null;
+              return (
+                <span className="liveness-alarm-exposure">
+                  {open ? `${open} open position${open > 1 ? 's' : ''}` : ''}
+                  {open && working ? ' · ' : ''}
+                  {working ? `${working} working order${working > 1 ? 's' : ''}` : ''}
+                  {' unmanaged'}
+                </span>
+              );
+            })()}
+          </div>
+          <div className="liveness-alarm-fix">
+            <span className="liveness-alarm-hint">Restart the bridge:</span>
+            <code className="liveness-alarm-cmd">systemctl --user restart totoro-bridge</code>
+            <button
+              type="button"
+              className="liveness-alarm-btn"
+              onClick={() => { try { navigator.clipboard?.writeText('systemctl --user restart totoro-bridge'); showToast('Restart command copied', 'ok'); } catch { /* clipboard optional */ } }}
+            >Copy</button>
+            {!livenessAlarm.silenced && (
+              <button
+                type="button"
+                className="liveness-alarm-btn liveness-alarm-silence"
+                onClick={livenessAlarm.silence}
+                aria-label="Silence the liveness alarm sound"
+              >Silence</button>
+            )}
+            <span className="liveness-alarm-recon">auto-reconnecting…</span>
+          </div>
         </div>
       )}
 

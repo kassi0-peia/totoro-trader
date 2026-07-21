@@ -46,3 +46,28 @@ export function chimeAlert() {
     o.stop(ctx.currentTime + 0.22);
   });
 }
+
+// Liveness klaxon — deliberately UNLIKE the soft money chimes. A two-note
+// falling minor third on a harsher timbre, louder, meant to cut through: the
+// bridge (which holds real positions) has died or the feed has frozen. Played
+// on a repeat by the liveness alarm until it recovers or the owner silences it.
+export function alarmLiveness() {
+  withCtx((ctx) => {
+    const t = ctx.currentTime;
+    const g = ctx.createGain();
+    g.connect(ctx.destination);
+    // Two urgent beeps, a descending minor third (G5 → E5), triangle for bite.
+    [[784, 0.0], [659.25, 0.22]].forEach(([hz, at]) => {
+      const o = ctx.createOscillator();
+      o.type = 'triangle';
+      o.frequency.setValueAtTime(hz, t + at);
+      o.connect(g);
+      o.start(t + at);
+      o.stop(t + at + 0.19);
+    });
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.16, t + 0.01);
+    g.gain.setValueAtTime(0.16, t + 0.2);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.42);
+  });
+}
